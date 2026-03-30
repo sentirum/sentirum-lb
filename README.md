@@ -4,6 +4,8 @@ High-performance Rust load balancer inspired by [Fabio](https://github.com/fabio
 
 `sentirum-lb` watches Consul and/or a static routes file, builds an in-memory route table, and proxies HTTP traffic to matching upstreams with low-lock hot-path lookups.
 
+Default runtime behavior is now **Consul-first**: you can start without a config file and rely on built-in defaults plus CLI overrides.
+
 ## Features
 
 - Fabio-style route definitions
@@ -38,7 +40,7 @@ cargo build --release
 ### Run with static routes
 
 ```bash
-cargo run -- --config config.toml --routes test_routes.txt
+cargo run -- --routes test_routes.txt
 ```
 
 ### Run with CLI overrides
@@ -54,7 +56,8 @@ Example `config.toml`:
 ```toml
 [server]
 listen = ":9999"
-admin_listen = ":9998"
+admin_listen = "127.0.0.1:9998"
+admin_token = "change-me"
 workers = 0
 
 [consul]
@@ -109,7 +112,9 @@ route add <service> <src> <dst> opts "strip=/api prepend=/v2 tlsskipverify=true"
 route del <service>
 route del <service> <src>
 route del <service> tags "v1"
+route del tags "v1"
 route weight <service> <src> weight <w>
+route weight <src> weight <w> tags "v1"
 ```
 
 Example:
@@ -141,8 +146,15 @@ Service discovery expects Fabio-like tags, for example:
 
 ```text
 urlprefix-/api
+urlprefix-example.com/api
 urlprefix-/ proto=https strip=/api prepend=/v1
 ```
+
+Fabio-compatible semantics:
+
+- `urlprefix-/api` => catch-all path route
+- `urlprefix-example.com/api` => host-specific path route
+- `urlprefix-example.com/` => host-specific catch-all route
 
 ## HTTP and admin endpoints
 
@@ -158,7 +170,14 @@ urlprefix-/ proto=https strip=/api prepend=/v1
 - `GET /admin/metrics`
 - `GET /admin/config`
 
-Default admin bind address: `:9998`
+Default admin bind address: `127.0.0.1:9998`
+
+If `server.admin_token` is set, requests must include either:
+
+- `Authorization: Bearer <token>`
+- `X-Admin-Token: <token>`
+
+For non-loopback admin binds, `server.admin_token` is required.
 
 ## Metrics
 
@@ -179,7 +198,8 @@ Tracked metrics include:
 
 ## Security notes
 
-- Upstream targets pointing at loopback, RFC1918, link-local, and similar reserved addresses are blocked by default
+- Loopback, link-local, unspecified, and localhost-style upstreams are blocked by default
+- Consul-discovered targets are allowed to use RFC1918/private addresses by default to support Nomad/Consul internal networking
 - Hostnames like `localhost` and `.local` are blocked
 - You can bypass SSRF checks per target with `ssrfskipverify=true` if your environment requires it
 - Upstream TLS verification can be disabled per target with `tlsskipverify=true`

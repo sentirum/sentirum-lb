@@ -17,16 +17,19 @@ pub struct Config {
 pub struct ServerConfig {
     /// Proxy listen address (e.g. ":9999")
     pub listen: String,
-    /// Admin API listen address (e.g. ":9998")
+    /// Admin API listen address (e.g. "127.0.0.1:9998")
     #[serde(default = "default_admin_listen")]
     pub admin_listen: String,
+    /// Optional admin bearer/token auth secret
+    #[serde(default)]
+    pub admin_token: String,
     /// Number of worker threads (0 = auto)
     #[serde(default)]
     pub workers: usize,
 }
 
 fn default_admin_listen() -> String {
-    ":9998".to_string()
+    "127.0.0.1:9998".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]

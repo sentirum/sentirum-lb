@@ -50,6 +50,8 @@ pub struct Metrics {
     pub latency_bucket_1s: AtomicU64,
     pub latency_bucket_5s: AtomicU64,
     pub latency_bucket_inf: AtomicU64,
+    /// Sum of request latencies in microseconds
+    pub latency_sum_us: AtomicU64,
 
     // --- Status code counters ---
     pub status_2xx: AtomicU64,
@@ -79,6 +81,7 @@ impl Metrics {
             latency_bucket_1s: AtomicU64::new(0),
             latency_bucket_5s: AtomicU64::new(0),
             latency_bucket_inf: AtomicU64::new(0),
+            latency_sum_us: AtomicU64::new(0),
             status_2xx: AtomicU64::new(0),
             status_3xx: AtomicU64::new(0),
             status_4xx: AtomicU64::new(0),
@@ -89,6 +92,8 @@ impl Metrics {
     /// Record a completed request
     pub fn record_request(&self, status: u16, latency_us: u64) {
         self.requests_total.fetch_add(1, Ordering::Relaxed);
+
+        self.latency_sum_us.fetch_add(latency_us, Ordering::Relaxed);
 
         // Record latency bucket
         let latency_ms = latency_us / 1000;
@@ -153,16 +158,17 @@ impl Metrics {
         let status_5xx = self.status_5xx.load(Ordering::Relaxed);
 
         let b_1ms = self.latency_bucket_1ms.load(Ordering::Relaxed);
-        let b_5ms = self.latency_bucket_5ms.load(Ordering::Relaxed);
-        let b_10ms = self.latency_bucket_10ms.load(Ordering::Relaxed);
-        let b_25ms = self.latency_bucket_25ms.load(Ordering::Relaxed);
-        let b_50ms = self.latency_bucket_50ms.load(Ordering::Relaxed);
-        let b_100ms = self.latency_bucket_100ms.load(Ordering::Relaxed);
-        let b_250ms = self.latency_bucket_250ms.load(Ordering::Relaxed);
-        let b_500ms = self.latency_bucket_500ms.load(Ordering::Relaxed);
-        let b_1s = self.latency_bucket_1s.load(Ordering::Relaxed);
-        let b_5s = self.latency_bucket_5s.load(Ordering::Relaxed);
-        let b_inf = self.latency_bucket_inf.load(Ordering::Relaxed);
+        let b_5ms = b_1ms + self.latency_bucket_5ms.load(Ordering::Relaxed);
+        let b_10ms = b_5ms + self.latency_bucket_10ms.load(Ordering::Relaxed);
+        let b_25ms = b_10ms + self.latency_bucket_25ms.load(Ordering::Relaxed);
+        let b_50ms = b_25ms + self.latency_bucket_50ms.load(Ordering::Relaxed);
+        let b_100ms = b_50ms + self.latency_bucket_100ms.load(Ordering::Relaxed);
+        let b_250ms = b_100ms + self.latency_bucket_250ms.load(Ordering::Relaxed);
+        let b_500ms = b_250ms + self.latency_bucket_500ms.load(Ordering::Relaxed);
+        let b_1s = b_500ms + self.latency_bucket_1s.load(Ordering::Relaxed);
+        let b_5s = b_1s + self.latency_bucket_5s.load(Ordering::Relaxed);
+        let b_inf = b_5s + self.latency_bucket_inf.load(Ordering::Relaxed);
+        let sum_seconds = self.latency_sum_us.load(Ordering::Relaxed) as f64 / 1_000_000.0;
 
         format!(
             r#"# HELP sentirum_lb_requests_total Total number of requests processed
@@ -216,7 +222,7 @@ sentirum_lb_request_duration_seconds_bucket{{le="+Inf"}} {b_inf}
 sentirum_lb_request_duration_seconds_sum {sum}
 sentirum_lb_request_duration_seconds_count {count}
 "#,
-            sum = 0.0, // Approximate — real implementation needs atomic sum
+            sum = sum_seconds,
             count = requests_total,
         )
     }
@@ -293,6 +299,7 @@ mod tests {
         let output = metrics.render();
         assert!(output.contains("sentirum_lb_requests_total 1"));
         assert!(output.contains("sentirum_lb_request_duration_seconds_bucket"));
+        assert!(output.contains("sentirum_lb_request_duration_seconds_sum 0.005"));
         assert!(output.contains("sentirum_lb_response_status_total"));
     }
 

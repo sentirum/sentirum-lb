@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::route::picker::Picker;
+use crate::route::registry::ManagedRouteTable;
 use crate::route::table::Table;
 use async_trait::async_trait;
 use pingora::http::ResponseHeader;
@@ -21,22 +22,23 @@ pub struct ProxyCtx {
 }
 
 pub struct SentirumProxy {
-    /// The routing table (Arc<Table> from ArcSwap)
-    pub route_table: Arc<Table>,
+    /// Managed routing table with atomic snapshots
+    pub route_table: Arc<ManagedRouteTable>,
     pub picker: Box<dyn Picker>,
     pub matcher: String,
     pub config: Arc<Config>,
 }
 
 impl SentirumProxy {
-    pub fn new(route_table: Arc<Table>, config: Arc<Config>) -> Self {
+    pub fn new(route_table: Arc<ManagedRouteTable>, config: Arc<Config>) -> Self {
         let picker = crate::route::picker::create_picker(&config.proxy.strategy);
         let matcher = config.proxy.matcher.clone();
         Self { route_table, picker, matcher, config }
     }
 
     fn lookup_target(&self, host: &str, path: &str) -> Option<std::sync::Arc<crate::route::target::Target>> {
-        let table: &Table = &self.route_table;
+        let table = self.route_table.get();
+        let table: &Table = &table;
 
         // Use Table's consolidated lookup (no duplication)
         if let Some(route) = table.lookup_route(host, path, &self.matcher)
@@ -161,12 +163,16 @@ impl ProxyHttp for SentirumProxy {
             }
         };
 
-        if !target.ssrf_skip_verify() && crate::route::target::is_ip_private(&resolved_addr.ip()) {
+        if !target.ssrf_skip_verify()
+            && (crate::route::target::is_ip_always_blocked(&resolved_addr.ip())
+                || (!target.source_allows_private_upstreams()
+                    && crate::route::target::is_ip_rfc1918(&resolved_addr.ip()))) {
             tracing::warn!(
                 host = host,
                 resolved_ip = %resolved_addr.ip(),
                 service = %target.service,
-                "Blocked upstream target: private/reserved IP (SSRF protection during resolution)"
+                source = ?target.source,
+                "Blocked upstream target during resolution (SSRF protection)"
             );
             return Err(Error::new(ErrorType::HTTPStatus(403)));
         }
@@ -186,7 +192,7 @@ impl ProxyHttp for SentirumProxy {
 
         // Configure TLS for upstream if needed
         if target.upstream_tls() {
-            peer.sni = target.upstream_host().to_string();
+            peer.sni = target.host_override().unwrap_or(target.upstream_host()).to_string();
             if target.tls_skip_verify() {
                 peer.options.verify_cert = false;
             }
@@ -246,7 +252,7 @@ impl ProxyHttp for SentirumProxy {
 
     async fn upstream_request_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         upstream_request: &mut pingora_http::RequestHeader,
         ctx: &mut Self::CTX,
     ) -> pingora::Result<()>
@@ -259,10 +265,16 @@ impl ProxyHttp for SentirumProxy {
             upstream_request.insert_header(self.config.proxy.request_id_header.clone(), id)?;
         }
 
+        let downstream = session.req_header();
+        append_forwarded_headers(downstream, upstream_request);
+
         // Use stored target from upstream_peer (no double lookup!)
         if let Some(target) = &ctx.picked_target {
             if let Some(uri) = rewrite_upstream_uri(&upstream_request.uri, target) {
                 upstream_request.set_uri(uri);
+            }
+            if let Some(host_override) = target.host_override() {
+                upstream_request.insert_header("Host", host_override)?;
             }
         }
 
@@ -387,6 +399,35 @@ fn parse_host_from_header(header: &pingora_http::RequestHeader) -> &str {
     } else {
         host_header
     }
+}
+
+fn append_forwarded_headers(
+    downstream_request: &pingora_http::RequestHeader,
+    upstream_request: &mut pingora_http::RequestHeader,
+) {
+    let host = downstream_request
+        .headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if let Some(client_ip) = downstream_request
+        .headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok()) {
+        let _ = upstream_request.insert_header("X-Forwarded-For", client_ip);
+    }
+
+    if !host.is_empty() {
+        let _ = upstream_request.insert_header("X-Forwarded-Host", host);
+    }
+
+    let scheme = if downstream_request.uri.scheme_str() == Some("https") {
+        "https"
+    } else {
+        "http"
+    };
+    let _ = upstream_request.insert_header("X-Forwarded-Proto", scheme);
 }
 
 fn rewrite_upstream_uri(uri: &http::Uri, target: &crate::route::target::Target) -> Option<http::Uri> {
@@ -517,6 +558,18 @@ mod tests {
 
             assert_eq!(host, expected, "Failed for input: {}", input);
         }
+    }
+
+    #[test]
+    fn test_append_forwarded_headers_sets_host_and_proto() {
+        let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        downstream.insert_header("Host", "example.com").unwrap();
+        let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+
+        append_forwarded_headers(&downstream, &mut upstream);
+
+        assert_eq!(upstream.headers.get("x-forwarded-host").unwrap(), "example.com");
+        assert_eq!(upstream.headers.get("x-forwarded-proto").unwrap(), "http");
     }
 
     #[test]

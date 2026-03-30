@@ -121,17 +121,23 @@ fn parse_route_add(tokens: &[String]) -> Option<RouteDef> {
         weight,
         tags,
         opts,
+        source: crate::route::definition::RouteSource::Static,
     })
 }
 
-/// Parse: route del <svc> [<src> [<dst>]] or route del <svc> tags "<t1>,<t2>"
+/// Parse: route del <svc> [<src> [<dst>]] or route del <svc> tags "<t1>,<t2>" or route del tags "<t1>,<t2>"
 fn parse_route_del(tokens: &[String]) -> Option<RouteDef> {
-    let service = tokens.get(2)?.clone();
+    let mut service = String::new();
     let mut src = String::new();
     let mut dst = String::new();
     let mut tags = Vec::new();
 
-    let mut i = 3;
+    let mut i = 2;
+    if tokens.get(i).is_some_and(|t| t != "tags") {
+        service = tokens[i].clone();
+        i += 1;
+    }
+
     while i < tokens.len() {
         match tokens[i].as_str() {
             "tags" => {
@@ -157,6 +163,11 @@ fn parse_route_del(tokens: &[String]) -> Option<RouteDef> {
         i += 1;
     }
 
+    if service.is_empty() && tags.is_empty() {
+        tracing::warn!("route del requires either <svc> or tags");
+        return None;
+    }
+
     Some(RouteDef {
         cmd: RouteCmd::Del,
         service,
@@ -165,17 +176,21 @@ fn parse_route_del(tokens: &[String]) -> Option<RouteDef> {
         weight: 0.0,
         tags,
         opts: HashMap::new(),
+        source: crate::route::definition::RouteSource::Static,
     })
 }
 
-/// Parse: route weight <svc> <src> weight <w> [tags "<t1>,<t2>"]
+/// Parse: route weight <svc> <src> weight <w> [tags "<t1>,<t2>"] or route weight <src> weight <w> tags "<t1>,<t2>"
 fn parse_route_weight(tokens: &[String]) -> Option<RouteDef> {
-    let service = tokens.get(2)?.clone();
-    let src = tokens.get(3)?.clone();
+    let first = tokens.get(2)?.clone();
+    let (service, src, mut i) = match tokens.get(3).map(|s| s.as_str()) {
+        Some("weight") => (String::new(), first, 3),
+        Some(_) => (first, tokens.get(3)?.clone(), 4),
+        None => return None,
+    };
 
     let mut weight = 0.0;
     let mut tags = Vec::new();
-    let mut i = 4;
     while i < tokens.len() {
         match tokens[i].as_str() {
             "weight" => {
@@ -207,6 +222,7 @@ fn parse_route_weight(tokens: &[String]) -> Option<RouteDef> {
         weight,
         tags,
         opts: HashMap::new(),
+        source: crate::route::definition::RouteSource::Static,
     })
 }
 
@@ -313,10 +329,30 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_route_del_global_tags() {
+        let input = r#"route del tags "v1,canary""#;
+        let defs = parse_route_commands(input);
+        assert_eq!(defs.len(), 1);
+        assert!(defs[0].service.is_empty());
+        assert_eq!(defs[0].tags, vec!["v1", "canary"]);
+    }
+
+    #[test]
     fn test_parse_route_weight_with_tags() {
         let input = r#"route weight myservice myhost.com/api/ weight 0.5 tags "v1,canary""#;
         let defs = parse_route_commands(input);
         assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].weight, 0.5);
+        assert_eq!(defs[0].tags, vec!["v1", "canary"]);
+    }
+
+    #[test]
+    fn test_parse_route_weight_without_service_with_tags() {
+        let input = r#"route weight myhost.com/api/ weight 0.5 tags "v1,canary""#;
+        let defs = parse_route_commands(input);
+        assert_eq!(defs.len(), 1);
+        assert!(defs[0].service.is_empty());
+        assert_eq!(defs[0].src, "myhost.com/api/");
         assert_eq!(defs[0].weight, 0.5);
         assert_eq!(defs[0].tags, vec!["v1", "canary"]);
     }
