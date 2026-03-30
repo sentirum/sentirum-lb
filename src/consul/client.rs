@@ -2,6 +2,7 @@
 //! Implements KV watching and service discovery using Consul's REST API
 
 use crate::config::ConsulConfig as AppConsulConfig;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::{Client, Url};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -222,8 +223,18 @@ impl ConsulClient {
         // Combine all KV values with key separators (like Fabio)
         let mut parts = Vec::new();
         for kv in kv_pairs {
-            let value = kv.Value.unwrap_or_default();
-            let trimmed = value.trim();
+            let raw_value = kv.Value.unwrap_or_default();
+            if raw_value.trim().is_empty() {
+                continue;
+            }
+
+            let decoded = STANDARD.decode(raw_value.trim()).map_err(|e| {
+                ConsulError::ParseError(format!("Failed to base64 decode KV value for key {}: {}", kv.Key, e))
+            })?;
+            let decoded_text = String::from_utf8(decoded).map_err(|e| {
+                ConsulError::ParseError(format!("Failed to UTF-8 decode KV value for key {}: {}", kv.Key, e))
+            })?;
+            let trimmed = decoded_text.trim();
             if !trimmed.is_empty() {
                 parts.push(format!("# --- {}\n{}", kv.Key, trimmed));
             }

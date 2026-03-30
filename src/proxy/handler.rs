@@ -276,7 +276,7 @@ impl ProxyHttp for SentirumProxy {
             .digest()
             .and_then(|digest| digest.ssl_digest.as_ref())
             .is_some();
-        append_forwarded_headers(downstream, upstream_request, downstream_is_tls)?;
+        append_forwarded_headers(session, downstream, upstream_request, downstream_is_tls)?;
 
         // Use stored target from upstream_peer (no double lookup!)
         if let Some(target) = &ctx.picked_target {
@@ -355,9 +355,18 @@ impl ProxyHttp for SentirumProxy {
 
         if status > 0 {
             let body = format!("{{\"error\":\"{}\",\"status\":{}}}", message, status);
-            let mut resp = ResponseHeader::build(status, None).unwrap_or_else(|_| {
-                ResponseHeader::build(500, None).unwrap()
-            });
+            let mut resp = match ResponseHeader::build(status, None)
+                .or_else(|_| ResponseHeader::build(500, None))
+            {
+                Ok(resp) => resp,
+                Err(build_err) => {
+                    tracing::error!(error = %build_err, "Failed to build error response header");
+                    return pingora::proxy::FailToProxy {
+                        error_code: 500,
+                        can_reuse_downstream: false,
+                    };
+                }
+            };
             resp.insert_header("Content-Type", "application/json").ok();
             resp.insert_header("X-Served-By", "sentirum-lb").ok();
 
@@ -412,6 +421,7 @@ fn parse_host_from_header(header: &pingora_http::RequestHeader) -> &str {
 }
 
 fn append_forwarded_headers(
+    session: &Session,
     downstream_request: &pingora_http::RequestHeader,
     upstream_request: &mut pingora_http::RequestHeader,
     downstream_is_tls: bool,
@@ -422,11 +432,23 @@ fn append_forwarded_headers(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if let Some(client_ip) = downstream_request
+    let peer_ip = session
+        .client_addr()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_default();
+
+    let forwarded_for = match downstream_request
         .headers
         .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok()) {
-        upstream_request.insert_header("X-Forwarded-For", client_ip)?;
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(existing) if !peer_ip.is_empty() => format!("{existing}, {peer_ip}"),
+        Some(existing) => existing.to_string(),
+        None => peer_ip,
+    };
+
+    if !forwarded_for.is_empty() {
+        upstream_request.insert_header("X-Forwarded-For", forwarded_for)?;
     }
 
     if !host.is_empty() {

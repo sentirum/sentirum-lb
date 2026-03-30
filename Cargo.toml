@@ -54,6 +54,7 @@ futures = "0.3"
 
 # Byte buffer types (for response body construction)
 bytes = "1"
+base64 = "0.21"
 
 # Random number generation (for RandomPicker)
 rand = { version = "0.8", features = ["small_rng"] }
