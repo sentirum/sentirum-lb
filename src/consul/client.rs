@@ -279,11 +279,7 @@ impl ConsulClient {
         Ok((checks, new_index))
     }
 
-    /// Get service instances from catalog
-    pub async fn get_catalog_service(
-        &self,
-        service_name: &str,
-    ) -> Result<Vec<CatalogService>, ConsulError> {
+    fn catalog_service_url(&self, service_name: &str) -> Result<Url, ConsulError> {
         let mut url = Url::parse(&format!("{}/v1/catalog/service/{}", self.base_url, service_name))
             .map_err(|e| ConsulError::ClientError(e.to_string()))?;
 
@@ -297,6 +293,15 @@ impl ConsulClient {
             }
         }
 
+        Ok(url)
+    }
+
+    /// Get service instances from catalog
+    pub async fn get_catalog_service(
+        &self,
+        service_name: &str,
+    ) -> Result<Vec<CatalogService>, ConsulError> {
+        let url = self.catalog_service_url(service_name)?;
         let mut request = self.client.get(url);
 
         if let Some(token) = &self.config.token {
@@ -309,8 +314,7 @@ impl ConsulClient {
         Ok(services)
     }
 
-    /// Get all keys under a KV path
-    pub async fn list_keys(&self, path: &str) -> Result<Vec<String>, ConsulError> {
+    fn list_keys_url(&self, path: &str) -> Result<Url, ConsulError> {
         let mut url = Url::parse(&format!(
             "{}/v1/kv/{}",
             self.base_url,
@@ -329,6 +333,12 @@ impl ConsulClient {
             }
         }
 
+        Ok(url)
+    }
+
+    /// Get all keys under a KV path
+    pub async fn list_keys(&self, path: &str) -> Result<Vec<String>, ConsulError> {
+        let url = self.list_keys_url(path)?;
         let mut request = self.client.get(url);
 
         if let Some(token) = &self.config.token {
@@ -409,6 +419,13 @@ mod tests {
         ConsulClient::new(ConsulConfig::default()).expect("client should build")
     }
 
+    fn make_consistent_client() -> ConsulClient {
+        let mut config = ConsulConfig::default();
+        config.allow_stale = false;
+        config.require_consistent = true;
+        ConsulClient::new(config).expect("client should build")
+    }
+
     #[test]
     fn watch_kv_uses_query_params_for_blocking() {
         let client = make_client();
@@ -435,5 +452,37 @@ mod tests {
         assert!(!kv_query.contains("wait="));
         assert!(!health_query.contains("index="));
         assert!(!health_query.contains("wait="));
+    }
+
+    #[test]
+    fn catalog_service_url_uses_enabled_consistency_flags_only() {
+        let client = make_client();
+        let url = client.catalog_service_url("test-nginx").unwrap();
+        let query = url.query().unwrap_or_default();
+        assert!(query.contains("stale=true"));
+        assert!(!query.contains("consistent="));
+
+        let client = make_consistent_client();
+        let url = client.catalog_service_url("test-nginx").unwrap();
+        let query = url.query().unwrap_or_default();
+        assert!(!query.contains("stale="));
+        assert!(query.contains("consistent=true"));
+    }
+
+    #[test]
+    fn list_keys_url_includes_keys_flag_and_enabled_consistency_flags_only() {
+        let client = make_client();
+        let url = client.list_keys_url("/sentirum-lb/routes").unwrap();
+        let query = url.query().unwrap_or_default();
+        assert!(query.contains("keys=true"));
+        assert!(query.contains("stale=true"));
+        assert!(!query.contains("consistent="));
+
+        let client = make_consistent_client();
+        let url = client.list_keys_url("/sentirum-lb/routes").unwrap();
+        let query = url.query().unwrap_or_default();
+        assert!(query.contains("keys=true"));
+        assert!(!query.contains("stale="));
+        assert!(query.contains("consistent=true"));
     }
 }
