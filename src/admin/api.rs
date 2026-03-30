@@ -9,6 +9,9 @@
 use crate::config::Config;
 use crate::route::registry::ManagedRouteTable;
 use axum::extract::State;
+use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
+use axum::middleware::{from_fn_with_state, Next};
+use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
 use std::sync::Arc;
@@ -30,12 +33,19 @@ pub struct HealthResponse {
 
 /// Build the admin API router
 pub fn build_router(state: AdminState) -> Router {
-    Router::new()
+    let protected = Router::new()
         .route("/admin/health", get(health_handler))
         .route("/admin/routes", get(routes_handler))
         .route("/admin/metrics", get(metrics_handler))
-        .route("/admin/config", get(config_handler))
-        .with_state(state)
+        .route("/admin/config", get(config_handler));
+
+    if state.config.server.admin_token.is_empty() {
+        protected.with_state(state)
+    } else {
+        protected
+            .layer(from_fn_with_state(state.clone(), admin_auth_middleware))
+            .with_state(state)
+    }
 }
 
 async fn health_handler() -> axum::Json<HealthResponse> {
@@ -119,10 +129,17 @@ pub async fn run_admin_server(
     route_table: Arc<ManagedRouteTable>,
 ) {
     let addr = config.server.admin_listen.clone();
+
+    if config.server.admin_token.is_empty() && !is_loopback_bind(&addr) {
+        tracing::error!(addr = %addr, "Refusing to expose admin API without admin_token on non-loopback address");
+        return;
+    }
+
+    let auth_enabled = !config.server.admin_token.is_empty();
     let state = AdminState { config, route_table };
     let app = build_router(state);
 
-    tracing::info!(addr = %addr, "Admin API server starting (axum)");
+    tracing::info!(addr = %addr, auth_enabled, "Admin API server starting (axum)");
 
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
@@ -137,6 +154,36 @@ pub async fn run_admin_server(
     }
 }
 
+async fn admin_auth_middleware(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let expected = state.config.server.admin_token.as_str();
+    let authorized = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(|value| value == expected)
+        .unwrap_or(false)
+        || headers
+            .get("x-admin-token")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value == expected)
+            .unwrap_or(false);
+
+    if authorized {
+        Ok(next.run(request).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+fn is_loopback_bind(addr: &str) -> bool {
+    addr.starts_with("127.") || addr.starts_with("localhost:") || addr.starts_with("[::1]")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,7 +196,8 @@ mod tests {
         Arc::new(Config {
             server: ServerConfig {
                 listen: ":9999".to_string(),
-                admin_listen: ":9998".to_string(),
+                admin_listen: "127.0.0.1:9998".to_string(),
+                admin_token: String::new(),
                 workers: 0,
             },
             consul: ConsulConfig {
@@ -228,5 +276,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn test_admin_requires_token_when_configured() {
+        let mut state = make_test_state();
+        Arc::make_mut(&mut state.config).server.admin_token = "secret".to_string();
+        let app = build_router(state);
+        let response = app
+            .oneshot(Request::builder().uri("/admin/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn test_admin_accepts_bearer_token() {
+        let mut state = make_test_state();
+        Arc::make_mut(&mut state.config).server.admin_token = "secret".to_string();
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/health")
+                    .header("Authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
     }
 }

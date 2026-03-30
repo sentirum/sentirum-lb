@@ -12,9 +12,9 @@ use sentirum_lb::route::registry::ManagedRouteTable;
 #[derive(Parser, Debug)]
 #[command(name = "sentirum-lb", version, about = "High-performance Rust load balancer with Consul integration")]
 struct Args {
-    /// Path to configuration file (TOML)
-    #[arg(short, long, default_value = "config.toml")]
-    config: String,
+    /// Optional path to configuration file (TOML)
+    #[arg(short, long)]
+    config: Option<String>,
 
     /// Path to static routes file
     #[arg(short, long)]
@@ -91,17 +91,22 @@ async fn main() {
     let args = Args::parse();
 
     // Load configuration
-    let config_path = &args.config;
-    let config_content = std::fs::read_to_string(config_path)
-        .unwrap_or_else(|e| {
-            eprintln!("Warning: Could not load config file '{}': {}. Using defaults.", config_path, e);
-            String::new()
-        });
+    let config_content = match args.config.as_ref() {
+        Some(config_path) => match std::fs::read_to_string(config_path) {
+            Ok(content) => content,
+            Err(e) => {
+                eprintln!("Error: failed to load config file '{}': {}", config_path, e);
+                std::process::exit(1);
+            }
+        },
+        None => String::new(),
+    };
 
     let mut config: Config = if config_content.is_empty() {
         let server = sentirum_lb::config::ServerConfig {
             listen: args.listen.clone().unwrap_or_else(|| ":9999".to_string()),
-            admin_listen: ":9998".to_string(),
+            admin_listen: "127.0.0.1:9998".to_string(),
+            admin_token: String::new(),
             workers: 0,
         };
         let consul = sentirum_lb::config::ConsulConfig {
@@ -148,9 +153,6 @@ async fn main() {
 
     // Create managed routing table (supports multiple sources)
     let managed_table = Arc::new(ManagedRouteTable::new());
-    
-    // Create a shared RouteTable for the proxy (hot path uses this)
-    let proxy_table = managed_table.get();
 
     // Load static routes if provided (loaded FIRST, highest priority)
     if let Some(routes_path) = &args.routes {
@@ -183,7 +185,7 @@ async fn main() {
 
     // Create proxy service
     let proxy_handler = SentirumProxy::new(
-        proxy_table,
+        managed_table.clone(),
         Arc::new(config.clone()),
     );
     let mut lb_service = pingora::proxy::http_proxy_service(&server.configuration, proxy_handler);

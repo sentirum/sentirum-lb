@@ -9,7 +9,7 @@ This file gives coding agents and contributors a fast map of the repository and 
 ## Core architecture
 
 - `src/main.rs`
-  - loads config and CLI overrides
+  - loads optional config and CLI overrides
   - wires Pingora server settings
   - starts proxy listener, optional TLS listener, admin API, and Consul watchers
 
@@ -55,6 +55,7 @@ This file gives coding agents and contributors a fast map of the repository and 
 
 These config values are live and should stay wired unless intentionally redesigned:
 
+- `server.admin_token`
 - `server.workers`
 - `consul.poll_interval`
 - `proxy.strategy`
@@ -80,6 +81,7 @@ If you introduce a new config field, wire it into runtime behavior and cover it 
 - `glob` uses the `glob` crate pattern support
 - `strip` happens before `prepend`
 - Query strings must survive rewrites
+- `host=` route option overrides upstream Host header and TLS SNI
 - `max_connections` is enforced per upstream target
 - `0` for `max_connections` means unlimited
 
@@ -89,6 +91,11 @@ If you introduce a new config field, wire it into runtime behavior and cover it 
 - Empty KV snapshots should clear only KV routes
 - Empty service snapshots should clear only service-discovery routes
 - Do not collapse all empty updates into a generic shared event
+- Keep Fabio-compatible tag semantics:
+  - `urlprefix-/api` => catch-all path route
+  - `urlprefix-example.com/api` => host-specific path route
+  - service name is not injected into the route host
+- Consul-discovered targets are trusted to use RFC1918/private addresses by default; loopback/link-local/localhost-style targets must still remain blocked unless explicitly bypassed
 
 ## Testing expectations
 

@@ -59,17 +59,23 @@ impl Route {
     pub fn add_target(&mut self, target: Target) {
         // De-dup check (compare against Arc targets)
         let exists = self.targets.iter().any(|t| {
-            t.service == target.service && t.url == target.url && t.fixed_weight == target.fixed_weight
+            t.service == target.service
+                && t.url == target.url
+                && t.fixed_weight == target.fixed_weight
+                && t.source == target.source
         });
         if !exists {
             self.targets.push(Arc::new(target));
         }
     }
 
-    /// Remove targets matching the given service and optionally URL.
-    pub fn remove_targets(&mut self, service: &str, url: Option<&str>) {
+    /// Remove targets matching the given service, tags, and optionally URL.
+    pub fn remove_targets(&mut self, service: &str, tags: &[String], url: Option<&str>) {
         self.targets.retain(|t| {
-            if t.service != service {
+            if !service.is_empty() && t.service != service {
+                return true;
+            }
+            if !tags.is_empty() && !tags.iter().all(|tag| t.tags.contains(tag)) {
                 return true;
             }
             if let Some(url) = url {
@@ -249,6 +255,7 @@ impl Table {
             weight: 0.0,
             tags: def.tags.clone(),
             opts: def.opts.clone(),
+            source: def.source.clone(),
             parsed_host: None,
             parsed_port: None,
             parsed_tls: false,
@@ -276,8 +283,51 @@ impl Table {
     }
 
     fn apply_del(&mut self, def: &RouteDef) {
-        let host = def.src_host().to_string();
+        let url = if def.dst.is_empty() {
+            None
+        } else {
+            Some(def.dst.as_str())
+        };
 
+        if !def.tags.is_empty() {
+            let host = def.src_host().to_string();
+            let path = if def.src_path().is_empty() {
+                None
+            } else {
+                Some(format!("/{}", def.src_path()))
+            };
+
+            if !host.is_empty() || path.is_some() {
+                if let Some(host_routes) = self.routes.get_mut(&host) {
+                    for route in host_routes.iter_mut() {
+                        if path.as_ref().is_none_or(|p| route.path == *p) {
+                            let mut r = (**route).clone();
+                            r.remove_targets(&def.service, &def.tags, url);
+                            r.compute_weights();
+                            *route = Arc::new(r);
+                        }
+                    }
+                    host_routes.retain(|r| !r.targets.is_empty());
+                }
+                if self.routes.get(&host).is_some_and(|r| r.is_empty()) {
+                    self.routes.remove(&host);
+                }
+            } else {
+                for host_routes in self.routes.values_mut() {
+                    for route in host_routes.iter_mut() {
+                        let mut r = (**route).clone();
+                        r.remove_targets(&def.service, &def.tags, url);
+                        r.compute_weights();
+                        *route = Arc::new(r);
+                    }
+                    host_routes.retain(|r| !r.targets.is_empty());
+                }
+                self.routes.retain(|_, routes| !routes.is_empty());
+            }
+            return;
+        }
+
+        let host = def.src_host().to_string();
         if let Some(host_routes) = self.routes.get_mut(&host) {
             let path = if def.src_path().is_empty() {
                 None
@@ -287,23 +337,16 @@ impl Table {
 
             for route in host_routes.iter_mut() {
                 if path.as_ref().is_none_or(|p| route.path == *p) {
-                    let url = if def.dst.is_empty() {
-                        None
-                    } else {
-                        Some(def.dst.as_str())
-                    };
                     let mut r = (**route).clone();
-                    r.remove_targets(&def.service, url);
+                    r.remove_targets(&def.service, &def.tags, url);
                     r.compute_weights();
                     *route = Arc::new(r);
                 }
             }
 
-            // Remove routes with no targets
             host_routes.retain(|r| !r.targets.is_empty());
         }
 
-        // Remove empty hosts
         if self.routes.get(&host).is_some_and(|r| r.is_empty()) {
             self.routes.remove(&host);
         }
@@ -321,13 +364,27 @@ impl Table {
 
             for route in host_routes.iter_mut() {
                 if route.path == path {
-                    // Clone route for modification
                     let mut r = (**route).clone();
-                    // Use Arc::make_mut to modify targets
+                    let match_count = r.targets.iter().filter(|target| {
+                        (def.service.is_empty() || target.service == def.service)
+                            && (def.tags.is_empty() || def.tags.iter().all(|t| target.tags.contains(t)))
+                    }).count();
+
+                    if match_count == 0 {
+                        continue;
+                    }
+
+                    let fixed_weight = if match_count > 0 {
+                        def.weight / match_count as f64
+                    } else {
+                        def.weight
+                    };
+
                     for i in 0..r.targets.len() {
                         let target = Arc::make_mut(&mut r.targets[i]);
-                        if def.tags.is_empty() || def.tags.iter().all(|t| target.tags.contains(t)) {
-                            target.fixed_weight = def.weight;
+                        if (def.service.is_empty() || target.service == def.service)
+                            && (def.tags.is_empty() || def.tags.iter().all(|t| target.tags.contains(t))) {
+                            target.fixed_weight = fixed_weight;
                         }
                     }
                     r.compute_weights();
@@ -487,10 +544,148 @@ mod tests {
             weight: 0.0,
             tags: vec![],
             opts: HashMap::new(),
+            source: crate::route::definition::RouteSource::Static,
         }];
 
         let table = Table::from_definitions(&defs);
         assert!(table.lookup_route("example.com", "/api/users", "iprefix").is_some());
         assert!(table.lookup_route("example.com", "/API/users", "iprefix").is_some());
+    }
+
+    #[test]
+    fn test_delete_routes_by_tags_without_service() {
+        let defs = vec![
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-a".to_string(),
+                src: "example.com/".to_string(),
+                dst: "http://a/".to_string(),
+                weight: 0.0,
+                tags: vec!["v1".to_string()],
+                opts: HashMap::new(),
+                source: crate::route::definition::RouteSource::Static,
+            },
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-b".to_string(),
+                src: "example.com/".to_string(),
+                dst: "http://b/".to_string(),
+                weight: 0.0,
+                tags: vec!["v2".to_string()],
+                opts: HashMap::new(),
+                source: crate::route::definition::RouteSource::Static,
+            },
+            RouteDef {
+                cmd: RouteCmd::Del,
+                service: String::new(),
+                src: String::new(),
+                dst: String::new(),
+                weight: 0.0,
+                tags: vec!["v1".to_string()],
+                opts: HashMap::new(),
+                source: crate::route::definition::RouteSource::Static,
+            },
+        ];
+
+        let table = Table::from_definitions(&defs);
+        let route = table.lookup_route("example.com", "/", "prefix").unwrap();
+        assert_eq!(route.targets.len(), 1);
+        assert_eq!(route.targets[0].service, "svc-b");
+    }
+
+    #[test]
+    fn test_dedup_keeps_targets_separate_when_sources_differ() {
+        let mut route = Route::new("example.com".to_string(), "/".to_string());
+        let mut static_target = make_target("svc", "http://10.0.0.1:80", 0.0, 0.0);
+        static_target.source = crate::route::definition::RouteSource::Static;
+        let mut consul_target = make_target("svc", "http://10.0.0.1:80", 0.0, 0.0);
+        consul_target.source = crate::route::definition::RouteSource::ConsulService;
+
+        route.add_target(static_target);
+        route.add_target(consul_target);
+
+        assert_eq!(route.targets.len(), 2);
+    }
+
+    #[test]
+    fn test_delete_routes_by_tags_with_src_is_scoped() {
+        let defs = vec![
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-a".to_string(),
+                src: "example.com/api".to_string(),
+                dst: "http://a/".to_string(),
+                weight: 0.0,
+                tags: vec!["blue".to_string()],
+                opts: HashMap::new(),
+                source: crate::route::definition::RouteSource::Static,
+            },
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-b".to_string(),
+                src: "example.com/other".to_string(),
+                dst: "http://b/".to_string(),
+                weight: 0.0,
+                tags: vec!["blue".to_string()],
+                opts: HashMap::new(),
+                source: crate::route::definition::RouteSource::Static,
+            },
+            RouteDef {
+                cmd: RouteCmd::Del,
+                service: String::new(),
+                src: "example.com/api".to_string(),
+                dst: String::new(),
+                weight: 0.0,
+                tags: vec!["blue".to_string()],
+                opts: HashMap::new(),
+                source: crate::route::definition::RouteSource::Static,
+            },
+        ];
+
+        let table = Table::from_definitions(&defs);
+        assert!(table.lookup_route("example.com", "/api", "prefix").is_none());
+        assert!(table.lookup_route("example.com", "/other", "prefix").is_some());
+    }
+
+    #[test]
+    fn test_weight_is_distributed_across_matching_targets() {
+        let defs = vec![
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-a".to_string(),
+                src: "example.com/".to_string(),
+                dst: "http://a/".to_string(),
+                weight: 0.0,
+                tags: vec!["blue".to_string()],
+                opts: HashMap::new(),
+                source: crate::route::definition::RouteSource::Static,
+            },
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-b".to_string(),
+                src: "example.com/".to_string(),
+                dst: "http://b/".to_string(),
+                weight: 0.0,
+                tags: vec!["blue".to_string()],
+                opts: HashMap::new(),
+                source: crate::route::definition::RouteSource::Static,
+            },
+            RouteDef {
+                cmd: RouteCmd::Weight,
+                service: String::new(),
+                src: "example.com/".to_string(),
+                dst: String::new(),
+                weight: 0.6,
+                tags: vec!["blue".to_string()],
+                opts: HashMap::new(),
+                source: crate::route::definition::RouteSource::Static,
+            },
+        ];
+
+        let table = Table::from_definitions(&defs);
+        let route = table.lookup_route("example.com", "/", "prefix").unwrap();
+        assert_eq!(route.targets.len(), 2);
+        assert!((route.targets[0].fixed_weight - 0.3).abs() < f64::EPSILON);
+        assert!((route.targets[1].fixed_weight - 0.3).abs() < f64::EPSILON);
     }
 }

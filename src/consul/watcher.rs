@@ -1,7 +1,7 @@
 //! Consul watcher for Sentirum LB
 //! Implements blocking queries to watch for Consul state changes
 
-use crate::consul::client::{ConsulClient, ConsulConfig, HealthCheck, HEALTH_STATUS_CRITICAL};
+use crate::consul::client::{ConsulClient, ConsulConfig, HealthCheck, HEALTH_STATUS_PASSING};
 use crate::route::definition::{RouteCmd, RouteDef};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -106,11 +106,17 @@ impl ServiceMonitor {
                             continue;
                         }
 
+                        let address = if instance.service_address.is_empty() {
+                            &instance.address
+                        } else {
+                            &instance.service_address
+                        };
+
                         for tag in &instance.service_tags {
                             if tag.starts_with(tag_prefix)
                                 && let Some(route_def) = self.parse_tag(
                                     tag,
-                                    &instance.address,
+                                    address,
                                     instance.service_port,
                                     service_name,
                                 ) {
@@ -135,40 +141,72 @@ impl ServiceMonitor {
         config
     }
 
-    /// Get passing service IDs grouped by service name
+    /// Get passing service IDs grouped by service name using Fabio-like health aggregation.
     fn passing_service_ids(&self, checks: &[&HealthCheck]) -> HashMap<String, Vec<String>> {
-        let mut result: HashMap<String, Vec<String>> = HashMap::new();
+        let mut services: HashMap<(String, String, String), Vec<&HealthCheck>> = HashMap::new();
+        let mut node_down: HashMap<String, bool> = HashMap::new();
+        let mut node_maintenance: HashMap<String, bool> = HashMap::new();
+        let mut service_maintenance: HashMap<(String, String), bool> = HashMap::new();
 
         for check in checks {
-            if check.check_id == "serfHealth" || check.check_id == "_node_maintenance" {
-                if !check.service_name.is_empty() {
-                    let id = format!("{}.{}", check.node, check.service_id);
-                    result
-                        .entry(check.service_name.clone())
-                        .or_default()
-                        .push(id);
+            match check.check_id.as_str() {
+                "serfHealth" if check.status == "critical" => {
+                    node_down.insert(check.node.clone(), true);
                 }
+                "_node_maintenance" => {
+                    node_maintenance.insert(check.node.clone(), true);
+                }
+                _ if check.check_id.starts_with("_service_maintenance:") && check.status == "critical" => {
+                    let service_id = check.check_id.trim_start_matches("_service_maintenance:").to_string();
+                    service_maintenance.insert((check.node.clone(), service_id), true);
+                }
+                _ if is_service_check(check) => {
+                    services
+                        .entry((
+                            check.node.clone(),
+                            check.service_name.clone(),
+                            check.service_id.clone(),
+                        ))
+                        .or_default()
+                        .push(*check);
+                }
+                _ => {}
+            }
+        }
+
+        let mut result: HashMap<String, Vec<String>> = HashMap::new();
+
+        for ((node, service_name, service_id), svc_checks) in services {
+            if node_down.get(&node).copied().unwrap_or(false)
+                || node_maintenance.get(&node).copied().unwrap_or(false)
+                || service_maintenance
+                    .get(&(node.clone(), service_id.clone()))
+                    .copied()
+                    .unwrap_or(false)
+            {
                 continue;
             }
 
-            if check.check_id.starts_with("_service_maintenance:") {
+            let total = svc_checks.len();
+            let passing = svc_checks
+                .iter()
+                .filter(|check| check.status == HEALTH_STATUS_PASSING)
+                .count();
+
+            if passing == 0 || total != passing {
                 continue;
             }
 
-            if check.status != HEALTH_STATUS_CRITICAL {
-                let id = format!("{}.{}", check.node, check.service_id);
-                result
-                    .entry(check.service_name.clone())
-                    .or_default()
-                    .push(id);
-            }
+            result
+                .entry(service_name)
+                .or_default()
+                .push(format!("{}.{}", node, service_id));
         }
 
         result
     }
 
-    /// Parse a tag like "urlprefix-/api" -> route add
-    /// Supports both http and https schemes
+    /// Parse a Fabio-style tag like "urlprefix-/api" -> route add.
     fn parse_tag(
         &self,
         tag: &str,
@@ -176,34 +214,20 @@ impl ServiceMonitor {
         port: u16,
         service: &str,
     ) -> Option<RouteDef> {
-        let tag_content = tag.strip_prefix(&self.config.tag_prefix)?;
-        let parts: Vec<&str> = tag_content.splitn(2, ' ').collect();
-        let path = parts.first().unwrap_or(&"/");
+        let (src, raw_opts) = parse_urlprefix_tag(tag, &self.config.tag_prefix)?;
+        let opts = parse_opts(raw_opts);
 
-        // Determine scheme: check tag content for https, default to http
-        let scheme = if tag.contains("https://") || tag.contains("proto=https") {
-            "https"
-        } else {
-            "http"
+        let scheme = match opts.get("proto").map(String::as_str) {
+            Some("https") => "https",
+            Some("grpc") => "grpc",
+            Some("grpcs") => "grpcs",
+            Some("tcp") => "tcp",
+            _ => "http",
         };
-        let dst = format!("{}://{}:{}/", scheme, address, port);
-
-        // Extract options from remaining parts
-        let mut opts = HashMap::new();
-        if let Some(rest) = parts.get(1) {
-            for opt in rest.split_whitespace() {
-                let opt_parts: Vec<&str> = opt.splitn(2, '=').collect();
-                if opt_parts.len() == 2 {
-                    opts.insert(opt_parts[0].to_string(), opt_parts[1].to_string());
-                }
-            }
-        }
-
-        // Build source path
-        let src = if path.is_empty() || *path == "/" {
-            format!("{}/", service)
+        let dst = if scheme == "tcp" {
+            format!("tcp://{}:{}", address, port)
         } else {
-            format!("{}/{}", service, path.trim_start_matches('/'))
+            format!("{}://{}:{}/", scheme, address, port)
         };
 
         Some(RouteDef {
@@ -211,11 +235,54 @@ impl ServiceMonitor {
             service: service.to_string(),
             src,
             dst,
-            weight: 0.0,
+            weight: opts
+                .get("weight")
+                .and_then(|w| w.parse::<f64>().ok())
+                .unwrap_or(0.0),
             tags: vec![],
-            opts,
+            opts: opts
+                .into_iter()
+                .filter(|(k, _)| k != "weight")
+                .collect(),
+            source: crate::route::definition::RouteSource::ConsulService,
         })
     }
+}
+
+fn is_service_check(check: &HealthCheck) -> bool {
+    !check.service_id.is_empty()
+        && check.check_id != "serfHealth"
+        && check.check_id != "_node_maintenance"
+        && !check.check_id.starts_with("_service_maintenance:")
+}
+
+fn parse_urlprefix_tag<'a>(tag: &'a str, prefix: &str) -> Option<(String, &'a str)> {
+    let tag = tag.trim();
+    let tag = tag.strip_prefix(prefix)?.trim();
+    let mut parts = tag.splitn(2, ' ');
+    let route = parts.next()?.trim();
+    let opts = parts.next().unwrap_or("").trim();
+
+    if route.starts_with(':') {
+        return Some((route.to_string(), opts));
+    }
+
+    if !route.contains('/') {
+        return Some((route.to_ascii_lowercase(), opts));
+    }
+
+    let (host, path) = route.split_once('/')?;
+    Some((format!("{}/{}", host.to_ascii_lowercase(), path), opts))
+}
+
+fn parse_opts(raw_opts: &str) -> HashMap<String, String> {
+    let mut opts = HashMap::new();
+    for opt in raw_opts.split_whitespace() {
+        if let Some((k, v)) = opt.split_once('=') {
+            opts.insert(k.to_string(), v.to_string());
+        }
+    }
+    opts
 }
 
 /// KV watcher for manual route configuration
@@ -303,5 +370,80 @@ impl ConsulWatcher {
         if let Err(e) = kv_res {
             tracing::error!(error = %e, "KV watcher task panicked");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(
+        node: &str,
+        check_id: &str,
+        status: &str,
+        service_name: &str,
+        service_id: &str,
+        tags: &[&str],
+    ) -> HealthCheck {
+        HealthCheck {
+            node: node.to_string(),
+            check_id: check_id.to_string(),
+            name: check_id.to_string(),
+            status: status.to_string(),
+            service_name: service_name.to_string(),
+            service_id: service_id.to_string(),
+            service_tags: tags.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn parse_urlprefix_tag_matches_fabio_path_only_routes() {
+        let (route, opts) = parse_urlprefix_tag("urlprefix-/api proto=https strip=/api", "urlprefix-")
+            .expect("tag should parse");
+        assert_eq!(route, "/api");
+        assert_eq!(opts, "proto=https strip=/api");
+    }
+
+    #[test]
+    fn parse_urlprefix_tag_matches_fabio_host_routes() {
+        let (route, opts) = parse_urlprefix_tag("urlprefix-Example.com/api", "urlprefix-")
+            .expect("tag should parse");
+        assert_eq!(route, "example.com/api");
+        assert_eq!(opts, "");
+    }
+
+    #[test]
+    fn passing_services_require_all_service_checks_to_pass() {
+        let monitor = ServiceMonitor {
+            client: Arc::new(ConsulClient::new(ConsulConfig::default()).unwrap()),
+            config: ConsulConfig::default(),
+        };
+
+        let checks = vec![
+            check("node-1", "service:web:1", HEALTH_STATUS_PASSING, "web", "svc-1", &["urlprefix-/"]),
+            check("node-1", "service:web:2", "critical", "web", "svc-1", &["urlprefix-/"]),
+            check("node-1", "serfHealth", HEALTH_STATUS_PASSING, "", "", &[]),
+        ];
+        let refs: Vec<&HealthCheck> = checks.iter().collect();
+
+        let passing = monitor.passing_service_ids(&refs);
+        assert!(passing.is_empty());
+    }
+
+    #[test]
+    fn passing_services_skip_node_maintenance() {
+        let monitor = ServiceMonitor {
+            client: Arc::new(ConsulClient::new(ConsulConfig::default()).unwrap()),
+            config: ConsulConfig::default(),
+        };
+
+        let checks = vec![
+            check("node-1", "service:web:1", HEALTH_STATUS_PASSING, "web", "svc-1", &["urlprefix-/"]),
+            check("node-1", "_node_maintenance", HEALTH_STATUS_PASSING, "", "", &[]),
+        ];
+        let refs: Vec<&HealthCheck> = checks.iter().collect();
+
+        let passing = monitor.passing_service_ids(&refs);
+        assert!(passing.is_empty());
     }
 }

@@ -9,6 +9,15 @@ pub enum RouteCmd {
     Weight,
 }
 
+/// Source of a route definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RouteSource {
+    #[default]
+    Static,
+    ConsulKv,
+    ConsulService,
+}
+
 /// A route definition parsed from route commands.
 /// Compatible with Fabio's route format.
 ///
@@ -32,6 +41,9 @@ pub struct RouteDef {
     /// Additional options (strip, prepend, proto, tlsskipverify, host)
     #[serde(default)]
     pub opts: HashMap<String, String>,
+    /// Origin of this route definition
+    #[serde(default)]
+    pub source: RouteSource,
 }
 
 impl RouteDef {

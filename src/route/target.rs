@@ -1,3 +1,4 @@
+use crate::route::definition::RouteSource;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -20,6 +21,9 @@ pub struct Target {
     /// Route options
     #[serde(default)]
     pub opts: HashMap<String, String>,
+    /// Origin of the target definition
+    #[serde(default)]
+    pub source: RouteSource,
 
     // --- Pre-parsed fields (not serialized, computed from url) ---
     /// Pre-parsed host from URL
@@ -46,6 +50,7 @@ impl Clone for Target {
             weight: self.weight,
             tags: self.tags.clone(),
             opts: self.opts.clone(),
+            source: self.source.clone(),
             parsed_host: self.parsed_host.clone(),
             parsed_port: self.parsed_port,
             parsed_tls: self.parsed_tls,
@@ -64,6 +69,7 @@ impl Default for Target {
             weight: 0.0,
             tags: Vec::new(),
             opts: HashMap::new(),
+            source: RouteSource::Static,
             parsed_host: None,
             parsed_port: None,
             parsed_tls: false,
@@ -94,27 +100,31 @@ impl Target {
         }
     }
 
-    /// Check if the upstream host is a private/reserved IP (SSRF protection).
-    /// Returns true if the host is considered safe (public IP or hostname).
-    /// Returns false for loopback, link-local, private RFC1918, and cloud metadata IPs.
+    /// Check if the upstream host is safe for proxying.
+    /// Consul-origin routes may use RFC1918/private IPs by default, but loopback,
+    /// link-local, unspecified, and localhost-style hosts remain blocked unless
+    /// explicitly bypassed.
     pub fn is_host_safe(&self) -> bool {
         let host = match self.parsed_host.as_deref() {
-            Some(h) => h,
+            Some(h) => h.trim_matches(&['[', ']'][..]),
             None => return false,
         };
 
-        // Try parsing as IP address first
         if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            return !is_ip_private(&ip);
+            if is_ip_always_blocked(&ip) {
+                return false;
+            }
+            if is_ip_rfc1918(&ip) {
+                return self.source_allows_private_upstreams();
+            }
+            return true;
         }
 
-        // Hostname: block known dangerous patterns
         let lower = host.to_lowercase();
         if lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".local") {
             return false;
         }
 
-        // Regular hostnames are considered safe
         true
     }
 
@@ -126,9 +136,16 @@ impl Target {
             .unwrap_or(false)
     }
 
+    pub fn source_allows_private_upstreams(&self) -> bool {
+        matches!(self.source, RouteSource::ConsulKv | RouteSource::ConsulService)
+    }
+
     /// Get the upstream host (pre-parsed, no allocation)
     pub fn upstream_host(&self) -> &str {
-        self.parsed_host.as_deref().unwrap_or("127.0.0.1")
+        self.parsed_host
+            .as_deref()
+            .map(|h| h.trim_matches(&['[', ']'][..]))
+            .unwrap_or("127.0.0.1")
     }
 
     /// Get the upstream port (pre-parsed)
@@ -178,33 +195,27 @@ impl Target {
 
 /// Check if an IP address is private/reserved and should be blocked for SSRF protection.
 pub fn is_ip_private(ip: &std::net::IpAddr) -> bool {
+    is_ip_always_blocked(ip) || is_ip_rfc1918(ip)
+}
+
+pub fn is_ip_rfc1918(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_private(),
+        std::net::IpAddr::V6(v6) => is_ipv6_unique_local(v6),
+    }
+}
+
+pub fn is_ip_always_blocked(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
-            // Loopback: 127.0.0.0/8
-            if v4.is_loopback() {
-                return true;
-            }
-            // Link-local: 169.254.0.0/16 (cloud metadata!)
-            if v4.is_link_local() {
-                               return true;
-            }
-            // Private RFC1918: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-            if v4.is_private() {
-                return true;
-            }
-            // Broadcast / unspecified
-            if v4.is_broadcast() || v4.is_unspecified() {
-                               return true;
-            }
-            // Cloud provider metadata endpoints
-            // AWS: 169.254.169.254 (already covered by link-local)
-            // GCP: metadata.google.internal (covered by hostname check)
-            false
+            v4.is_loopback() || v4.is_link_local() || v4.is_broadcast() || v4.is_unspecified()
         }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback() || v6.is_unspecified()
-        }
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local(),
     }
+}
+
+fn is_ipv6_unique_local(ip: &std::net::Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xfe00) == 0xfc00
 }
 
 #[cfg(test)]
@@ -248,6 +259,39 @@ mod tests {
     fn test_ssrf_allows_normal_hostnames() {
         let t = Target::new("svc".into(), "http://api.example.com/".into());
         assert!(t.is_host_safe());
+    }
+
+    #[test]
+    fn test_consul_sources_allow_private_rfc1918_hosts() {
+        let mut t = Target::new("svc".into(), "http://10.0.0.1:8080/".into());
+        t.source = RouteSource::ConsulService;
+        assert!(t.is_host_safe());
+    }
+
+    #[test]
+    fn test_consul_sources_still_block_loopback_hosts() {
+        let mut t = Target::new("svc".into(), "http://127.0.0.1:8080/".into());
+        t.source = RouteSource::ConsulService;
+        assert!(!t.is_host_safe());
+    }
+
+    #[test]
+    fn test_static_sources_block_ipv6_unique_local_hosts() {
+        let t = Target::new("svc".into(), "http://[fd00::1]:8080/".into());
+        assert!(!t.is_host_safe());
+    }
+
+    #[test]
+    fn test_consul_sources_allow_ipv6_unique_local_hosts() {
+        let mut t = Target::new("svc".into(), "http://[fd00::1]:8080/".into());
+        t.source = RouteSource::ConsulService;
+        assert!(t.is_host_safe());
+    }
+
+    #[test]
+    fn test_ipv6_link_local_hosts_are_blocked() {
+        let t = Target::new("svc".into(), "http://[fe80::1]:8080/".into());
+        assert!(!t.is_host_safe());
     }
 
     #[test]

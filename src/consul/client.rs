@@ -337,6 +337,8 @@ pub struct CatalogService {
     pub node: String,
     #[serde(alias = "Address")]
     pub address: String,
+    #[serde(alias = "ServiceAddress")]
+    pub service_address: String,
     #[serde(alias = "ServicePort")]
     pub service_port: u16,
     #[serde(alias = "ServiceTags")]
