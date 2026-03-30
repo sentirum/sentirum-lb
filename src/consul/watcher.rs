@@ -34,10 +34,12 @@ impl ServiceMonitor {
     pub async fn watch(&self, updates: mpsc::Sender<RouteUpdate>) {
         let mut last_index: u64 = 0;
         let tag_prefix = self.config.tag_prefix.clone();
+        let mut backoff_secs: u64 = 1;
 
         loop {
             match self.client.get_health_checks(last_index).await {
                 Ok((checks, new_index)) => {
+                    backoff_secs = 1;
                     if new_index != last_index || !checks.is_empty() {
                         last_index = new_index;
                         let route_defs = self.process_checks(&checks, &tag_prefix).await;
@@ -48,9 +50,10 @@ impl ServiceMonitor {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Consul health check error: {}", e);
+                    tracing::warn!(backoff_secs, error = %e, "Consul health check error; retrying");
                     let _ = updates.send(RouteUpdate::Error(e.to_string())).await;
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(60);
                 }
             }
         }
@@ -302,10 +305,12 @@ impl KVWatcher {
     pub async fn watch(&self, updates: mpsc::Sender<RouteUpdate>) {
         let mut last_index: u64 = 0;
         let kv_path = self.config.kv_prefix.clone();
+        let mut backoff_secs: u64 = 1;
 
         loop {
             match self.client.watch_kv(&kv_path, last_index).await {
                 Ok((value, new_index)) => {
+                    backoff_secs = 1;
                     if new_index != last_index {
                         last_index = new_index;
                         let update = RouteUpdate::Manual(value.unwrap_or_default());
@@ -317,9 +322,10 @@ impl KVWatcher {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Consul KV error: {}", e);
+                    tracing::warn!(backoff_secs, error = %e, "Consul KV error; retrying");
                     let _ = updates.send(RouteUpdate::Error(e.to_string())).await;
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(60);
                 }
             }
         }

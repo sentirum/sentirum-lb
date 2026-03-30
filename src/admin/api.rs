@@ -95,8 +95,14 @@ async fn routes_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
     }))
 }
 
-async fn metrics_handler() -> String {
-    crate::metrics::prometheus::global().render()
+async fn metrics_handler() -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        crate::metrics::prometheus::global().render(),
+    )
 }
 
 async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_json::Value> {
@@ -159,7 +165,7 @@ async fn admin_auth_middleware(
     headers: HeaderMap,
     request: axum::extract::Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, (StatusCode, axum::Json<serde_json::Value>)> {
     let expected = state.config.server.admin_token.as_str();
     let authorized = headers
         .get(AUTHORIZATION)
@@ -176,12 +182,18 @@ async fn admin_auth_middleware(
     if authorized {
         Ok(next.run(request).await)
     } else {
-        Err(StatusCode::UNAUTHORIZED)
+        Err((
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized", "message": "Valid Bearer token or X-Admin-Token required"})),
+        ))
     }
 }
 
 fn is_loopback_bind(addr: &str) -> bool {
-    addr.starts_with("127.") || addr.starts_with("localhost:") || addr.starts_with("[::1]")
+    if addr.starts_with("0.0.0.0") || addr.starts_with("[::]") || addr.starts_with(':') {
+        return false;
+    }
+    addr.starts_with("127.") || addr.starts_with("localhost") || addr.starts_with("[::1]")
 }
 
 #[cfg(test)]
