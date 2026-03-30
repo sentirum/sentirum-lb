@@ -448,17 +448,10 @@ fn append_forwarded_headers(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let peer_ip = peer_addr.unwrap_or_default();
-
-    let forwarded_for = match downstream_request
-        .headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-    {
-        Some(existing) if !peer_ip.is_empty() => format!("{existing}, {peer_ip}"),
-        Some(existing) => existing.to_string(),
-        None => peer_ip.to_string(),
-    };
+    // Overwrite X-Forwarded-For with actual peer IP.
+    // Without a trusted-proxy allowlist, client-supplied XFF values
+    // must not be preserved as they enable IP spoofing.
+    let forwarded_for = peer_addr.unwrap_or_default().to_string();
 
     if !forwarded_for.is_empty() {
         upstream_request.insert_header("X-Forwarded-For", forwarded_for)?;
@@ -693,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn test_append_forwarded_headers_appends_peer_to_existing_xff() {
+    fn test_append_forwarded_headers_overwrites_client_xff() {
         let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
         downstream.insert_header("Host", "example.com").unwrap();
         downstream.insert_header("X-Forwarded-For", "1.2.3.4").unwrap();
@@ -701,7 +694,8 @@ mod tests {
 
         append_forwarded_headers(&downstream, &mut upstream, false, Some("10.0.0.1")).unwrap();
 
-        assert_eq!(upstream.headers.get("x-forwarded-for").unwrap(), "1.2.3.4, 10.0.0.1");
+        // Client-supplied XFF must be overwritten, not appended
+        assert_eq!(upstream.headers.get("x-forwarded-for").unwrap(), "10.0.0.1");
     }
 
     #[test]
