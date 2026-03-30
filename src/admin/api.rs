@@ -1,0 +1,232 @@
+//! Admin API for Sentirum LB using axum.
+//!
+//! Endpoints:
+//! - `GET /admin/health` — Health check
+//! - `GET /admin/routes` — Route table inspection
+//! - `GET /admin/metrics` — Prometheus metrics
+//! - `GET /admin/config` — Config inspection
+
+use crate::config::Config;
+use crate::route::registry::ManagedRouteTable;
+use axum::extract::State;
+use axum::routing::get;
+use axum::Router;
+use std::sync::Arc;
+
+/// Shared state for admin API handlers
+#[derive(Clone)]
+pub struct AdminState {
+    pub config: Arc<Config>,
+    pub route_table: Arc<ManagedRouteTable>,
+}
+
+/// Health check response
+#[derive(serde::Serialize)]
+pub struct HealthResponse {
+    pub status: &'static str,
+    pub service: &'static str,
+    pub version: &'static str,
+}
+
+/// Build the admin API router
+pub fn build_router(state: AdminState) -> Router {
+    Router::new()
+        .route("/admin/health", get(health_handler))
+        .route("/admin/routes", get(routes_handler))
+        .route("/admin/metrics", get(metrics_handler))
+        .route("/admin/config", get(config_handler))
+        .with_state(state)
+}
+
+async fn health_handler() -> axum::Json<HealthResponse> {
+    axum::Json(HealthResponse {
+        status: "ok",
+        service: "sentirum-lb",
+        version: env!("CARGO_PKG_VERSION"),
+    })
+}
+
+async fn routes_handler(State(state): State<AdminState>) -> axum::Json<serde_json::Value> {
+    let table = state.route_table.get();
+    let route_count = table.route_count();
+    let target_count = table.target_count();
+    let hosts = table.hosts();
+
+    let routes_info: Vec<serde_json::Value> = hosts
+        .iter()
+        .flat_map(|host| {
+            let routes = table.get_routes(host).unwrap();
+            routes.iter().map(move |route| {
+                let targets: Vec<serde_json::Value> = route
+                    .targets
+                    .iter()
+                    .map(|t| {
+                        serde_json::json!({
+                            "service": t.service,
+                            "url": t.url,
+                            "weight": t.weight,
+                        })
+                    })
+                    .collect();
+
+                serde_json::json!({
+                    "host": host,
+                    "path": route.path,
+                    "targets": targets,
+                })
+            })
+        })
+        .collect();
+
+    axum::Json(serde_json::json!({
+        "route_count": route_count,
+        "target_count": target_count,
+        "routes": routes_info,
+    }))
+}
+
+async fn metrics_handler() -> String {
+    crate::metrics::prometheus::global().render()
+}
+
+async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "server": {
+            "listen": state.config.server.listen,
+            "admin_listen": state.config.server.admin_listen,
+            "workers": state.config.server.workers,
+        },
+        "consul": {
+            "address": state.config.consul.address,
+            "scheme": state.config.consul.scheme,
+            "kv_prefix": state.config.consul.kv_prefix,
+            "tag_prefix": state.config.consul.tag_prefix,
+        },
+        "proxy": {
+            "strategy": state.config.proxy.strategy,
+            "matcher": state.config.proxy.matcher,
+            "connect_timeout": state.config.proxy.connect_timeout,
+            "read_timeout": state.config.proxy.read_timeout,
+            "pool_size": state.config.proxy.pool_size,
+            "max_connections": state.config.proxy.max_connections,
+        },
+    }))
+}
+
+/// Run the admin API server using axum
+pub async fn run_admin_server(
+    config: Arc<Config>,
+    route_table: Arc<ManagedRouteTable>,
+) {
+    let addr = config.server.admin_listen.clone();
+    let state = AdminState { config, route_table };
+    let app = build_router(state);
+
+    tracing::info!(addr = %addr, "Admin API server starting (axum)");
+
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(addr = %addr, error = %e, "Failed to bind admin API");
+            return;
+        }
+    };
+
+    if let Err(e) = axum::serve(listener, app).await {
+        tracing::error!(error = %e, "Admin API server error");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::*;
+    use axum::body::Body;
+    use http::Request;
+    use tower::ServiceExt; // for oneshot()
+
+    fn make_test_config() -> Arc<Config> {
+        Arc::new(Config {
+            server: ServerConfig {
+                listen: ":9999".to_string(),
+                admin_listen: ":9998".to_string(),
+                workers: 0,
+            },
+            consul: ConsulConfig {
+                address: "127.0.0.1:8500".to_string(),
+                scheme: "http".to_string(),
+                token: String::new(),
+                kv_prefix: "/sentirum-lb/routes".to_string(),
+                tag_prefix: "urlprefix-".to_string(),
+                poll_interval: "0s".to_string(),
+                service_discovery: false,
+                kv_watching: false,
+            },
+            proxy: ProxyConfig::default(),
+            logging: LoggingConfig::default(),
+            tls: TlsConfig::default(),
+        })
+    }
+
+    fn make_test_state() -> AdminState {
+        AdminState {
+            config: make_test_config(),
+            route_table: Arc::new(ManagedRouteTable::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_admin_health() {
+        let state = make_test_state();
+        let app = build_router(state);
+        let response = app
+            .oneshot(Request::builder().uri("/admin/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_admin_routes() {
+        let state = make_test_state();
+        let app = build_router(state);
+        let response = app
+            .oneshot(Request::builder().uri("/admin/routes").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_admin_metrics() {
+        let state = make_test_state();
+        let app = build_router(state);
+        let response = app
+            .oneshot(Request::builder().uri("/admin/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_admin_config() {
+        let state = make_test_state();
+        let app = build_router(state);
+        let response = app
+            .oneshot(Request::builder().uri("/admin/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_admin_not_found() {
+        let state = make_test_state();
+        let app = build_router(state);
+        let response = app
+            .oneshot(Request::builder().uri("/admin/nonexistent").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 404);
+    }
+}

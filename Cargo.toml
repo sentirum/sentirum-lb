@@ -1,0 +1,68 @@
+[package]
+name = "sentirum-lb"
+version = "0.1.0"
+edition = "2024"
+description = "High-performance Rust-based load balancer with Consul KV integration, inspired by Fabio"
+license = "MIT"
+
+[dependencies]
+# Proxy framework (pingora umbrella crate re-exports everything)
+pingora = { version = "0.5", features = ["proxy", "lb"] }
+pingora-http = "0.5"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client (Consul API)
+reqwest = { version = "0.12", features = ["rustls-tls", "json"] }
+
+# Error handling
+thiserror = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# CLI & Config
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+
+# Glob matching
+glob = "0.3"
+
+# Atomic swap for lock-free route table updates
+arc-swap = "1"
+
+# URL parsing
+url = "2"
+
+# Regular expressions
+regex = "1"
+
+# UUID generation
+uuid = { version = "1", features = ["v4"] }
+
+# Async trait
+async-trait = "0.1"
+
+# Async utilities (join_all for concurrent catalog queries)
+futures = "0.3"
+
+# Byte buffer types (for response body construction)
+bytes = "1"
+
+# Random number generation (for RandomPicker)
+rand = { version = "0.8", features = ["small_rng"] }
+axum = "0.8.8"
+tower = "0.5.3"
+http = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+panic = "abort"

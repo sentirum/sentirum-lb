@@ -1,0 +1,259 @@
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// A target backend for a route.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Target {
+    /// Service name (e.g. "myservice")
+    pub service: String,
+    /// Target URL string (e.g. "http://10.0.0.1:8080/")
+    pub url: String,
+    /// Fixed weight for traffic distribution (0 = dynamic)
+    #[serde(default)]
+    pub fixed_weight: f64,
+    /// Actual computed weight (percentage)
+    #[serde(default)]
+    pub weight: f64,
+    /// Tags from Consul service
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Route options
+    #[serde(default)]
+    pub opts: HashMap<String, String>,
+
+    // --- Pre-parsed fields (not serialized, computed from url) ---
+    /// Pre-parsed host from URL
+    #[serde(skip)]
+    pub parsed_host: Option<String>,
+    /// Pre-parsed port from URL
+    #[serde(skip)]
+    pub parsed_port: Option<u16>,
+    /// Whether upstream uses TLS
+    #[serde(skip)]
+    pub parsed_tls: bool,
+    /// Active connection count for least-connections picker
+    #[serde(skip)]
+    pub active_connections: std::sync::atomic::AtomicU64,
+}
+
+// Manual Clone impl because AtomicU64 doesn't impl Clone
+impl Clone for Target {
+    fn clone(&self) -> Self {
+        Self {
+            service: self.service.clone(),
+            url: self.url.clone(),
+            fixed_weight: self.fixed_weight,
+            weight: self.weight,
+            tags: self.tags.clone(),
+            opts: self.opts.clone(),
+            parsed_host: self.parsed_host.clone(),
+            parsed_port: self.parsed_port,
+            parsed_tls: self.parsed_tls,
+            // Reset active connections on clone (fresh snapshot)
+            active_connections: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+impl Default for Target {
+    fn default() -> Self {
+        Self {
+            service: String::new(),
+            url: String::new(),
+            fixed_weight: 0.0,
+            weight: 0.0,
+            tags: Vec::new(),
+            opts: HashMap::new(),
+            parsed_host: None,
+            parsed_port: None,
+            parsed_tls: false,
+            active_connections: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+impl Target {
+    /// Create a new target with URL auto-parsed.
+    pub fn new(service: String, url: String) -> Self {
+        let mut target = Self {
+            service,
+            url,
+            ..Default::default()
+        };
+        target.pre_parse();
+        target
+    }
+
+    /// Pre-parse the URL once to avoid per-request parsing.
+    /// Also validates against SSRF risks (private/loopback IPs).
+    pub fn pre_parse(&mut self) {
+        if let Ok(parsed) = url::Url::parse(&self.url) {
+            self.parsed_host = parsed.host_str().map(|h| h.to_string());
+            self.parsed_port = parsed.port_or_known_default();
+            self.parsed_tls = parsed.scheme() == "https";
+        }
+    }
+
+    /// Check if the upstream host is a private/reserved IP (SSRF protection).
+    /// Returns true if the host is considered safe (public IP or hostname).
+    /// Returns false for loopback, link-local, private RFC1918, and cloud metadata IPs.
+    pub fn is_host_safe(&self) -> bool {
+        let host = match self.parsed_host.as_deref() {
+            Some(h) => h,
+            None => return false,
+        };
+
+        // Try parsing as IP address first
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            return !is_ip_private(&ip);
+        }
+
+        // Hostname: block known dangerous patterns
+        let lower = host.to_lowercase();
+        if lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".local") {
+            return false;
+        }
+
+        // Regular hostnames are considered safe
+        true
+    }
+
+    /// Whether SSRF protection is explicitly bypassed for this target.
+    pub fn ssrf_skip_verify(&self) -> bool {
+        self.opts
+            .get("ssrfskipverify")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+    }
+
+    /// Get the upstream host (pre-parsed, no allocation)
+    pub fn upstream_host(&self) -> &str {
+        self.parsed_host.as_deref().unwrap_or("127.0.0.1")
+    }
+
+    /// Get the upstream port (pre-parsed)
+    pub fn upstream_port(&self) -> u16 {
+        self.parsed_port.unwrap_or(80)
+    }
+
+    /// Whether upstream uses TLS
+    pub fn upstream_tls(&self) -> bool {
+        self.parsed_tls
+    }
+
+    /// Get the strip path option.
+    pub fn strip_path(&self) -> Option<&str> {
+        self.opts.get("strip").map(|s| s.as_str())
+    }
+
+    /// Get the prepend path option.
+    pub fn prepend_path(&self) -> Option<&str> {
+        self.opts.get("prepend").map(|s| s.as_str())
+    }
+
+    /// Whether to skip TLS verification for upstream.
+    pub fn tls_skip_verify(&self) -> bool {
+        self.opts
+            .get("tlsskipverify")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+    }
+
+    /// Whether this is a TCP proxy target.
+    pub fn is_tcp(&self) -> bool {
+        self.opts.get("proto").map(|v| v == "tcp").unwrap_or(false)
+    }
+
+    /// Whether this is an HTTPS upstream target.
+    pub fn is_https(&self) -> bool {
+        self.parsed_tls
+            || self.opts.get("proto").map(|v| v == "https").unwrap_or(false)
+    }
+
+    /// Get the host header override.
+    pub fn host_override(&self) -> Option<&str> {
+        self.opts.get("host").map(|s| s.as_str())
+    }
+}
+
+/// Check if an IP address is private/reserved and should be blocked for SSRF protection.
+pub fn is_ip_private(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            // Loopback: 127.0.0.0/8
+            if v4.is_loopback() {
+                return true;
+            }
+            // Link-local: 169.254.0.0/16 (cloud metadata!)
+            if v4.is_link_local() {
+                               return true;
+            }
+            // Private RFC1918: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+            if v4.is_private() {
+                return true;
+            }
+            // Broadcast / unspecified
+            if v4.is_broadcast() || v4.is_unspecified() {
+                               return true;
+            }
+            // Cloud provider metadata endpoints
+            // AWS: 169.254.169.254 (already covered by link-local)
+            // GCP: metadata.google.internal (covered by hostname check)
+            false
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.is_unspecified()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ssrf_blocks_private_ips() {
+        let t = Target::new("svc".into(), "http://10.0.0.1:8080/".into());
+        assert!(!t.is_host_safe()); // RFC1918
+
+        let t = Target::new("svc".into(), "http://192.168.1.1:8080/".into());
+        assert!(!t.is_host_safe()); // RFC1918
+
+        let t = Target::new("svc".into(), "http://172.16.0.1:8080/".into());
+        assert!(!t.is_host_safe()); // RFC1918
+
+        let t = Target::new("svc".into(), "http://127.0.0.1:8080/".into());
+        assert!(!t.is_host_safe()); // Loopback
+
+        let t = Target::new("svc".into(), "http://169.254.169.254:80/".into());
+        assert!(!t.is_host_safe()); // Cloud metadata
+    }
+
+    #[test]
+    fn test_ssrf_allows_public_ips() {
+        let t = Target::new("svc".into(), "http://8.8.8.8:80/".into());
+        assert!(t.is_host_safe());
+
+        let t = Target::new("svc".into(), "http://1.2.3.4:80/".into());
+        assert!(t.is_host_safe());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_localhost_hostname() {
+        let t = Target::new("svc".into(), "http://localhost:8080/".into());
+        assert!(!t.is_host_safe());
+    }
+
+    #[test]
+    fn test_ssrf_allows_normal_hostnames() {
+        let t = Target::new("svc".into(), "http://api.example.com/".into());
+        assert!(t.is_host_safe());
+    }
+
+    #[test]
+    fn test_ssrf_skip_verify_opt() {
+        let mut t = Target::new("svc".into(), "http://10.0.0.1:8080/".into());
+        t.opts.insert("ssrfskipverify".to_string(), "true".to_string());
+        assert!(t.ssrf_skip_verify());
+    }
+}

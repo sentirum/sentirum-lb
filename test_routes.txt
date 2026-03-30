@@ -1,0 +1,7 @@
+# Sentirum LB Test Routes
+# Fabio-compatible format
+
+route add webapp myhost.com/ http://127.0.0.1:8080/
+route add webapp myhost.com/ http://127.0.0.1:8081/
+route add api myhost.com/api/ http://127.0.0.1:9090/ weight 0.7
+route add static static.example.com/ http://127.0.0.1:3000/ opts "strip=/static"
