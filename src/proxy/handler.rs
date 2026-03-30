@@ -276,7 +276,13 @@ impl ProxyHttp for SentirumProxy {
             .digest()
             .and_then(|digest| digest.ssl_digest.as_ref())
             .is_some();
-        append_forwarded_headers(session, downstream, upstream_request, downstream_is_tls)?;
+        let peer_addr = session.client_addr().map(|addr| addr.to_string());
+        append_forwarded_headers(
+            downstream,
+            upstream_request,
+            downstream_is_tls,
+            peer_addr.as_deref(),
+        )?;
 
         // Use stored target from upstream_peer (no double lookup!)
         if let Some(target) = &ctx.picked_target {
@@ -421,10 +427,10 @@ fn parse_host_from_header(header: &pingora_http::RequestHeader) -> &str {
 }
 
 fn append_forwarded_headers(
-    session: &Session,
     downstream_request: &pingora_http::RequestHeader,
     upstream_request: &mut pingora_http::RequestHeader,
     downstream_is_tls: bool,
+    peer_addr: Option<&str>,
 ) -> pingora::Result<()> {
     let host = downstream_request
         .headers
@@ -432,10 +438,7 @@ fn append_forwarded_headers(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let peer_ip = session
-        .client_addr()
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_default();
+    let peer_ip = peer_addr.unwrap_or_default();
 
     let forwarded_for = match downstream_request
         .headers
@@ -444,7 +447,7 @@ fn append_forwarded_headers(
     {
         Some(existing) if !peer_ip.is_empty() => format!("{existing}, {peer_ip}"),
         Some(existing) => existing.to_string(),
-        None => peer_ip,
+        None => peer_ip.to_string(),
     };
 
     if !forwarded_for.is_empty() {
@@ -601,7 +604,7 @@ mod tests {
         downstream.insert_header("Host", "example.com").unwrap();
         let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
 
-        append_forwarded_headers(&downstream, &mut upstream, false).unwrap();
+        append_forwarded_headers(&downstream, &mut upstream, false, None).unwrap();
 
         assert_eq!(upstream.headers.get("x-forwarded-host").unwrap(), "example.com");
         assert_eq!(upstream.headers.get("x-forwarded-proto").unwrap(), "http");
@@ -614,7 +617,7 @@ mod tests {
         downstream.insert_header("X-Forwarded-Proto", "https").unwrap();
         let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
 
-        append_forwarded_headers(&downstream, &mut upstream, false).unwrap();
+        append_forwarded_headers(&downstream, &mut upstream, false, None).unwrap();
 
         assert_eq!(upstream.headers.get("x-forwarded-proto").unwrap(), "https");
     }
@@ -625,7 +628,7 @@ mod tests {
         downstream.insert_header("Host", "example.com").unwrap();
         let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
 
-        append_forwarded_headers(&downstream, &mut upstream, true).unwrap();
+        append_forwarded_headers(&downstream, &mut upstream, true, None).unwrap();
 
         assert_eq!(upstream.headers.get("x-forwarded-proto").unwrap(), "https");
     }
