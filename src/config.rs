@@ -111,6 +111,11 @@ pub struct ProxyConfig {
     /// Max concurrent connections per upstream
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
+    /// Trusted proxy CIDR ranges.
+    /// When the peer IP is in this list, X-Forwarded-For and CF-Connecting-IP
+    /// headers from the client are trusted. Otherwise they are overwritten.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
 }
 
 impl Default for ProxyConfig {
@@ -126,6 +131,7 @@ impl Default for ProxyConfig {
             idle_timeout: default_idle_timeout(),
             pool_size: default_pool_size(),
             max_connections: default_max_connections(),
+            trusted_proxies: Vec::new(),
         }
     }
 }
