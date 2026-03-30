@@ -330,6 +330,8 @@ impl KVWatcher {
 pub struct ConsulWatcher {
     service_monitor: ServiceMonitor,
     kv_watcher: KVWatcher,
+    service_discovery_enabled: bool,
+    kv_watching_enabled: bool,
 }
 
 impl ConsulWatcher {
@@ -337,39 +339,48 @@ impl ConsulWatcher {
         Self {
             service_monitor: ServiceMonitor::new(client.clone(), config.clone()),
             kv_watcher: KVWatcher::new(client, config),
+            service_discovery_enabled: true,
+            kv_watching_enabled: true,
         }
     }
 
+    pub fn with_flags(mut self, service_discovery: bool, kv_watching: bool) -> Self {
+        self.service_discovery_enabled = service_discovery;
+        self.kv_watching_enabled = kv_watching;
+        self
+    }
+
     /// Start the watcher and send updates to the channel.
-    /// Both watchers run independently — one crashing doesn't stop the other.
+    /// Only enabled watchers are spawned.
     pub async fn run(&self, updates: mpsc::Sender<RouteUpdate>) {
-        let (svc_tx, kv_tx) = (updates.clone(), updates);
+        let mut handles = Vec::new();
 
-        // Spawn service monitor as independent task
-        let svc_handle = tokio::spawn({
+        if self.service_discovery_enabled {
             let monitor = self.service_monitor.clone();
-            async move {
-                monitor.watch(svc_tx).await;
+            let tx = updates.clone();
+            handles.push(tokio::spawn(async move {
+                monitor.watch(tx).await;
                 tracing::warn!("Service monitor task ended");
-            }
-        });
-
-        // Spawn KV watcher as independent task
-        let kv_handle = tokio::spawn({
-            let watcher = self.kv_watcher.clone();
-            async move {
-                watcher.watch(kv_tx).await;
-                tracing::warn!("KV watcher task ended");
-            }
-        });
-
-        // Wait for both — they run independently, neither blocks the other
-        let (svc_res, kv_res) = tokio::join!(svc_handle, kv_handle);
-        if let Err(e) = svc_res {
-            tracing::error!(error = %e, "Service monitor task panicked");
+            }));
+        } else {
+            tracing::info!("Service discovery disabled, skipping service monitor");
         }
-        if let Err(e) = kv_res {
-            tracing::error!(error = %e, "KV watcher task panicked");
+
+        if self.kv_watching_enabled {
+            let watcher = self.kv_watcher.clone();
+            let tx = updates;
+            handles.push(tokio::spawn(async move {
+                watcher.watch(tx).await;
+                tracing::warn!("KV watcher task ended");
+            }));
+        } else {
+            tracing::info!("KV watching disabled, skipping KV watcher");
+        }
+
+        for handle in handles {
+            if let Err(e) = handle.await {
+                tracing::error!(error = %e, "Watcher task panicked");
+            }
         }
     }
 }
