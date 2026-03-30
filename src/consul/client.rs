@@ -98,15 +98,12 @@ impl ConsulClient {
         {
             let mut query = url.query_pairs_mut();
             query.append_pair("recurse", "true");
-            query.append_pair("stale", if self.config.allow_stale { "true" } else { "false" });
-            query.append_pair(
-                "consistent",
-                if self.config.require_consistent {
-                    "true"
-                } else {
-                    "false"
-                },
-            );
+            if self.config.allow_stale {
+                query.append_pair("stale", "true");
+            }
+            if self.config.require_consistent {
+                query.append_pair("consistent", "true");
+            }
             if index > 0 {
                 query.append_pair("index", &index.to_string());
                 query.append_pair("wait", &self.config.query_wait);
@@ -122,15 +119,12 @@ impl ConsulClient {
 
         {
             let mut query = url.query_pairs_mut();
-            query.append_pair("stale", if self.config.allow_stale { "true" } else { "false" });
-            query.append_pair(
-                "consistent",
-                if self.config.require_consistent {
-                    "true"
-                } else {
-                    "false"
-                },
-            );
+            if self.config.allow_stale {
+                query.append_pair("stale", "true");
+            }
+            if self.config.require_consistent {
+                query.append_pair("consistent", "true");
+            }
             if index > 0 {
                 query.append_pair("index", &index.to_string());
                 query.append_pair("wait", &self.config.query_wait);
@@ -290,15 +284,20 @@ impl ConsulClient {
         &self,
         service_name: &str,
     ) -> Result<Vec<CatalogService>, ConsulError> {
-        let url = format!(
-            "{}/v1/catalog/service/{}?stale={}&consistent={}",
-            self.base_url,
-            service_name,
-            self.config.allow_stale,
-            self.config.require_consistent
-        );
+        let mut url = Url::parse(&format!("{}/v1/catalog/service/{}", self.base_url, service_name))
+            .map_err(|e| ConsulError::ClientError(e.to_string()))?;
 
-        let mut request = self.client.get(&url);
+        {
+            let mut query = url.query_pairs_mut();
+            if self.config.allow_stale {
+                query.append_pair("stale", "true");
+            }
+            if self.config.require_consistent {
+                query.append_pair("consistent", "true");
+            }
+        }
+
+        let mut request = self.client.get(url);
 
         if let Some(token) = &self.config.token {
             request = request.header("X-Consul-Token", token);
@@ -312,15 +311,25 @@ impl ConsulClient {
 
     /// Get all keys under a KV path
     pub async fn list_keys(&self, path: &str) -> Result<Vec<String>, ConsulError> {
-        let url = format!(
-            "{}/v1/kv/{}?keys=true&stale={}&consistent={}",
+        let mut url = Url::parse(&format!(
+            "{}/v1/kv/{}",
             self.base_url,
             path.trim_start_matches('/'),
-            self.config.allow_stale,
-            self.config.require_consistent
-        );
+        ))
+        .map_err(|e| ConsulError::ClientError(e.to_string()))?;
 
-        let mut request = self.client.get(&url);
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("keys", "true");
+            if self.config.allow_stale {
+                query.append_pair("stale", "true");
+            }
+            if self.config.require_consistent {
+                query.append_pair("consistent", "true");
+            }
+        }
+
+        let mut request = self.client.get(url);
 
         if let Some(token) = &self.config.token {
             request = request.header("X-Consul-Token", token);
@@ -336,38 +345,38 @@ impl ConsulClient {
 /// Health check from Consul
 #[derive(Debug, Deserialize, Clone)]
 pub struct HealthCheck {
-    #[serde(alias = "Node")]
+    #[serde(default, alias = "Node")]
     pub node: String,
-    #[serde(alias = "CheckID")]
+    #[serde(default, alias = "CheckID")]
     pub check_id: String,
-    #[serde(alias = "Name")]
+    #[serde(default, alias = "Name")]
     pub name: String,
-    #[serde(alias = "Status")]
+    #[serde(default, alias = "Status")]
     pub status: String,
-    #[serde(alias = "ServiceName")]
+    #[serde(default, alias = "ServiceName")]
     pub service_name: String,
-    #[serde(alias = "ServiceID")]
+    #[serde(default, alias = "ServiceID")]
     pub service_id: String,
-    #[serde(alias = "ServiceTags")]
+    #[serde(default, alias = "ServiceTags")]
     pub service_tags: Vec<String>,
 }
 
 /// Service entry from Consul catalog
 #[derive(Debug, Deserialize, Clone)]
 pub struct CatalogService {
-    #[serde(alias = "ID")]
+    #[serde(default, alias = "ServiceID")]
     pub id: String,
-    #[serde(alias = "Node")]
+    #[serde(default, alias = "Node")]
     pub node: String,
-    #[serde(alias = "Address")]
+    #[serde(default, alias = "Address")]
     pub address: String,
-    #[serde(alias = "ServiceAddress")]
+    #[serde(default, alias = "ServiceAddress")]
     pub service_address: String,
-    #[serde(alias = "ServicePort")]
+    #[serde(default, alias = "ServicePort")]
     pub service_port: u16,
-    #[serde(alias = "ServiceTags")]
+    #[serde(default, alias = "ServiceTags")]
     pub service_tags: Vec<String>,
-    #[serde(alias = "ServiceMeta")]
+    #[serde(default, alias = "ServiceMeta")]
     pub service_meta: HashMap<String, String>,
 }
 
@@ -408,7 +417,7 @@ mod tests {
 
         assert!(query.contains("recurse=true"));
         assert!(query.contains("stale=true"));
-        assert!(query.contains("consistent=false"));
+        assert!(!query.contains("consistent="));
         assert!(query.contains("index=42"));
         assert!(query.contains("wait=5m"));
     }
