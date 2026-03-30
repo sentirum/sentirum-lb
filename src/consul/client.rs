@@ -142,9 +142,9 @@ impl ConsulClient {
 
     /// Create a new Consul client
     pub fn new(config: ConsulConfig) -> Result<Self, ConsulError> {
-        let query_wait_secs = crate::config::Config::parse_duration(&config.query_wait).as_secs();
-        let query_wait_secs = if query_wait_secs == 0 { 300 } else { query_wait_secs };
-        let http_timeout = Duration::from_secs(query_wait_secs + 10);
+        let query_wait = crate::config::Config::parse_duration(&config.query_wait);
+        let query_wait = if query_wait.is_zero() { Duration::from_secs(300) } else { query_wait };
+        let http_timeout = query_wait + Duration::from_secs(10);
 
         let client = Client::builder()
             .timeout(http_timeout)
