@@ -3,7 +3,6 @@ WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-COPY README.md ./README.md
 
 RUN cargo build --release --locked
 
