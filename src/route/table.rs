@@ -193,16 +193,18 @@ impl Table {
     /// Returns the matching route (with targets) for the given matcher strategy.
     pub fn lookup_route(&self, host: &str, path: &str, matcher: &str) -> Option<&Arc<Route>> {
         // Try exact host match first
-        if let Some(routes) = self.routes.get(host)
-            && let Some(route) = Self::find_matching_route(routes, path, matcher) {
+        if let Some(routes) = self.routes.get(host) {
+            if let Some(route) = Self::find_matching_route(routes, path, matcher) {
                 return Some(route);
             }
+        }
 
         // Try empty host (catch-all)
-        if let Some(routes) = self.routes.get("")
-            && let Some(route) = Self::find_matching_route(routes, path, matcher) {
+        if let Some(routes) = self.routes.get("") {
+            if let Some(route) = Self::find_matching_route(routes, path, matcher) {
                 return Some(route);
             }
+        }
 
         None
     }

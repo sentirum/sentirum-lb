@@ -113,8 +113,8 @@ impl ServiceMonitor {
                         };
 
                         for tag in &instance.service_tags {
-                            if tag.starts_with(tag_prefix)
-                                && let Some(route_def) = self.parse_tag(
+                            if tag.starts_with(tag_prefix) {
+                                if let Some(route_def) = self.parse_tag(
                                     tag,
                                     address,
                                     instance.service_port,
@@ -122,6 +122,7 @@ impl ServiceMonitor {
                                 ) {
                                     config.push(route_def);
                                 }
+                            }
                         }
                     }
                 }

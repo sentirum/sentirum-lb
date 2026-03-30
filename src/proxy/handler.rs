@@ -41,10 +41,11 @@ impl SentirumProxy {
         let table: &Table = &table;
 
         // Use Table's consolidated lookup (no duplication)
-        if let Some(route) = table.lookup_route(host, path, &self.matcher)
-            && !route.w_targets.is_empty() {
+        if let Some(route) = table.lookup_route(host, path, &self.matcher) {
+            if !route.w_targets.is_empty() {
                 return self.picker.pick(&route.targets, &route.w_targets, &route.rr_counter);
             }
+        }
 
         None
     }
@@ -94,10 +95,11 @@ impl ProxyHttp for SentirumProxy {
 
         // WebSocket upgrade detection — just let Pingora handle it natively
         // Pingora supports HTTP/1.1 Upgrade for WebSocket proxy automatically
-        if let Some(upgrade) = header.headers.get("upgrade")
-            && upgrade.as_bytes().eq_ignore_ascii_case(b"websocket") {
+        if let Some(upgrade) = header.headers.get("upgrade") {
+            if upgrade.as_bytes().eq_ignore_ascii_case(b"websocket") {
                 tracing::debug!("WebSocket upgrade detected, proxying as-is");
             }
+        }
 
         Ok(false) // Continue with normal proxy flow
     }
@@ -443,10 +445,11 @@ fn append_forwarded_headers(
 fn rewrite_upstream_uri(uri: &http::Uri, target: &crate::route::target::Target) -> Option<http::Uri> {
     let mut path = uri.path().to_string();
 
-    if let Some(strip) = target.strip_path()
-        && let Some(new_path) = strip_path_prefix(&path, strip) {
+    if let Some(strip) = target.strip_path() {
+        if let Some(new_path) = strip_path_prefix(&path, strip) {
             path = new_path.into_owned();
         }
+    }
 
     if let Some(prepend) = target.prepend_path() {
         path = prepend_path_prefix(prepend, &path);
