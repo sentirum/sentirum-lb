@@ -95,27 +95,27 @@ impl Metrics {
 
         self.latency_sum_us.fetch_add(latency_us, Ordering::Relaxed);
 
-        // Record latency bucket
-        let latency_ms = latency_us / 1000;
-        if latency_ms < 1 {
+        // Record latency bucket using microsecond boundaries that match the
+        // exported `le=` labels exactly.
+        if latency_us <= 1_000 {
             self.latency_bucket_1ms.fetch_add(1, Ordering::Relaxed);
-        } else if latency_ms < 5 {
+        } else if latency_us <= 5_000 {
             self.latency_bucket_5ms.fetch_add(1, Ordering::Relaxed);
-        } else if latency_ms < 10 {
+        } else if latency_us <= 10_000 {
             self.latency_bucket_10ms.fetch_add(1, Ordering::Relaxed);
-        } else if latency_ms < 25 {
+        } else if latency_us <= 25_000 {
             self.latency_bucket_25ms.fetch_add(1, Ordering::Relaxed);
-        } else if latency_ms < 50 {
+        } else if latency_us <= 50_000 {
             self.latency_bucket_50ms.fetch_add(1, Ordering::Relaxed);
-        } else if latency_ms < 100 {
+        } else if latency_us <= 100_000 {
             self.latency_bucket_100ms.fetch_add(1, Ordering::Relaxed);
-        } else if latency_ms < 250 {
+        } else if latency_us <= 250_000 {
             self.latency_bucket_250ms.fetch_add(1, Ordering::Relaxed);
-        } else if latency_ms < 500 {
+        } else if latency_us <= 500_000 {
             self.latency_bucket_500ms.fetch_add(1, Ordering::Relaxed);
-        } else if latency_ms < 1000 {
+        } else if latency_us <= 1_000_000 {
             self.latency_bucket_1s.fetch_add(1, Ordering::Relaxed);
-        } else if latency_ms < 5000 {
+        } else if latency_us <= 5_000_000 {
             self.latency_bucket_5s.fetch_add(1, Ordering::Relaxed);
         } else {
             self.latency_bucket_inf.fetch_add(1, Ordering::Relaxed);
@@ -299,25 +299,36 @@ mod tests {
         let output = metrics.render();
         assert!(output.contains("sentirum_lb_requests_total 1"));
         assert!(output.contains("sentirum_lb_request_duration_seconds_bucket"));
-        assert!(output.contains("sentirum_lb_request_duration_seconds_sum 0.005"));
+        let sum_line = output
+            .lines()
+            .find(|line| line.starts_with("sentirum_lb_request_duration_seconds_sum"))
+            .expect("missing duration sum line");
+        let sum: f64 = sum_line
+            .split_whitespace()
+            .nth(1)
+            .expect("missing duration sum value")
+            .parse()
+            .expect("sum should parse as f64");
+        assert!((sum - 0.005_f64).abs() < 1e-9, "unexpected duration sum: {sum}");
         assert!(output.contains("sentirum_lb_response_status_total"));
     }
 
     #[test]
     fn test_latency_buckets() {
         let metrics = Metrics::new();
-        metrics.record_request(200, 500);    // <1ms
-        metrics.record_request(200, 3000);   // 1-5ms
-        metrics.record_request(200, 8000);   // 5-10ms
-        metrics.record_request(200, 20000);  // 10-25ms
-        metrics.record_request(200, 80000);  // 50-100ms
-        metrics.record_request(200, 2000000); // 1-5s
+        metrics.record_request(200, 500);      // <=1ms
+        metrics.record_request(200, 1_000);    // boundary <=1ms
+        metrics.record_request(200, 3_000);    // <=5ms
+        metrics.record_request(200, 8_000);    // <=10ms
+        metrics.record_request(200, 20_000);   // <=25ms
+        metrics.record_request(200, 80_000);   // <=100ms
+        metrics.record_request(200, 2_000_000); // <=5s
 
-        assert_eq!(metrics.latency_bucket_1ms.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.latency_bucket_1ms.load(Ordering::Relaxed), 2);
         assert_eq!(metrics.latency_bucket_5ms.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.latency_bucket_10ms.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.latency_bucket_25ms.load(Ordering::Relaxed), 1);
-        assert_eq!(metrics.latency_bucket_100ms.load(Ordering::Relaxed), 1);  // 80ms < 100ms
-        assert_eq!(metrics.latency_bucket_5s.load(Ordering::Relaxed), 1);    // 2000ms < 5000ms
+        assert_eq!(metrics.latency_bucket_100ms.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.latency_bucket_5s.load(Ordering::Relaxed), 1);
     }
 }

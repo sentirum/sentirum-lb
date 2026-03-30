@@ -76,7 +76,7 @@ impl ManagedRouteTable {
     pub fn load_static(&self, defs: &[RouteDef]) {
         let _guard = self.update_lock.lock().unwrap();
         let mut registry = (**self.registry.load()).clone();
-        registry.set_static(mark_sources(defs, RouteSource::Static));
+        registry.set_static(mark_sources(defs.to_vec(), RouteSource::Static));
         self.rebuild_and_swap(&registry);
     }
 
@@ -84,7 +84,7 @@ impl ManagedRouteTable {
     pub fn update_kv(&self, defs: Vec<RouteDef>) {
         let _guard = self.update_lock.lock().unwrap();
         let mut registry = (**self.registry.load()).clone();
-        registry.update_kv(mark_sources(&defs, RouteSource::ConsulKv));
+        registry.update_kv(mark_sources(defs, RouteSource::ConsulKv));
         self.rebuild_and_swap(&registry);
     }
 
@@ -92,7 +92,7 @@ impl ManagedRouteTable {
     pub fn update_services(&self, defs: Vec<RouteDef>) {
         let _guard = self.update_lock.lock().unwrap();
         let mut registry = (**self.registry.load()).clone();
-        registry.update_services(mark_sources(&defs, RouteSource::ConsulService));
+        registry.update_services(mark_sources(defs, RouteSource::ConsulService));
         self.rebuild_and_swap(&registry);
     }
 
@@ -125,9 +125,8 @@ impl Default for ManagedRouteTable {
     }
 }
 
-fn mark_sources(defs: &[RouteDef], source: RouteSource) -> Vec<RouteDef> {
-    defs.iter()
-        .cloned()
+fn mark_sources(defs: Vec<RouteDef>, source: RouteSource) -> Vec<RouteDef> {
+    defs.into_iter()
         .map(|mut def| {
             def.source = source.clone();
             def

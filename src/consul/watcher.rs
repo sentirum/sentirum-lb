@@ -144,51 +144,56 @@ impl ServiceMonitor {
     /// Get passing service IDs grouped by service name using Fabio-like health aggregation.
     fn passing_service_ids(&self, checks: &[&HealthCheck]) -> HashMap<String, Vec<String>> {
         let mut services: HashMap<(String, String, String), Vec<&HealthCheck>> = HashMap::new();
+        let mut node_down: HashMap<String, bool> = HashMap::new();
+        let mut node_maintenance: HashMap<String, bool> = HashMap::new();
+        let mut service_maintenance: HashMap<(String, String), bool> = HashMap::new();
 
         for check in checks {
-            if !is_service_check(check) {
-                continue;
+            match check.check_id.as_str() {
+                "serfHealth" if check.status == "critical" => {
+                    node_down.insert(check.node.clone(), true);
+                }
+                "_node_maintenance" => {
+                    node_maintenance.insert(check.node.clone(), true);
+                }
+                _ if check.check_id.starts_with("_service_maintenance:") && check.status == "critical" => {
+                    let service_id = check.check_id.trim_start_matches("_service_maintenance:").to_string();
+                    service_maintenance.insert((check.node.clone(), service_id), true);
+                }
+                _ if is_service_check(check) => {
+                    services
+                        .entry((
+                            check.node.clone(),
+                            check.service_name.clone(),
+                            check.service_id.clone(),
+                        ))
+                        .or_default()
+                        .push(*check);
+                }
+                _ => {}
             }
-            services
-                .entry((
-                    check.node.clone(),
-                    check.service_name.clone(),
-                    check.service_id.clone(),
-                ))
-                .or_default()
-                .push(*check);
         }
 
         let mut result: HashMap<String, Vec<String>> = HashMap::new();
 
-        'services: for ((node, service_name, service_id), svc_checks) in services {
-            let mut total = 0;
-            let mut passing = 0;
-
-            for check in checks {
-                if check.node != node {
-                    continue;
-                }
-
-                if check.check_id == "serfHealth" && check.status == "critical" {
-                    continue 'services;
-                }
-                if check.check_id == "_node_maintenance" {
-                    continue 'services;
-                }
-                if check.check_id == format!("_service_maintenance:{}", service_id) && check.status == "critical" {
-                    continue 'services;
-                }
-
-                if check.service_id == service_id {
-                    total += 1;
-                    if check.status == HEALTH_STATUS_PASSING {
-                        passing += 1;
-                    }
-                }
+        for ((node, service_name, service_id), svc_checks) in services {
+            if node_down.get(&node).copied().unwrap_or(false)
+                || node_maintenance.get(&node).copied().unwrap_or(false)
+                || service_maintenance
+                    .get(&(node.clone(), service_id.clone()))
+                    .copied()
+                    .unwrap_or(false)
+            {
+                continue;
             }
 
-            if passing == 0 || total != svc_checks.len() || total != passing {
+            let total = svc_checks.len();
+            let passing = svc_checks
+                .iter()
+                .filter(|check| check.status == HEALTH_STATUS_PASSING)
+                .count();
+
+            if passing == 0 || total != passing {
                 continue;
             }
 

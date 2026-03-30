@@ -106,7 +106,7 @@ impl Target {
     /// explicitly bypassed.
     pub fn is_host_safe(&self) -> bool {
         let host = match self.parsed_host.as_deref() {
-            Some(h) => h,
+            Some(h) => h.trim_matches(&['[', ']'][..]),
             None => return false,
         };
 
@@ -142,7 +142,10 @@ impl Target {
 
     /// Get the upstream host (pre-parsed, no allocation)
     pub fn upstream_host(&self) -> &str {
-        self.parsed_host.as_deref().unwrap_or("127.0.0.1")
+        self.parsed_host
+            .as_deref()
+            .map(|h| h.trim_matches(&['[', ']'][..]))
+            .unwrap_or("127.0.0.1")
     }
 
     /// Get the upstream port (pre-parsed)
@@ -198,7 +201,7 @@ pub fn is_ip_private(ip: &std::net::IpAddr) -> bool {
 pub fn is_ip_rfc1918(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => v4.is_private(),
-        std::net::IpAddr::V6(_) => false,
+        std::net::IpAddr::V6(v6) => is_ipv6_unique_local(v6),
     }
 }
 
@@ -207,8 +210,12 @@ pub fn is_ip_always_blocked(ip: &std::net::IpAddr) -> bool {
         std::net::IpAddr::V4(v4) => {
             v4.is_loopback() || v4.is_link_local() || v4.is_broadcast() || v4.is_unspecified()
         }
-        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local(),
     }
+}
+
+fn is_ipv6_unique_local(ip: &std::net::Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xfe00) == 0xfc00
 }
 
 #[cfg(test)]
@@ -265,6 +272,25 @@ mod tests {
     fn test_consul_sources_still_block_loopback_hosts() {
         let mut t = Target::new("svc".into(), "http://127.0.0.1:8080/".into());
         t.source = RouteSource::ConsulService;
+        assert!(!t.is_host_safe());
+    }
+
+    #[test]
+    fn test_static_sources_block_ipv6_unique_local_hosts() {
+        let t = Target::new("svc".into(), "http://[fd00::1]:8080/".into());
+        assert!(!t.is_host_safe());
+    }
+
+    #[test]
+    fn test_consul_sources_allow_ipv6_unique_local_hosts() {
+        let mut t = Target::new("svc".into(), "http://[fd00::1]:8080/".into());
+        t.source = RouteSource::ConsulService;
+        assert!(t.is_host_safe());
+    }
+
+    #[test]
+    fn test_ipv6_link_local_hosts_are_blocked() {
+        let t = Target::new("svc".into(), "http://[fe80::1]:8080/".into());
         assert!(!t.is_host_safe());
     }
 

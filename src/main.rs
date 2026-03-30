@@ -91,14 +91,16 @@ async fn main() {
     let args = Args::parse();
 
     // Load configuration
-    let config_content = args
-        .config
-        .as_ref()
-        .map(|config_path| {
-            std::fs::read_to_string(config_path)
-                .unwrap_or_else(|e| panic!("Failed to load config file '{}': {}", config_path, e))
-        })
-        .unwrap_or_default();
+    let config_content = match args.config.as_ref() {
+        Some(config_path) => match std::fs::read_to_string(config_path) {
+            Ok(content) => content,
+            Err(e) => {
+                eprintln!("Error: failed to load config file '{}': {}", config_path, e);
+                std::process::exit(1);
+            }
+        },
+        None => String::new(),
+    };
 
     let mut config: Config = if config_content.is_empty() {
         let server = sentirum_lb::config::ServerConfig {

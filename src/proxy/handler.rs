@@ -146,7 +146,11 @@ impl ProxyHttp for SentirumProxy {
         let port = target.upstream_port();
 
         // Perform async DNS resolution to prevent DNS rebinding attacks and check the actual IP
-        let addr_str = format!("{}:{}", host, port);
+        let addr_str = if host.contains(':') {
+            format!("[{}]:{}", host, port)
+        } else {
+            format!("{}:{}", host, port)
+        };
         let mut addrs = match tokio::net::lookup_host(&addr_str).await {
             Ok(a) => a,
             Err(e) => {
@@ -266,7 +270,11 @@ impl ProxyHttp for SentirumProxy {
         }
 
         let downstream = session.req_header();
-        append_forwarded_headers(downstream, upstream_request);
+        let downstream_is_tls = session
+            .digest()
+            .and_then(|digest| digest.ssl_digest.as_ref())
+            .is_some();
+        append_forwarded_headers(downstream, upstream_request, downstream_is_tls)?;
 
         // Use stored target from upstream_peer (no double lookup!)
         if let Some(target) = &ctx.picked_target {
@@ -404,7 +412,8 @@ fn parse_host_from_header(header: &pingora_http::RequestHeader) -> &str {
 fn append_forwarded_headers(
     downstream_request: &pingora_http::RequestHeader,
     upstream_request: &mut pingora_http::RequestHeader,
-) {
+    downstream_is_tls: bool,
+) -> pingora::Result<()> {
     let host = downstream_request
         .headers
         .get("host")
@@ -415,19 +424,20 @@ fn append_forwarded_headers(
         .headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok()) {
-        let _ = upstream_request.insert_header("X-Forwarded-For", client_ip);
+        upstream_request.insert_header("X-Forwarded-For", client_ip)?;
     }
 
     if !host.is_empty() {
-        let _ = upstream_request.insert_header("X-Forwarded-Host", host);
+        upstream_request.insert_header("X-Forwarded-Host", host)?;
     }
 
-    let scheme = if downstream_request.uri.scheme_str() == Some("https") {
-        "https"
-    } else {
-        "http"
-    };
-    let _ = upstream_request.insert_header("X-Forwarded-Proto", scheme);
+    let scheme = downstream_request
+        .headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(if downstream_is_tls { "https" } else { "http" });
+    upstream_request.insert_header("X-Forwarded-Proto", scheme)?;
+    Ok(())
 }
 
 fn rewrite_upstream_uri(uri: &http::Uri, target: &crate::route::target::Target) -> Option<http::Uri> {
@@ -566,10 +576,33 @@ mod tests {
         downstream.insert_header("Host", "example.com").unwrap();
         let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
 
-        append_forwarded_headers(&downstream, &mut upstream);
+        append_forwarded_headers(&downstream, &mut upstream, false).unwrap();
 
         assert_eq!(upstream.headers.get("x-forwarded-host").unwrap(), "example.com");
         assert_eq!(upstream.headers.get("x-forwarded-proto").unwrap(), "http");
+    }
+
+    #[test]
+    fn test_append_forwarded_headers_preserves_downstream_forwarded_proto() {
+        let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        downstream.insert_header("Host", "example.com").unwrap();
+        downstream.insert_header("X-Forwarded-Proto", "https").unwrap();
+        let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+
+        append_forwarded_headers(&downstream, &mut upstream, false).unwrap();
+
+        assert_eq!(upstream.headers.get("x-forwarded-proto").unwrap(), "https");
+    }
+
+    #[test]
+    fn test_append_forwarded_headers_uses_tls_flag_when_header_missing() {
+        let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        downstream.insert_header("Host", "example.com").unwrap();
+        let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+
+        append_forwarded_headers(&downstream, &mut upstream, true).unwrap();
+
+        assert_eq!(upstream.headers.get("x-forwarded-proto").unwrap(), "https");
     }
 
     #[test]
