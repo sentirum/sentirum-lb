@@ -23,6 +23,12 @@ impl CidrRange {
         let (ip_str, prefix_str) = s.split_once('/')?;
         let network: IpAddr = ip_str.trim().parse().ok()?;
         let prefix_len: u8 = prefix_str.trim().parse().ok()?;
+        // Validate prefix length for the address family
+        match network {
+            IpAddr::V4(_) if prefix_len > 32 => return None,
+            IpAddr::V6(_) if prefix_len > 128 => return None,
+            _ => {}
+        }
         Some(Self { network, prefix_len })
     }
 
@@ -859,6 +865,17 @@ mod tests {
     #[test]
     fn test_cidr_no_trusted_proxies() {
         assert!(!is_trusted_proxy("10.0.0.1", &[]));
+    }
+
+    #[test]
+    fn test_cidr_invalid_prefix_length_rejected() {
+        assert!(CidrRange::parse("10.0.0.0/33").is_none());
+        assert!(CidrRange::parse("2400:cb00::/129").is_none());
+        // Valid edge cases
+        assert!(CidrRange::parse("10.0.0.0/32").is_some());
+        assert!(CidrRange::parse("10.0.0.0/0").is_some());
+        assert!(CidrRange::parse("2400:cb00::/128").is_some());
+        assert!(CidrRange::parse("2400:cb00::/0").is_some());
     }
 
     #[test]
