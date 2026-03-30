@@ -2,6 +2,7 @@
 //! Implements KV watching and service discovery using Consul's REST API
 
 use crate::config::ConsulConfig as AppConsulConfig;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::{Client, Url};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -141,8 +142,13 @@ impl ConsulClient {
 
     /// Create a new Consul client
     pub fn new(config: ConsulConfig) -> Result<Self, ConsulError> {
+        let query_wait = crate::config::Config::parse_duration(&config.query_wait);
+        let query_wait = if query_wait.is_zero() { Duration::from_secs(300) } else { query_wait };
+        let http_timeout = query_wait + Duration::from_secs(10);
+
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(http_timeout)
+            .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| ConsulError::ClientError(e.to_string()))?;
 
@@ -222,8 +228,26 @@ impl ConsulClient {
         // Combine all KV values with key separators (like Fabio)
         let mut parts = Vec::new();
         for kv in kv_pairs {
-            let value = kv.Value.unwrap_or_default();
-            let trimmed = value.trim();
+            let raw_value = kv.Value.unwrap_or_default();
+            if raw_value.trim().is_empty() {
+                continue;
+            }
+
+            let decoded = match STANDARD.decode(raw_value.trim()) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(key = %kv.Key, error = %e, "Failed to base64 decode KV value; skipping");
+                    continue;
+                }
+            };
+            let decoded_text = match String::from_utf8(decoded) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(key = %kv.Key, error = %e, "Failed to UTF-8 decode KV value; skipping");
+                    continue;
+                }
+            };
+            let trimmed = decoded_text.trim();
             if !trimmed.is_empty() {
                 parts.push(format!("# --- {}\n{}", kv.Key, trimmed));
             }

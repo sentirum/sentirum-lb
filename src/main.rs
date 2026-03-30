@@ -127,7 +127,13 @@ async fn main() {
             tls: sentirum_lb::config::TlsConfig::default(),
         }
     } else {
-        toml::from_str(&config_content).expect("Failed to parse config file")
+        match toml::from_str::<Config>(&config_content) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("Error: failed to parse config file: {e}");
+                std::process::exit(1);
+            }
+        }
     };
 
     // Apply CLI overrides
@@ -211,8 +217,9 @@ async fn main() {
                 // Use explicit TLS listen address, or derive from HTTP port +1
                 let tls_listen = if config.tls.listen.is_empty() {
                     let http_port: u16 = config.server.listen
-                        .trim_start_matches(':')
-                        .parse()
+                        .rsplit(':')
+                        .next()
+                        .and_then(|p| p.parse().ok())
                         .unwrap_or(9999);
                     format!(":{}", http_port + 1)
                 } else {
@@ -242,7 +249,8 @@ async fn main() {
         let consul_config = ConsulConfig::from(&config.consul);
         match ConsulClient::new(consul_config.clone()) {
             Ok(client) => {
-                let watcher = ConsulWatcher::new(Arc::new(client), consul_config);
+                let watcher = ConsulWatcher::new(Arc::new(client), consul_config)
+                    .with_flags(config.consul.service_discovery, config.consul.kv_watching);
                 // Spawn route update handler
                 let rt = managed_table.clone();
                 let mut shutdown = shutdown_rx.clone();

@@ -95,8 +95,14 @@ async fn routes_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
     }))
 }
 
-async fn metrics_handler() -> String {
-    crate::metrics::prometheus::global().render()
+async fn metrics_handler() -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        crate::metrics::prometheus::global().render(),
+    )
 }
 
 async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_json::Value> {
@@ -159,7 +165,7 @@ async fn admin_auth_middleware(
     headers: HeaderMap,
     request: axum::extract::Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, (StatusCode, axum::Json<serde_json::Value>)> {
     let expected = state.config.server.admin_token.as_str();
     let authorized = headers
         .get(AUTHORIZATION)
@@ -176,12 +182,19 @@ async fn admin_auth_middleware(
     if authorized {
         Ok(next.run(request).await)
     } else {
-        Err(StatusCode::UNAUTHORIZED)
+        Err((
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized", "message": "Valid Bearer token or X-Admin-Token required"})),
+        ))
     }
 }
 
 fn is_loopback_bind(addr: &str) -> bool {
-    addr.starts_with("127.") || addr.starts_with("localhost:") || addr.starts_with("[::1]")
+    if addr.starts_with("0.0.0.0") || addr.starts_with("[::]") || addr.starts_with(':') {
+        return false;
+    }
+    addr.starts_with("127.") || addr.starts_with("localhost:") || addr == "localhost" || addr.starts_with("[::1]")
+
 }
 
 #[cfg(test)]
@@ -306,5 +319,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
+    }
+
+    #[test]
+    fn test_is_loopback_bind_loopback() {
+        assert!(is_loopback_bind("127.0.0.1:9998"));
+        assert!(is_loopback_bind("localhost:9998"));
+        assert!(is_loopback_bind("localhost"));
+        assert!(is_loopback_bind("[::1]:9998"));
+    }
+
+    #[test]
+    fn test_is_loopback_bind_not_loopback() {
+        assert!(!is_loopback_bind("0.0.0.0:9998"));
+        assert!(!is_loopback_bind("[::]:9998"));
+        assert!(!is_loopback_bind(":9998"));
+        assert!(!is_loopback_bind("10.0.0.1:9998"));
+        assert!(!is_loopback_bind("localhostfoo:9998"));
     }
 }

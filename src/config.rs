@@ -111,6 +111,11 @@ pub struct ProxyConfig {
     /// Max concurrent connections per upstream
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
+    /// Trusted proxy CIDR ranges.
+    /// When the peer IP is in this list, X-Forwarded-For and CF-Connecting-IP
+    /// headers from the client are trusted. Otherwise they are overwritten.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
 }
 
 impl Default for ProxyConfig {
@@ -126,6 +131,7 @@ impl Default for ProxyConfig {
             idle_timeout: default_idle_timeout(),
             pool_size: default_pool_size(),
             max_connections: default_max_connections(),
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -203,17 +209,18 @@ pub struct TlsConfig {
 impl Config {
     pub fn parse_duration(s: &str) -> Duration {
         let s = s.trim();
-        if s.ends_with("ms") {
-            let ms: u64 = s.trim_end_matches("ms").parse().unwrap_or(0);
-            Duration::from_millis(ms)
+        let result = if s.ends_with("ms") {
+            s.trim_end_matches("ms").parse::<u64>().ok().map(Duration::from_millis)
         } else if s.ends_with('s') {
-            let secs: u64 = s.trim_end_matches('s').parse().unwrap_or(0);
-            Duration::from_secs(secs)
+            s.trim_end_matches('s').parse::<u64>().ok().map(Duration::from_secs)
         } else if s.ends_with('m') {
-            let mins: u64 = s.trim_end_matches('m').parse().unwrap_or(0);
-            Duration::from_secs(mins * 60)
+            s.trim_end_matches('m').parse::<u64>().ok().map(|m| Duration::from_secs(m * 60))
         } else {
-            Duration::from_secs(0)
-        }
+            None
+        };
+        result.unwrap_or_else(|| {
+            tracing::warn!(value = s, "Unrecognised duration format; defaulting to 0s");
+            Duration::ZERO
+        })
     }
 }

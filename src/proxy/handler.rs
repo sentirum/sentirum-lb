@@ -8,7 +8,62 @@ use pingora::prelude::*;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 use std::borrow::Cow;
+use std::net::IpAddr;
 use std::sync::Arc;
+
+/// Parsed CIDR for trusted proxy matching
+#[derive(Debug, Clone)]
+pub struct CidrRange {
+    network: IpAddr,
+    prefix_len: u8,
+}
+
+impl CidrRange {
+    pub fn parse(s: &str) -> Option<Self> {
+        let (ip_str, prefix_str) = s.split_once('/')?;
+        let network: IpAddr = ip_str.trim().parse().ok()?;
+        let prefix_len: u8 = prefix_str.trim().parse().ok()?;
+        // Validate prefix length for the address family
+        match network {
+            IpAddr::V4(_) if prefix_len > 32 => return None,
+            IpAddr::V6(_) if prefix_len > 128 => return None,
+            _ => {}
+        }
+        Some(Self { network, prefix_len })
+    }
+
+    pub fn contains(&self, addr: &IpAddr) -> bool {
+        match (self.network, addr) {
+            (IpAddr::V4(net), IpAddr::V4(ip)) => {
+                if self.prefix_len == 0 { return true; }
+                if self.prefix_len >= 32 { return net == *ip; }
+                let mask = u32::MAX << (32 - self.prefix_len);
+                (u32::from(net) & mask) == (u32::from(*ip) & mask)
+            }
+            (IpAddr::V6(net), IpAddr::V6(ip)) => {
+                if self.prefix_len == 0 { return true; }
+                if self.prefix_len >= 128 { return net == *ip; }
+                let net_bits = u128::from(net);
+                let ip_bits = u128::from(*ip);
+                let mask = u128::MAX << (128 - self.prefix_len);
+                (net_bits & mask) == (ip_bits & mask)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Check if an IP is in any of the trusted proxy ranges
+fn is_trusted_proxy(ip_str: &str, trusted: &[CidrRange]) -> bool {
+    if trusted.is_empty() {
+        return false;
+    }
+    let ip: IpAddr = match ip_str.parse() {
+        Ok(ip) => ip,
+        Err(_) => return false,
+    };
+    trusted.iter().any(|cidr| cidr.contains(&ip))
+}
 
 /// Request context — stores picked target to avoid double lookup
 pub struct ProxyCtx {
@@ -27,13 +82,28 @@ pub struct SentirumProxy {
     pub picker: Box<dyn Picker>,
     pub matcher: String,
     pub config: Arc<Config>,
+    /// Parsed trusted proxy CIDR ranges
+    pub trusted_proxies: Vec<CidrRange>,
 }
 
 impl SentirumProxy {
     pub fn new(route_table: Arc<ManagedRouteTable>, config: Arc<Config>) -> Self {
         let picker = crate::route::picker::create_picker(&config.proxy.strategy);
         let matcher = config.proxy.matcher.clone();
-        Self { route_table, picker, matcher, config }
+        let trusted_proxies: Vec<CidrRange> = config.proxy.trusted_proxies
+            .iter()
+            .filter_map(|s| {
+                let parsed = CidrRange::parse(s);
+                if parsed.is_none() {
+                    tracing::warn!(cidr = %s, "Invalid trusted_proxies CIDR; skipping");
+                }
+                parsed
+            })
+            .collect();
+        if !trusted_proxies.is_empty() {
+            tracing::info!(count = trusted_proxies.len(), "Loaded trusted proxy ranges");
+        }
+        Self { route_table, picker, matcher, config, trusted_proxies }
     }
 
     fn lookup_target(&self, host: &str, path: &str) -> Option<std::sync::Arc<crate::route::target::Target>> {
@@ -276,7 +346,24 @@ impl ProxyHttp for SentirumProxy {
             .digest()
             .and_then(|digest| digest.ssl_digest.as_ref())
             .is_some();
-        append_forwarded_headers(downstream, upstream_request, downstream_is_tls)?;
+        let peer_addr = session.client_addr().map(|a| {
+            let s = a.to_string();
+            // Strip port from "ip:port" or "[ipv6]:port"
+            if s.starts_with('[') {
+                s.split(']').next().unwrap_or(&s).trim_start_matches('[').to_string()
+            } else if let Some(pos) = s.rfind(':') {
+                s[..pos].to_string()
+            } else {
+                s
+            }
+        });
+        append_forwarded_headers(
+            downstream,
+            upstream_request,
+            downstream_is_tls,
+            peer_addr.as_deref(),
+            &self.trusted_proxies,
+        )?;
 
         // Use stored target from upstream_peer (no double lookup!)
         if let Some(target) = &ctx.picked_target {
@@ -355,9 +442,18 @@ impl ProxyHttp for SentirumProxy {
 
         if status > 0 {
             let body = format!("{{\"error\":\"{}\",\"status\":{}}}", message, status);
-            let mut resp = ResponseHeader::build(status, None).unwrap_or_else(|_| {
-                ResponseHeader::build(500, None).unwrap()
-            });
+            let mut resp = match ResponseHeader::build(status, None)
+                .or_else(|_| ResponseHeader::build(500, None))
+            {
+                Ok(resp) => resp,
+                Err(build_err) => {
+                    tracing::error!(error = %build_err, "Failed to build error response header");
+                    return pingora::proxy::FailToProxy {
+                        error_code: 500,
+                        can_reuse_downstream: false,
+                    };
+                }
+            };
             resp.insert_header("Content-Type", "application/json").ok();
             resp.insert_header("X-Served-By", "sentirum-lb").ok();
 
@@ -415,6 +511,8 @@ fn append_forwarded_headers(
     downstream_request: &pingora_http::RequestHeader,
     upstream_request: &mut pingora_http::RequestHeader,
     downstream_is_tls: bool,
+    peer_addr: Option<&str>,
+    trusted_proxies: &[CidrRange],
 ) -> pingora::Result<()> {
     let host = downstream_request
         .headers
@@ -422,22 +520,55 @@ fn append_forwarded_headers(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if let Some(client_ip) = downstream_request
-        .headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok()) {
-        upstream_request.insert_header("X-Forwarded-For", client_ip)?;
+    let peer_ip = peer_addr.unwrap_or_default();
+    let trusted = is_trusted_proxy(peer_ip, trusted_proxies);
+
+    // X-Forwarded-For:
+    // - Trusted proxy: preserve client chain, append peer IP
+    // - Untrusted: overwrite with peer IP only (prevents spoofing)
+    let forwarded_for = if trusted {
+        match downstream_request
+            .headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+        {
+            Some(existing) if !peer_ip.is_empty() => format!("{existing}, {peer_ip}"),
+            Some(existing) => existing.to_string(),
+            None => peer_ip.to_string(),
+        }
+    } else {
+        peer_ip.to_string()
+    };
+
+    if !forwarded_for.is_empty() {
+        upstream_request.insert_header("X-Forwarded-For", &forwarded_for)?;
+    }
+
+    // CF-Connecting-IP: only forward from trusted proxies (e.g. Cloudflare)
+    if trusted {
+        if let Some(cf_ip) = downstream_request
+            .headers
+            .get("cf-connecting-ip")
+            .and_then(|v| v.to_str().ok())
+        {
+            upstream_request.insert_header("CF-Connecting-IP", cf_ip)?;
+        }
     }
 
     if !host.is_empty() {
         upstream_request.insert_header("X-Forwarded-Host", host)?;
     }
 
-    let scheme = downstream_request
-        .headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or(if downstream_is_tls { "https" } else { "http" });
+    // X-Forwarded-Proto: only trust from trusted proxies
+    let scheme = if trusted {
+        downstream_request
+            .headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(if downstream_is_tls { "https" } else { "http" })
+    } else {
+        if downstream_is_tls { "https" } else { "http" }
+    };
     upstream_request.insert_header("X-Forwarded-Proto", scheme)?;
     Ok(())
 }
@@ -579,22 +710,23 @@ mod tests {
         downstream.insert_header("Host", "example.com").unwrap();
         let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
 
-        append_forwarded_headers(&downstream, &mut upstream, false).unwrap();
+        append_forwarded_headers(&downstream, &mut upstream, false, None, &[]).unwrap();
 
         assert_eq!(upstream.headers.get("x-forwarded-host").unwrap(), "example.com");
         assert_eq!(upstream.headers.get("x-forwarded-proto").unwrap(), "http");
     }
 
     #[test]
-    fn test_append_forwarded_headers_preserves_downstream_forwarded_proto() {
+    fn test_append_forwarded_headers_untrusted_ignores_client_proto() {
         let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
         downstream.insert_header("Host", "example.com").unwrap();
         downstream.insert_header("X-Forwarded-Proto", "https").unwrap();
         let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
 
-        append_forwarded_headers(&downstream, &mut upstream, false).unwrap();
+        // Untrusted peer: client-supplied proto must be ignored
+        append_forwarded_headers(&downstream, &mut upstream, false, None, &[]).unwrap();
 
-        assert_eq!(upstream.headers.get("x-forwarded-proto").unwrap(), "https");
+        assert_eq!(upstream.headers.get("x-forwarded-proto").unwrap(), "http");
     }
 
     #[test]
@@ -603,7 +735,7 @@ mod tests {
         downstream.insert_header("Host", "example.com").unwrap();
         let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
 
-        append_forwarded_headers(&downstream, &mut upstream, true).unwrap();
+        append_forwarded_headers(&downstream, &mut upstream, true, None, &[]).unwrap();
 
         assert_eq!(upstream.headers.get("x-forwarded-proto").unwrap(), "https");
     }
@@ -644,6 +776,106 @@ mod tests {
         assert_eq!(status_message(403), "Forbidden");
         assert_eq!(status_message(404), "Not Found");
         assert_eq!(status_message(503), "Service Unavailable");
+    }
+
+    #[test]
+    fn test_append_forwarded_headers_with_peer_addr() {
+        let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        downstream.insert_header("Host", "example.com").unwrap();
+        let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+
+        append_forwarded_headers(&downstream, &mut upstream, false, Some("10.0.0.1"), &[]).unwrap();
+
+        assert_eq!(upstream.headers.get("x-forwarded-for").unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn test_untrusted_client_xff_overwritten() {
+        let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        downstream.insert_header("Host", "example.com").unwrap();
+        downstream.insert_header("X-Forwarded-For", "1.2.3.4").unwrap();
+        let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+
+        append_forwarded_headers(&downstream, &mut upstream, false, Some("10.0.0.1"), &[]).unwrap();
+
+        // Untrusted: client XFF overwritten with real peer IP
+        assert_eq!(upstream.headers.get("x-forwarded-for").unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn test_trusted_proxy_preserves_xff_chain() {
+        let trusted = vec![CidrRange::parse("10.0.0.0/8").unwrap()];
+        let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        downstream.insert_header("Host", "example.com").unwrap();
+        downstream.insert_header("X-Forwarded-For", "203.0.113.50").unwrap();
+        let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+
+        append_forwarded_headers(&downstream, &mut upstream, false, Some("10.0.0.1"), &trusted).unwrap();
+
+        // Trusted: chain preserved + peer appended
+        assert_eq!(upstream.headers.get("x-forwarded-for").unwrap(), "203.0.113.50, 10.0.0.1");
+    }
+
+    #[test]
+    fn test_trusted_proxy_forwards_cf_connecting_ip() {
+        let trusted = vec![CidrRange::parse("173.245.48.0/20").unwrap()];
+        let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        downstream.insert_header("Host", "example.com").unwrap();
+        downstream.insert_header("CF-Connecting-IP", "203.0.113.99").unwrap();
+        let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+
+        append_forwarded_headers(&downstream, &mut upstream, false, Some("173.245.48.5"), &trusted).unwrap();
+
+        assert_eq!(upstream.headers.get("cf-connecting-ip").unwrap(), "203.0.113.99");
+    }
+
+    #[test]
+    fn test_untrusted_peer_strips_cf_connecting_ip() {
+        let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        downstream.insert_header("Host", "example.com").unwrap();
+        downstream.insert_header("CF-Connecting-IP", "203.0.113.99").unwrap();
+        let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+
+        append_forwarded_headers(&downstream, &mut upstream, false, Some("8.8.8.8"), &[]).unwrap();
+
+        // Untrusted: CF-Connecting-IP must NOT be forwarded
+        assert!(upstream.headers.get("cf-connecting-ip").is_none());
+    }
+
+    #[test]
+    fn test_trusted_proxy_preserves_forwarded_proto() {
+        let trusted = vec![CidrRange::parse("10.0.0.0/8").unwrap()];
+        let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        downstream.insert_header("Host", "example.com").unwrap();
+        downstream.insert_header("X-Forwarded-Proto", "https").unwrap();
+        let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+
+        append_forwarded_headers(&downstream, &mut upstream, false, Some("10.0.0.1"), &trusted).unwrap();
+
+        assert_eq!(upstream.headers.get("x-forwarded-proto").unwrap(), "https");
+    }
+
+    #[test]
+    fn test_cidr_ipv6_trusted_proxy() {
+        let trusted = vec![CidrRange::parse("2400:cb00::/32").unwrap()];
+        assert!(is_trusted_proxy("2400:cb00::1", &trusted));
+        assert!(!is_trusted_proxy("2401:cb00::1", &trusted));
+    }
+
+    #[test]
+    fn test_cidr_no_trusted_proxies() {
+        assert!(!is_trusted_proxy("10.0.0.1", &[]));
+    }
+
+    #[test]
+    fn test_cidr_invalid_prefix_length_rejected() {
+        assert!(CidrRange::parse("10.0.0.0/33").is_none());
+        assert!(CidrRange::parse("2400:cb00::/129").is_none());
+        // Valid edge cases
+        assert!(CidrRange::parse("10.0.0.0/32").is_some());
+        assert!(CidrRange::parse("10.0.0.0/0").is_some());
+        assert!(CidrRange::parse("2400:cb00::/128").is_some());
+        assert!(CidrRange::parse("2400:cb00::/0").is_some());
     }
 
     #[test]

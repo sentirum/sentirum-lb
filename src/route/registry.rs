@@ -74,7 +74,10 @@ impl ManagedRouteTable {
 
     /// Load static routes (from file)
     pub fn load_static(&self, defs: &[RouteDef]) {
-        let _guard = self.update_lock.lock().unwrap();
+        let _guard = self.update_lock.lock().unwrap_or_else(|e| {
+            tracing::warn!("Route update lock was poisoned; recovering");
+            e.into_inner()
+        });
         let mut registry = (**self.registry.load()).clone();
         registry.set_static(mark_sources(defs.to_vec(), RouteSource::Static));
         self.rebuild_and_swap(&registry);
@@ -82,7 +85,10 @@ impl ManagedRouteTable {
 
     /// Update KV routes
     pub fn update_kv(&self, defs: Vec<RouteDef>) {
-        let _guard = self.update_lock.lock().unwrap();
+        let _guard = self.update_lock.lock().unwrap_or_else(|e| {
+            tracing::warn!("Route update lock was poisoned; recovering");
+            e.into_inner()
+        });
         let mut registry = (**self.registry.load()).clone();
         registry.update_kv(mark_sources(defs, RouteSource::ConsulKv));
         self.rebuild_and_swap(&registry);
@@ -90,7 +96,10 @@ impl ManagedRouteTable {
 
     /// Update service routes
     pub fn update_services(&self, defs: Vec<RouteDef>) {
-        let _guard = self.update_lock.lock().unwrap();
+        let _guard = self.update_lock.lock().unwrap_or_else(|e| {
+            tracing::warn!("Route update lock was poisoned; recovering");
+            e.into_inner()
+        });
         let mut registry = (**self.registry.load()).clone();
         registry.update_services(mark_sources(defs, RouteSource::ConsulService));
         self.rebuild_and_swap(&registry);
