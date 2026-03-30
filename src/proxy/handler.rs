@@ -276,7 +276,17 @@ impl ProxyHttp for SentirumProxy {
             .digest()
             .and_then(|digest| digest.ssl_digest.as_ref())
             .is_some();
-        let peer_addr = session.client_addr().map(|addr| addr.to_string());
+        let peer_addr = session.client_addr().map(|a| {
+            let s = a.to_string();
+            // Strip port from "ip:port" or "[ipv6]:port"
+            if s.starts_with('[') {
+                s.split(']').next().unwrap_or(&s).trim_start_matches('[').to_string()
+            } else if let Some(pos) = s.rfind(':') {
+                s[..pos].to_string()
+            } else {
+                s
+            }
+        });
         append_forwarded_headers(
             downstream,
             upstream_request,
@@ -669,6 +679,29 @@ mod tests {
         assert_eq!(status_message(403), "Forbidden");
         assert_eq!(status_message(404), "Not Found");
         assert_eq!(status_message(503), "Service Unavailable");
+    }
+
+    #[test]
+    fn test_append_forwarded_headers_with_peer_addr() {
+        let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        downstream.insert_header("Host", "example.com").unwrap();
+        let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+
+        append_forwarded_headers(&downstream, &mut upstream, false, Some("10.0.0.1")).unwrap();
+
+        assert_eq!(upstream.headers.get("x-forwarded-for").unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn test_append_forwarded_headers_appends_peer_to_existing_xff() {
+        let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        downstream.insert_header("Host", "example.com").unwrap();
+        downstream.insert_header("X-Forwarded-For", "1.2.3.4").unwrap();
+        let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+
+        append_forwarded_headers(&downstream, &mut upstream, false, Some("10.0.0.1")).unwrap();
+
+        assert_eq!(upstream.headers.get("x-forwarded-for").unwrap(), "1.2.3.4, 10.0.0.1");
     }
 
     #[test]

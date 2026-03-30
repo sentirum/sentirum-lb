@@ -142,7 +142,8 @@ impl ConsulClient {
 
     /// Create a new Consul client
     pub fn new(config: ConsulConfig) -> Result<Self, ConsulError> {
-        let query_wait_secs = parse_wait_secs(&config.query_wait);
+        let query_wait_secs = crate::config::Config::parse_duration(&config.query_wait).as_secs();
+        let query_wait_secs = if query_wait_secs == 0 { 300 } else { query_wait_secs };
         let http_timeout = Duration::from_secs(query_wait_secs + 10);
 
         let client = Client::builder()
@@ -232,12 +233,20 @@ impl ConsulClient {
                 continue;
             }
 
-            let decoded = STANDARD.decode(raw_value.trim()).map_err(|e| {
-                ConsulError::ParseError(format!("Failed to base64 decode KV value for key {}: {}", kv.Key, e))
-            })?;
-            let decoded_text = String::from_utf8(decoded).map_err(|e| {
-                ConsulError::ParseError(format!("Failed to UTF-8 decode KV value for key {}: {}", kv.Key, e))
-            })?;
+            let decoded = match STANDARD.decode(raw_value.trim()) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(key = %kv.Key, error = %e, "Failed to base64 decode KV value; skipping");
+                    continue;
+                }
+            };
+            let decoded_text = match String::from_utf8(decoded) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(key = %kv.Key, error = %e, "Failed to UTF-8 decode KV value; skipping");
+                    continue;
+                }
+            };
             let trimmed = decoded_text.trim();
             if !trimmed.is_empty() {
                 parts.push(format!("# --- {}\n{}", kv.Key, trimmed));
@@ -376,19 +385,6 @@ pub enum ConsulError {
 
     #[error("Request error: {0}")]
     RequestError(#[from] reqwest::Error),
-}
-
-/// Parse wait duration string (e.g. "5m", "30s") into seconds
-fn parse_wait_secs(wait: &str) -> u64 {
-    let wait = wait.trim();
-    if wait.ends_with('m') {
-        wait.trim_end_matches('m').parse::<u64>().unwrap_or(5) * 60
-    } else if wait.ends_with('s') {
-        let secs = wait.trim_end_matches('s').parse::<u64>().unwrap_or(30);
-        if secs == 0 { 300 } else { secs }
-    } else {
-        300 // default 5 minutes
-    }
 }
 
 /// Health status constants

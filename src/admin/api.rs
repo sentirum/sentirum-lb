@@ -193,7 +193,8 @@ fn is_loopback_bind(addr: &str) -> bool {
     if addr.starts_with("0.0.0.0") || addr.starts_with("[::]") || addr.starts_with(':') {
         return false;
     }
-    addr.starts_with("127.") || addr.starts_with("localhost") || addr.starts_with("[::1]")
+    addr.starts_with("127.") || addr.starts_with("localhost:") || addr == "localhost" || addr.starts_with("[::1]")
+
 }
 
 #[cfg(test)]
@@ -318,5 +319,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
+    }
+
+    #[test]
+    fn test_is_loopback_bind_loopback() {
+        assert!(is_loopback_bind("127.0.0.1:9998"));
+        assert!(is_loopback_bind("localhost:9998"));
+        assert!(is_loopback_bind("localhost"));
+        assert!(is_loopback_bind("[::1]:9998"));
+    }
+
+    #[test]
+    fn test_is_loopback_bind_not_loopback() {
+        assert!(!is_loopback_bind("0.0.0.0:9998"));
+        assert!(!is_loopback_bind("[::]:9998"));
+        assert!(!is_loopback_bind(":9998"));
+        assert!(!is_loopback_bind("10.0.0.1:9998"));
+        assert!(!is_loopback_bind("localhostfoo:9998"));
     }
 }

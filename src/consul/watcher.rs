@@ -383,8 +383,9 @@ impl ConsulWatcher {
             tracing::info!("KV watching disabled, skipping KV watcher");
         }
 
-        for handle in handles {
-            if let Err(e) = handle.await {
+        let results = futures::future::join_all(handles).await;
+        for result in results {
+            if let Err(e) = result {
                 tracing::error!(error = %e, "Watcher task panicked");
             }
         }
