@@ -1,7 +1,9 @@
+use async_trait::async_trait;
 use clap::Parser;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+use pingora::services::background::{BackgroundService, background_service};
 use sentirum_lb::config::Config;
 use sentirum_lb::consul::{ConsulClient, ConsulConfig, ConsulWatcher, RouteUpdate};
 use sentirum_lb::proxy::handler::SentirumProxy;
@@ -86,8 +88,67 @@ async fn route_update_handler(
     }
 }
 
-#[tokio::main]
-async fn main() {
+struct ConsulBackgroundService {
+    route_table: Arc<ManagedRouteTable>,
+    config: Arc<Config>,
+}
+
+#[async_trait]
+impl BackgroundService for ConsulBackgroundService {
+    async fn start(&self, mut shutdown: pingora::server::ShutdownWatch) {
+        if !(self.config.consul.service_discovery || self.config.consul.kv_watching) {
+            tracing::info!("Consul watching disabled, skipping background service");
+            return;
+        }
+
+        let consul_config = ConsulConfig::from(&self.config.consul);
+        let client = match ConsulClient::new(consul_config.clone()) {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to create Consul client");
+                return;
+            }
+        };
+
+        let watcher = ConsulWatcher::new(Arc::new(client), consul_config)
+            .with_flags(self.config.consul.service_discovery, self.config.consul.kv_watching);
+        let (tx, rx) = mpsc::channel(100);
+        let route_table = self.route_table.clone();
+
+        tracing::info!("Consul watcher started");
+
+        tokio::select! {
+            _ = async {
+                tokio::join!(
+                    route_update_handler(route_table, rx),
+                    watcher.run(tx),
+                );
+            } => {}
+            _ = shutdown.changed() => {
+                tracing::info!("Consul background service shutting down");
+            }
+        }
+    }
+}
+
+struct AdminBackgroundService {
+    config: Arc<Config>,
+    route_table: Arc<ManagedRouteTable>,
+}
+
+#[async_trait]
+impl BackgroundService for AdminBackgroundService {
+    async fn start(&self, mut shutdown: pingora::server::ShutdownWatch) {
+        tokio::select! {
+            _ = sentirum_lb::admin::run_admin_server(self.config.clone(), self.route_table.clone()) => {}
+            _ = shutdown.changed() => {
+                tracing::info!("Admin background service shutting down");
+            }
+        }
+    }
+}
+
+fn main() {
     let args = Args::parse();
 
     // Load configuration
@@ -240,61 +301,29 @@ async fn main() {
 
     server.add_service(lb_service);
 
-    // Start Consul watcher if enabled
-    let (tx, rx) = mpsc::channel(100);
-    // Shutdown signal for graceful drain
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let shared_config = Arc::new(config.clone());
 
     if config.consul.service_discovery || config.consul.kv_watching {
-        let consul_config = ConsulConfig::from(&config.consul);
-        match ConsulClient::new(consul_config.clone()) {
-            Ok(client) => {
-                let watcher = ConsulWatcher::new(Arc::new(client), consul_config)
-                    .with_flags(config.consul.service_discovery, config.consul.kv_watching);
-                // Spawn route update handler
-                let rt = managed_table.clone();
-                let mut shutdown = shutdown_rx.clone();
-                tokio::spawn(async move {
-                    tokio::select! {
-                        _ = route_update_handler(rt, rx) => {}
-                        _ = shutdown.changed() => {
-                            tracing::info!("Route update handler shutting down");
-                        }
-                    }
-                });
-                // Spawn watcher
-                tokio::spawn(async move {
-                    watcher.run(tx).await;
-                });
-                tracing::info!("Consul watcher started");
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to create Consul client");
-            }
-        }
+        let mut consul_service = background_service(
+            "consul watcher",
+            ConsulBackgroundService {
+                route_table: managed_table.clone(),
+                config: shared_config.clone(),
+            },
+        );
+        consul_service.threads = Some(1);
+        server.add_service(consul_service);
     }
 
-    // TODO: Phase 4 -- Start admin API server
-    // Start admin API server
-    {
-        let admin_config = Arc::new(config.clone());
-        let admin_rt = managed_table.clone();
-        tokio::spawn(async move {
-            sentirum_lb::admin::run_admin_server(admin_config, admin_rt).await;
-        });
-    }
-
-    // Spawn graceful shutdown handler
-    let shutdown_signal = shutdown_tx;
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
-        tracing::info!("Received shutdown signal, draining connections...");
-        let _ = shutdown_signal.send(true);
-        // Give watchers time to drain (Pingora handles connection draining)
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-        tracing::info!("Drain complete, shutting down");
-        std::process::exit(0);
-    });
+    let mut admin_service = background_service(
+        "admin api",
+        AdminBackgroundService {
+            config: shared_config,
+            route_table: managed_table.clone(),
+        },
+    );
+    admin_service.threads = Some(1);
+    server.add_service(admin_service);
 
     tracing::info!("Sentirum LB is ready");
     server.run_forever();
