@@ -134,19 +134,23 @@ async fn protocol_end_to_end_smoke() {
     run_ws_check(plain_runtime.http_port).await;
     drop(plain_runtime);
 
-    let grpc_secure_upstream = spawn_grpc_server(false).await;
-    let ws_secure_upstream = spawn_websocket_server(false).await;
+    // This second phase validates secure downstream access (TLS listener on the proxy)
+    // while using cleartext upstreams. Self-signed grpcs/wss upstream verification bypass is
+    // not fully reliable with the current Pingora rustls upstream connector, so upstream TLS is
+    // documented separately rather than treated as a passing smoke-test requirement here.
+    let grpc_plain_upstream_for_secure_downstream = spawn_grpc_server(false).await;
+    let ws_plain_upstream_for_secure_downstream = spawn_websocket_server(false).await;
 
-    let secure_runtime = spawn_proxy(
+    let secure_downstream_runtime = spawn_proxy(
         format!(
             "route add grpcs / grpc://127.0.0.1:{}/ opts \"ssrfskipverify=true\"\nroute add wss /wss ws://127.0.0.1:{}/wss opts \"ssrfskipverify=true\"\n",
-            grpc_secure_upstream.addr.port(),
-            ws_secure_upstream.addr.port(),
+            grpc_plain_upstream_for_secure_downstream.addr.port(),
+            ws_plain_upstream_for_secure_downstream.addr.port(),
         ),
     )
     .await;
 
-    run_grpcs_checks(secure_runtime.tls_port, &secure_runtime.proxy_cert_pem).await;
+    run_grpcs_checks(secure_downstream_runtime.tls_port, &secure_downstream_runtime.proxy_cert_pem).await;
 }
 
 struct SpawnedGrpc {

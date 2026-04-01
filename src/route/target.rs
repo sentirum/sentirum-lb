@@ -54,6 +54,8 @@ impl UpstreamProtocol {
     pub fn preferred_alpn(self) -> ALPN {
         if self.requires_http2() {
             ALPN::H2
+        } else if self.is_websocket() {
+            ALPN::H1
         } else {
             ALPN::H2H1
         }
@@ -433,5 +435,12 @@ mod tests {
         assert_eq!(t.upstream_protocol(), UpstreamProtocol::Grpc);
         assert!(t.requires_http2());
         assert!(!t.upstream_tls());
+    }
+
+    #[test]
+    fn test_websocket_targets_force_h1_alpn() {
+        let t = Target::new("svc".into(), "wss://api.example.com/socket".into());
+        assert_eq!(t.preferred_alpn().get_max_http_version(), 1);
+        assert_eq!(t.preferred_alpn().get_min_http_version(), 1);
     }
 }

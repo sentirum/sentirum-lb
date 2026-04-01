@@ -628,6 +628,22 @@ async fn write_grpc_error_response(
     Ok(String::new())
 }
 
+fn sni_hostname(authority: &str) -> &str {
+    if authority.starts_with('[') {
+        if let Some(end) = authority.find(']') {
+            &authority[1..end]
+        } else {
+            authority
+        }
+    } else if let Some(host) = authority.strip_prefix("http://") {
+        host.split(':').next().unwrap_or(host)
+    } else if let Some(host) = authority.strip_prefix("https://") {
+        host.split(':').next().unwrap_or(host)
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    }
+}
+
 fn grpc_status_for_http_status(status: u16) -> &'static str {
     match status {
         400 => "3",
@@ -647,10 +663,26 @@ fn grpc_status_for_http_status(status: u16) -> &'static str {
 }
 
 fn sanitize_grpc_message(message: &str) -> String {
-    message
+    let sanitized: String = message
         .chars()
         .map(|c| if c.is_ascii_control() && c != ' ' { ' ' } else { c })
-        .collect()
+        .collect();
+
+    let mut encoded = String::with_capacity(sanitized.len());
+    for &b in sanitized.as_bytes() {
+        match b {
+            b' ' => encoded.push(' '),
+            0x21..=0x7E if b != b'%' => encoded.push(b as char),
+            _ => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                encoded.push('%');
+                encoded.push(HEX[(b >> 4) as usize] as char);
+                encoded.push(HEX[(b & 0x0F) as usize] as char);
+            }
+        }
+    }
+
+    encoded
 }
 
 fn configure_peer_options(
@@ -670,7 +702,8 @@ fn configure_peer_options(
     }
 
     if target.upstream_tls() {
-        peer.sni = target.host_override().unwrap_or(target.upstream_host()).to_string();
+        let authority = target.host_override().unwrap_or(target.upstream_host());
+        peer.sni = sni_hostname(authority).to_string();
         if target.tls_skip_verify() {
             // NOTE: Pingora's rustls upstream connector does not currently provide
             // a complete verification-bypass path for self-signed upstream TLS.
@@ -1190,6 +1223,42 @@ mod tests {
     }
 
     #[test]
+    fn test_configure_peer_options_strips_port_from_sni() {
+        let config = Arc::new(Config {
+            server: crate::config::ServerConfig {
+                listen: ":9999".into(),
+                admin_listen: "127.0.0.1:9998".into(),
+                admin_token: String::new(),
+                workers: 0,
+            },
+            consul: crate::config::ConsulConfig {
+                address: "127.0.0.1:8500".into(),
+                scheme: "http".into(),
+                token: String::new(),
+                kv_prefix: "/sentirum-lb/routes".into(),
+                tag_prefix: "urlprefix-".into(),
+                poll_interval: "0s".into(),
+                service_discovery: true,
+                kv_watching: true,
+            },
+            proxy: crate::config::ProxyConfig::default(),
+            logging: crate::config::LoggingConfig::default(),
+            tls: crate::config::TlsConfig::default(),
+        });
+        let mut target = crate::route::target::Target::new(
+            "svc".into(),
+            "grpcs://example.com/service".into(),
+        );
+        target.opts.insert("host".into(), "override.example.com:8443".into());
+        target.pre_parse();
+        let mut peer = HttpPeer::new("127.0.0.1:443", true, "example.com".into());
+
+        configure_peer_options(&mut peer, &target, &config);
+
+        assert_eq!(peer.sni, "override.example.com");
+    }
+
+    #[test]
     fn test_grpc_request_detection() {
         let mut header = pingora_http::RequestHeader::build("POST", b"/svc.Method", None).unwrap();
         header.insert_header("Content-Type", "application/grpc+proto").unwrap();
@@ -1217,5 +1286,12 @@ mod tests {
         assert_eq!(grpc_status_for_http_status(404), "12");
         assert_eq!(grpc_status_for_http_status(502), "14");
         assert_eq!(grpc_status_for_http_status(504), "4");
+    }
+
+    #[test]
+    fn test_sanitize_grpc_message_percent_encodes_reserved_bytes() {
+        assert_eq!(sanitize_grpc_message("bad%msg"), "bad%25msg");
+        assert_eq!(sanitize_grpc_message("hi\nthere"), "hi there");
+        assert_eq!(sanitize_grpc_message("ç"), "%C3%A7");
     }
 }
