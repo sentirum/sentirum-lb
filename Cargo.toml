@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 # Proxy framework (pingora umbrella crate re-exports everything)
-pingora = { version = "0.5", features = ["proxy", "lb"] }
+pingora = { version = "0.5", features = ["proxy", "lb", "rustls"] }
 pingora-http = "0.5"
 
 # Async runtime
@@ -61,6 +61,21 @@ rand = { version = "0.8", features = ["small_rng"] }
 axum = "0.8.8"
 tower = "0.5.3"
 http = "1"
+rustls = { version = "0.23", features = ["ring"] }
+
+[build-dependencies]
+protoc-bin-vendored = "3"
+tonic-build = "0.12"
+
+[dev-dependencies]
+prost = "0.13"
+rcgen = "0.13"
+rustls-pemfile = "2"
+tempfile = "3"
+tokio-rustls = "0.26"
+tokio-stream = "0.1"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tonic = { version = "0.12", features = ["transport", "tls"] }
 
 [profile.release]
 opt-level = 3

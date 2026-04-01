@@ -432,6 +432,58 @@ mod tests {
     }
 
     #[test]
+    fn parse_urlprefix_tag_preserves_grpc_and_grpcs_opts() {
+        let (route, opts) = parse_urlprefix_tag(
+            "urlprefix-api.example.com/pkg.Service proto=grpc strip=/edge",
+            "urlprefix-",
+        )
+        .expect("tag should parse");
+        assert_eq!(route, "api.example.com/pkg.Service");
+        assert_eq!(opts, "proto=grpc strip=/edge");
+
+        let (route, opts) = parse_urlprefix_tag(
+            "urlprefix-/pkg.Service proto=grpcs",
+            "urlprefix-",
+        )
+        .expect("tag should parse");
+        assert_eq!(route, "/pkg.Service");
+        assert_eq!(opts, "proto=grpcs");
+    }
+
+    #[test]
+    fn parse_tag_builds_grpc_destinations() {
+        let monitor = ServiceMonitor {
+            client: Arc::new(ConsulClient::new(ConsulConfig::default()).unwrap()),
+            config: ConsulConfig::default(),
+        };
+
+        let grpc = monitor
+            .parse_tag(
+                "urlprefix-api.example.com/pkg.Service proto=grpc strip=/edge",
+                "10.0.0.10",
+                50051,
+                "orders",
+            )
+            .expect("grpc tag should parse");
+        assert_eq!(grpc.src, "api.example.com/pkg.Service");
+        assert_eq!(grpc.dst, "grpc://10.0.0.10:50051/");
+        assert_eq!(grpc.opts.get("proto"), Some(&"grpc".to_string()));
+        assert_eq!(grpc.opts.get("strip"), Some(&"/edge".to_string()));
+
+        let grpcs = monitor
+            .parse_tag(
+                "urlprefix-/pkg.Service proto=grpcs",
+                "10.0.0.11",
+                8443,
+                "orders",
+            )
+            .expect("grpcs tag should parse");
+        assert_eq!(grpcs.src, "/pkg.Service");
+        assert_eq!(grpcs.dst, "grpcs://10.0.0.11:8443/");
+        assert_eq!(grpcs.opts.get("proto"), Some(&"grpcs".to_string()));
+    }
+
+    #[test]
     fn passing_services_require_all_service_checks_to_pass() {
         let monitor = ServiceMonitor {
             client: Arc::new(ConsulClient::new(ConsulConfig::default()).unwrap()),

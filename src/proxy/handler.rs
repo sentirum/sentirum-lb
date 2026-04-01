@@ -4,6 +4,7 @@ use crate::route::registry::ManagedRouteTable;
 use crate::route::table::Table;
 use async_trait::async_trait;
 use pingora::http::ResponseHeader;
+use pingora::modules::http::{grpc_web::{GrpcWeb, GrpcWebBridge}, HttpModules};
 use pingora::prelude::*;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
@@ -74,6 +75,12 @@ pub struct ProxyCtx {
     pub response_status: u16,
     /// Request start time (for latency tracking)
     pub request_start: Option<std::time::Instant>,
+    /// Whether downstream request is gRPC or gRPC-Web.
+    pub is_grpc: bool,
+    /// Whether downstream request is gRPC-Web.
+    pub is_grpc_web: bool,
+    /// Whether downstream request is a WebSocket upgrade.
+    pub is_websocket: bool,
 }
 
 pub struct SentirumProxy {
@@ -131,7 +138,38 @@ impl ProxyHttp for SentirumProxy {
             picked_target: None,
             response_status: 0,
             request_start: Some(std::time::Instant::now()),
+            is_grpc: false,
+            is_grpc_web: false,
+            is_websocket: false,
         }
+    }
+
+    fn init_downstream_modules(&self, modules: &mut HttpModules) {
+        modules.add_module(Box::new(GrpcWeb));
+    }
+
+    async fn early_request_filter(
+        &self,
+        session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        let header = session.req_header();
+        ctx.is_grpc_web = is_grpc_web_request(header);
+        ctx.is_grpc = ctx.is_grpc_web || is_grpc_request(header);
+        ctx.is_websocket = is_websocket_upgrade(header);
+
+        if ctx.is_grpc_web {
+            let grpc = session
+                .downstream_modules_ctx
+                .get_mut::<GrpcWebBridge>()
+                .expect("GrpcWebBridge module added");
+            grpc.init();
+        }
+
+        Ok(())
     }
 
     /// Intercept health check requests and WebSocket upgrades before proxying
@@ -163,12 +201,8 @@ impl ProxyHttp for SentirumProxy {
             return Ok(true); // Request handled, no proxy needed
         }
 
-        // WebSocket upgrade detection — just let Pingora handle it natively
-        // Pingora supports HTTP/1.1 Upgrade for WebSocket proxy automatically
-        if let Some(upgrade) = header.headers.get("upgrade") {
-            if upgrade.as_bytes().eq_ignore_ascii_case(b"websocket") {
-                tracing::debug!("WebSocket upgrade detected, proxying as-is");
-            }
+        if ctx.is_websocket {
+            tracing::debug!("WebSocket upgrade detected, proxying as-is");
         }
 
         Ok(false) // Continue with normal proxy flow
@@ -259,20 +293,7 @@ impl ProxyHttp for SentirumProxy {
             target.upstream_tls(),
             host.to_string(),
         );
-
-        // Apply connection pool timeouts from config
-        peer.options.connection_timeout = Some(Config::parse_duration(&self.config.proxy.connect_timeout));
-        peer.options.read_timeout = Some(Config::parse_duration(&self.config.proxy.read_timeout));
-        peer.options.write_timeout = Some(Config::parse_duration(&self.config.proxy.write_timeout));
-        peer.options.idle_timeout = Some(Config::parse_duration(&self.config.proxy.idle_timeout));
-
-        // Configure TLS for upstream if needed
-        if target.upstream_tls() {
-            peer.sni = target.host_override().unwrap_or(target.upstream_host()).to_string();
-            if target.tls_skip_verify() {
-                peer.options.verify_cert = false;
-            }
-        }
+        configure_peer_options(&mut peer, &target, &self.config);
 
         Ok(Box::new(peer))
     }
@@ -308,6 +329,11 @@ impl ProxyHttp for SentirumProxy {
 
         // Record Prometheus metrics
         let latency_us = ctx.request_start.map(|s| s.elapsed().as_micros() as u64).unwrap_or(0);
+        crate::metrics::prometheus::global().record_protocol_request(
+            ctx.is_grpc,
+            ctx.is_grpc_web,
+            ctx.is_websocket,
+        );
         crate::metrics::prometheus::global().record_request(status, latency_us);
         crate::metrics::prometheus::global().disconnect();
 
@@ -322,6 +348,9 @@ impl ProxyHttp for SentirumProxy {
             status,
             latency_us,
             upstream = target_url,
+            grpc = ctx.is_grpc,
+            grpc_web = ctx.is_grpc_web,
+            websocket = ctx.is_websocket,
             "access"
         );
     }
@@ -370,8 +399,8 @@ impl ProxyHttp for SentirumProxy {
             if let Some(uri) = rewrite_upstream_uri(&upstream_request.uri, target) {
                 upstream_request.set_uri(uri);
             }
-            if let Some(host_override) = target.host_override() {
-                upstream_request.insert_header("Host", host_override)?;
+            if target.requires_http2() || target.host_override().is_some() {
+                upstream_request.insert_header("Host", target.upstream_authority())?;
             }
         }
 
@@ -391,6 +420,27 @@ impl ProxyHttp for SentirumProxy {
         ctx.response_status = upstream_response.status.as_u16();
         upstream_response.insert_header("X-Served-By", "sentirum-lb")?;
         Ok(())
+    }
+
+    fn upstream_response_trailer_filter(
+        &self,
+        _session: &mut Session,
+        _upstream_trailers: &mut http::HeaderMap,
+        _ctx: &mut Self::CTX,
+    ) -> pingora::Result<()> {
+        Ok(())
+    }
+
+    async fn response_trailer_filter(
+        &self,
+        _session: &mut Session,
+        _upstream_trailers: &mut http::HeaderMap,
+        _ctx: &mut Self::CTX,
+    ) -> pingora::Result<Option<bytes::Bytes>>
+    where
+        Self::CTX: Send + Sync,
+    {
+        Ok(None)
     }
 
     fn fail_to_connect(
@@ -426,7 +476,7 @@ impl ProxyHttp for SentirumProxy {
         &self,
         session: &mut Session,
         e: &pingora::Error,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> pingora::proxy::FailToProxy
     where
         Self::CTX: Send + Sync,
@@ -441,29 +491,47 @@ impl ProxyHttp for SentirumProxy {
         };
 
         if status > 0 {
-            let body = format!("{{\"error\":\"{}\",\"status\":{}}}", message, status);
-            let mut resp = match ResponseHeader::build(status, None)
-                .or_else(|_| ResponseHeader::build(500, None))
-            {
-                Ok(resp) => resp,
-                Err(build_err) => {
-                    tracing::error!(error = %build_err, "Failed to build error response header");
-                    return pingora::proxy::FailToProxy {
-                        error_code: 500,
-                        can_reuse_downstream: false,
-                    };
-                }
-            };
-            resp.insert_header("Content-Type", "application/json").ok();
-            resp.insert_header("X-Served-By", "sentirum-lb").ok();
-
-            if let Err(write_err) = session.write_response_header(Box::new(resp), false).await {
-                tracing::error!(error = %write_err, "Failed to write error response header");
+            let write_result = if ctx.is_grpc {
+                write_grpc_error_response(session, status, message).await
             } else {
-                let _ = session.write_response_body(
-                    Some(bytes::Bytes::from(body)),
-                    true,
-                ).await;
+                let body = if ctx.is_websocket {
+                    message.to_string()
+                } else {
+                    format!("{{\"error\":\"{}\",\"status\":{}}}", message, status)
+                };
+                let content_type = if ctx.is_websocket {
+                    "text/plain; charset=utf-8"
+                } else {
+                    "application/json"
+                };
+
+                let mut resp = match ResponseHeader::build(status, None)
+                    .or_else(|_| ResponseHeader::build(500, None))
+                {
+                    Ok(resp) => resp,
+                    Err(build_err) => {
+                        tracing::error!(error = %build_err, "Failed to build error response header");
+                        return pingora::proxy::FailToProxy {
+                            error_code: 500,
+                            can_reuse_downstream: false,
+                        };
+                    }
+                };
+                resp.insert_header("Content-Type", content_type).ok();
+                resp.insert_header("X-Served-By", "sentirum-lb").ok();
+
+                session.write_response_header(Box::new(resp), false).await.map(|_| body)
+            };
+
+            match write_result {
+                Ok(body) => {
+                    if !body.is_empty() {
+                        let _ = session.write_response_body(Some(bytes::Bytes::from(body)), true).await;
+                    }
+                }
+                Err(write_err) => {
+                    tracing::error!(error = %write_err, "Failed to write error response");
+                }
             }
         }
 
@@ -504,6 +572,113 @@ fn parse_host_from_header(header: &pingora_http::RequestHeader) -> &str {
         }
     } else {
         host_header
+    }
+}
+
+fn is_websocket_upgrade(header: &pingora_http::RequestHeader) -> bool {
+    header
+        .headers
+        .get("upgrade")
+        .map(|value| value.as_bytes().eq_ignore_ascii_case(b"websocket"))
+        .unwrap_or(false)
+}
+
+fn is_grpc_content_type(content_type: &str) -> bool {
+    let content_type = content_type.trim();
+    content_type.len() >= "application/grpc".len()
+        && content_type[.."application/grpc".len()].eq_ignore_ascii_case("application/grpc")
+}
+
+fn is_grpc_web_content_type(content_type: &str) -> bool {
+    let content_type = content_type.trim();
+    content_type.len() >= "application/grpc-web".len()
+        && content_type[.."application/grpc-web".len()].eq_ignore_ascii_case("application/grpc-web")
+}
+
+fn is_grpc_request(header: &pingora_http::RequestHeader) -> bool {
+    header
+        .headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(is_grpc_content_type)
+        .unwrap_or(false)
+}
+
+fn is_grpc_web_request(header: &pingora_http::RequestHeader) -> bool {
+    header
+        .headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(is_grpc_web_content_type)
+        .unwrap_or(false)
+}
+
+async fn write_grpc_error_response(
+    session: &mut Session,
+    http_status: u16,
+    message: &str,
+) -> pingora::Result<String> {
+    let mut resp = ResponseHeader::build(200, None)
+        .or_else(|_| ResponseHeader::build(500, None))?;
+    resp.insert_header("Content-Type", "application/grpc")?;
+    resp.insert_header("X-Served-By", "sentirum-lb")?;
+    resp.insert_header("grpc-status", grpc_status_for_http_status(http_status))?;
+    resp.insert_header("grpc-message", sanitize_grpc_message(message))?;
+    session.write_response_header(Box::new(resp), true).await?;
+    Ok(String::new())
+}
+
+fn grpc_status_for_http_status(status: u16) -> &'static str {
+    match status {
+        400 => "3",
+        401 => "16",
+        403 => "7",
+        404 => "12",
+        408 => "4",
+        429 => "8",
+        499 => "1",
+        500 => "13",
+        501 => "12",
+        502 => "14",
+        503 => "14",
+        504 => "4",
+        _ => "2",
+    }
+}
+
+fn sanitize_grpc_message(message: &str) -> String {
+    message
+        .chars()
+        .map(|c| if c.is_ascii_control() && c != ' ' { ' ' } else { c })
+        .collect()
+}
+
+fn configure_peer_options(
+    peer: &mut HttpPeer,
+    target: &crate::route::target::Target,
+    config: &Config,
+) {
+    peer.options.connection_timeout = Some(Config::parse_duration(&config.proxy.connect_timeout));
+    peer.options.read_timeout = Some(Config::parse_duration(&config.proxy.read_timeout));
+    peer.options.write_timeout = Some(Config::parse_duration(&config.proxy.write_timeout));
+    peer.options.idle_timeout = Some(Config::parse_duration(&config.proxy.idle_timeout));
+    peer.options.alpn = target.preferred_alpn();
+
+    if target.requires_http2() {
+        peer.options.max_h2_streams = config.proxy.upstream_h2_max_streams.max(1);
+        peer.options.h2_ping_interval = Config::parse_optional_duration(&config.proxy.upstream_h2_ping_interval);
+    }
+
+    if target.upstream_tls() {
+        peer.sni = target.host_override().unwrap_or(target.upstream_host()).to_string();
+        if target.tls_skip_verify() {
+            // NOTE: Pingora's rustls upstream connector does not currently provide
+            // a complete verification-bypass path for self-signed upstream TLS.
+            // Keep setting this for compatibility with connector implementations
+            // that honor it, but prefer trusted/internal CA certificates in docs
+            // and tests for grpcs/wss upstreams.
+            peer.options.verify_cert = false;
+        }
     }
 }
 
@@ -586,12 +761,24 @@ fn rewrite_upstream_uri(uri: &http::Uri, target: &crate::route::target::Target) 
         path = prepend_path_prefix(prepend, &path);
     }
 
+    if target.is_grpc() && !is_valid_grpc_path(&path) {
+        return Some(uri.clone());
+    }
+
     let rewritten = match uri.query() {
         Some(query) => format!("{path}?{query}"),
         None => path,
     };
 
     rewritten.parse().ok()
+}
+
+fn is_valid_grpc_path(path: &str) -> bool {
+    let mut parts = path.split('/').filter(|segment| !segment.is_empty());
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(service), Some(method), None) if !service.is_empty() && !method.is_empty()
+    )
 }
 
 fn strip_path_prefix<'a>(path: &'a str, strip: &str) -> Option<Cow<'a, str>> {
@@ -772,6 +959,35 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_upstream_uri_preserves_safe_grpc_method_paths() {
+        let mut target = crate::route::target::Target::new(
+            "svc".into(),
+            "grpc://example.com".into(),
+        );
+        target.opts.insert("strip".into(), "/api".into());
+
+        let uri: http::Uri = "/api/pkg.Service/Method?x=1".parse().unwrap();
+        let rewritten = rewrite_upstream_uri(&uri, &target).unwrap();
+
+        assert_eq!(rewritten.path(), "/pkg.Service/Method");
+        assert_eq!(rewritten.query(), Some("x=1"));
+    }
+
+    #[test]
+    fn test_rewrite_upstream_uri_rejects_invalid_grpc_method_rewrites() {
+        let mut target = crate::route::target::Target::new(
+            "svc".into(),
+            "grpc://example.com".into(),
+        );
+        target.opts.insert("prepend".into(), "/v1".into());
+
+        let uri: http::Uri = "/pkg.Service/Method".parse().unwrap();
+        let rewritten = rewrite_upstream_uri(&uri, &target).unwrap();
+
+        assert_eq!(rewritten, uri);
+    }
+
+    #[test]
     fn test_status_message_uses_http_reason() {
         assert_eq!(status_message(403), "Forbidden");
         assert_eq!(status_message(404), "Not Found");
@@ -893,5 +1109,113 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
+    }
+
+    #[test]
+    fn test_configure_peer_options_enforces_h2_for_grpc_targets() {
+        let config = Arc::new(Config {
+            server: crate::config::ServerConfig {
+                listen: ":9999".into(),
+                admin_listen: "127.0.0.1:9998".into(),
+                admin_token: String::new(),
+                workers: 0,
+            },
+            consul: crate::config::ConsulConfig {
+                address: "127.0.0.1:8500".into(),
+                scheme: "http".into(),
+                token: String::new(),
+                kv_prefix: "/sentirum-lb/routes".into(),
+                tag_prefix: "urlprefix-".into(),
+                poll_interval: "0s".into(),
+                service_discovery: true,
+                kv_watching: true,
+            },
+            proxy: crate::config::ProxyConfig {
+                upstream_h2_max_streams: 64,
+                upstream_h2_ping_interval: "15s".into(),
+                ..crate::config::ProxyConfig::default()
+            },
+            logging: crate::config::LoggingConfig::default(),
+            tls: crate::config::TlsConfig::default(),
+        });
+        let target = crate::route::target::Target::new(
+            "svc".into(),
+            "grpcs://example.com/service".into(),
+        );
+        let mut peer = HttpPeer::new("127.0.0.1:443", true, "example.com".into());
+
+        configure_peer_options(&mut peer, &target, &config);
+
+        assert_eq!(peer.options.alpn.get_min_http_version(), 2);
+        assert_eq!(peer.options.max_h2_streams, 64);
+        assert_eq!(peer.options.h2_ping_interval, Some(std::time::Duration::from_secs(15)));
+        assert_eq!(peer.sni, "example.com");
+    }
+
+    #[test]
+    fn test_configure_peer_options_uses_host_override_for_tls_targets() {
+        let config = Arc::new(Config {
+            server: crate::config::ServerConfig {
+                listen: ":9999".into(),
+                admin_listen: "127.0.0.1:9998".into(),
+                admin_token: String::new(),
+                workers: 0,
+            },
+            consul: crate::config::ConsulConfig {
+                address: "127.0.0.1:8500".into(),
+                scheme: "http".into(),
+                token: String::new(),
+                kv_prefix: "/sentirum-lb/routes".into(),
+                tag_prefix: "urlprefix-".into(),
+                poll_interval: "0s".into(),
+                service_discovery: true,
+                kv_watching: true,
+            },
+            proxy: crate::config::ProxyConfig::default(),
+            logging: crate::config::LoggingConfig::default(),
+            tls: crate::config::TlsConfig::default(),
+        });
+        let mut target = crate::route::target::Target::new(
+            "svc".into(),
+            "wss://example.com/socket".into(),
+        );
+        target.opts.insert("host".into(), "override.example.com".into());
+        target.pre_parse();
+        let mut peer = HttpPeer::new("127.0.0.1:443", true, "example.com".into());
+
+        configure_peer_options(&mut peer, &target, &config);
+
+        assert_eq!(peer.sni, "override.example.com");
+        assert_eq!(peer.options.alpn.get_min_http_version(), 1);
+    }
+
+    #[test]
+    fn test_grpc_request_detection() {
+        let mut header = pingora_http::RequestHeader::build("POST", b"/svc.Method", None).unwrap();
+        header.insert_header("Content-Type", "application/grpc+proto").unwrap();
+        assert!(is_grpc_request(&header));
+        assert!(!is_grpc_web_request(&header));
+    }
+
+    #[test]
+    fn test_grpc_web_request_detection() {
+        let mut header = pingora_http::RequestHeader::build("POST", b"/svc.Method", None).unwrap();
+        header.insert_header("Content-Type", "application/grpc-web+proto").unwrap();
+        assert!(is_grpc_web_request(&header));
+        assert!(!is_websocket_upgrade(&header));
+    }
+
+    #[test]
+    fn test_websocket_upgrade_detection() {
+        let mut header = pingora_http::RequestHeader::build("GET", b"/socket", None).unwrap();
+        header.insert_header("Upgrade", "websocket").unwrap();
+        assert!(is_websocket_upgrade(&header));
+    }
+
+    #[test]
+    fn test_grpc_status_mapping_for_http_errors() {
+        assert_eq!(grpc_status_for_http_status(404), "12");
+        assert_eq!(grpc_status_for_http_status(502), "14");
+        assert_eq!(grpc_status_for_http_status(504), "4");
     }
 }

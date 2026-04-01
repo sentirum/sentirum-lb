@@ -310,6 +310,39 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_route_add_grpc_and_grpcs_targets() {
+        let input = r#"
+route add grpcsvc api.example.com/pkg.Service/ grpc://10.0.0.1:50051/
+route add grpcssvc secure.example.com/pkg.Service/ grpcs://10.0.0.2:443/
+"#;
+        let defs = parse_route_commands(input);
+        assert_eq!(defs.len(), 2);
+        assert_eq!(defs[0].dst, "grpc://10.0.0.1:50051/");
+        assert_eq!(defs[1].dst, "grpcs://10.0.0.2:443/");
+    }
+
+    #[test]
+    fn test_parse_route_add_ws_and_wss_targets() {
+        let input = r#"
+route add wssvc socket.example.com/ ws://10.0.0.1:8080/
+route add wsssvc secure-socket.example.com/ wss://10.0.0.2:8443/
+"#;
+        let defs = parse_route_commands(input);
+        assert_eq!(defs.len(), 2);
+        assert_eq!(defs[0].dst, "ws://10.0.0.1:8080/");
+        assert_eq!(defs[1].dst, "wss://10.0.0.2:8443/");
+    }
+
+    #[test]
+    fn test_parse_route_add_proto_option_is_preserved() {
+        let input = r#"route add grpcsvc myhost.com/pkg.Service/ http://10.0.0.1:50051/ opts "proto=grpc host=grpc.internal""#;
+        let defs = parse_route_commands(input);
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].opts.get("proto"), Some(&"grpc".to_string()));
+        assert_eq!(defs[0].opts.get("host"), Some(&"grpc.internal".to_string()));
+    }
+
+    #[test]
     fn test_parse_route_del() {
         let input = "route del myservice";
         let defs = parse_route_commands(input);
