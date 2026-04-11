@@ -75,6 +75,11 @@ async fn routes_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
                             "service": t.service,
                             "url": t.url,
                             "weight": t.weight,
+                            "protocol": format!("{:?}", t.upstream_protocol()).to_lowercase(),
+                            "tls": t.upstream_tls(),
+                            "http2": t.requires_http2(),
+                            "websocket": t.is_websocket(),
+                            "opts": t.opts,
                         })
                     })
                     .collect();
@@ -123,6 +128,11 @@ async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
             "matcher": state.config.proxy.matcher,
             "connect_timeout": state.config.proxy.connect_timeout,
             "read_timeout": state.config.proxy.read_timeout,
+            "write_timeout": state.config.proxy.write_timeout,
+            "idle_timeout": state.config.proxy.idle_timeout,
+            "enable_h2c": state.config.proxy.enable_h2c,
+            "upstream_h2_max_streams": state.config.proxy.upstream_h2_max_streams,
+            "upstream_h2_ping_interval": state.config.proxy.upstream_h2_ping_interval,
             "pool_size": state.config.proxy.pool_size,
             "max_connections": state.config.proxy.max_connections,
         },
@@ -253,6 +263,17 @@ mod tests {
         let app = build_router(state);
         let response = app
             .oneshot(Request::builder().uri("/admin/routes").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_admin_config_includes_http2_fields() {
+        let state = make_test_state();
+        let app = build_router(state);
+        let response = app
+            .oneshot(Request::builder().uri("/admin/config").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), 200);

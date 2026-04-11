@@ -261,6 +261,7 @@ impl Table {
             parsed_host: None,
             parsed_port: None,
             parsed_tls: false,
+            parsed_protocol: crate::route::target::UpstreamProtocol::Http,
             active_connections: std::sync::atomic::AtomicU64::new(0),
         };
         target.pre_parse();

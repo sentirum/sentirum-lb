@@ -27,6 +27,12 @@ pub struct Metrics {
     pub bytes_sent_total: AtomicU64,
     /// Total bytes received from upstream
     pub bytes_received_total: AtomicU64,
+    /// Total gRPC requests processed
+    pub grpc_requests_total: AtomicU64,
+    /// Total gRPC-Web requests processed
+    pub grpc_web_requests_total: AtomicU64,
+    /// Total WebSocket requests processed
+    pub websocket_requests_total: AtomicU64,
 
     // --- Gauges ---
     /// Currently active connections
@@ -67,6 +73,9 @@ impl Metrics {
             requests_error_total: AtomicU64::new(0),
             bytes_sent_total: AtomicU64::new(0),
             bytes_received_total: AtomicU64::new(0),
+            grpc_requests_total: AtomicU64::new(0),
+            grpc_web_requests_total: AtomicU64::new(0),
+            websocket_requests_total: AtomicU64::new(0),
             active_connections: AtomicI64::new(0),
             route_count: AtomicI64::new(0),
             target_count: AtomicI64::new(0),
@@ -133,6 +142,18 @@ impl Metrics {
         }
     }
 
+    pub fn record_protocol_request(&self, grpc: bool, grpc_web: bool, websocket: bool) {
+        if grpc {
+            self.grpc_requests_total.fetch_add(1, Ordering::Relaxed);
+        }
+        if grpc_web {
+            self.grpc_web_requests_total.fetch_add(1, Ordering::Relaxed);
+        }
+        if websocket {
+            self.websocket_requests_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Increment active connections
     pub fn connect(&self) {
         self.active_connections.fetch_add(1, Ordering::Relaxed);
@@ -152,6 +173,9 @@ impl Metrics {
         let target_count = self.target_count.load(Ordering::Relaxed);
         let bytes_sent = self.bytes_sent_total.load(Ordering::Relaxed);
         let bytes_received = self.bytes_received_total.load(Ordering::Relaxed);
+        let grpc_requests_total = self.grpc_requests_total.load(Ordering::Relaxed);
+        let grpc_web_requests_total = self.grpc_web_requests_total.load(Ordering::Relaxed);
+        let websocket_requests_total = self.websocket_requests_total.load(Ordering::Relaxed);
         let status_2xx = self.status_2xx.load(Ordering::Relaxed);
         let status_3xx = self.status_3xx.load(Ordering::Relaxed);
         let status_4xx = self.status_4xx.load(Ordering::Relaxed);
@@ -199,6 +223,18 @@ sentirum_lb_bytes_sent_total {bytes_sent}
 # TYPE sentirum_lb_bytes_received_total counter
 sentirum_lb_bytes_received_total {bytes_received}
 
+# HELP sentirum_lb_grpc_requests_total Total gRPC requests processed
+# TYPE sentirum_lb_grpc_requests_total counter
+sentirum_lb_grpc_requests_total {grpc_requests_total}
+
+# HELP sentirum_lb_grpc_web_requests_total Total gRPC-Web requests processed
+# TYPE sentirum_lb_grpc_web_requests_total counter
+sentirum_lb_grpc_web_requests_total {grpc_web_requests_total}
+
+# HELP sentirum_lb_websocket_requests_total Total WebSocket requests processed
+# TYPE sentirum_lb_websocket_requests_total counter
+sentirum_lb_websocket_requests_total {websocket_requests_total}
+
 # HELP sentirum_lb_response_status_total Response status codes
 # TYPE sentirum_lb_response_status_total counter
 sentirum_lb_response_status_total{{code="2xx"}} {status_2xx}
@@ -224,6 +260,9 @@ sentirum_lb_request_duration_seconds_count {count}
 "#,
             sum = sum_seconds,
             count = requests_total,
+            grpc_requests_total = grpc_requests_total,
+            grpc_web_requests_total = grpc_web_requests_total,
+            websocket_requests_total = websocket_requests_total,
         )
     }
 }
@@ -295,6 +334,7 @@ mod tests {
     #[test]
     fn test_render_prometheus() {
         let metrics = Metrics::new();
+        metrics.record_protocol_request(true, true, true);
         metrics.record_request(200, 5000);
         let output = metrics.render();
         assert!(output.contains("sentirum_lb_requests_total 1"));
@@ -311,6 +351,19 @@ mod tests {
             .expect("sum should parse as f64");
         assert!((sum - 0.005_f64).abs() < 1e-9, "unexpected duration sum: {sum}");
         assert!(output.contains("sentirum_lb_response_status_total"));
+        assert!(output.contains("sentirum_lb_grpc_requests_total 1"));
+        assert!(output.contains("sentirum_lb_grpc_web_requests_total 1"));
+        assert!(output.contains("sentirum_lb_websocket_requests_total 1"));
+    }
+
+    #[test]
+    fn test_record_protocol_request_counters() {
+        let metrics = Metrics::new();
+        metrics.record_protocol_request(true, false, true);
+        metrics.record_protocol_request(false, true, false);
+        assert_eq!(metrics.grpc_requests_total.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.grpc_web_requests_total.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.websocket_requests_total.load(Ordering::Relaxed), 1);
     }
 
     #[test]

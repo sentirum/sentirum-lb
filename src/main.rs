@@ -149,6 +149,8 @@ impl BackgroundService for AdminBackgroundService {
 }
 
 fn main() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let args = Args::parse();
 
     // Load configuration
@@ -259,6 +261,11 @@ fn main() {
     if config.server.workers > 0 {
         lb_service.threads = Some(config.server.workers);
     }
+    if let Some(app) = lb_service.app_logic_mut() {
+        let mut server_options = pingora::apps::HttpServerOptions::default();
+        server_options.h2c = config.proxy.enable_h2c;
+        app.server_options = Some(server_options);
+    }
     lb_service.add_tcp(&config.server.listen);
 
     tracing::info!(
@@ -266,6 +273,7 @@ fn main() {
         workers = config.server.workers,
         pool_size = config.proxy.pool_size,
         max_connections = config.proxy.max_connections,
+        h2c_enabled = config.proxy.enable_h2c,
         "Proxy listening (HTTP)"
     );
 
@@ -287,10 +295,15 @@ fn main() {
                     config.tls.listen.clone()
                 };
 
-                if let Err(e) = lb_service.add_tls(&tls_listen, &tls.cert_path, &tls.key_path) {
-                    tracing::error!(error = %e, "Failed to configure TLS listener");
-                } else {
-                    tracing::info!(addr = %tls_listen, "Proxy listening (HTTPS/TLS)");
+                match pingora::listeners::tls::TlsSettings::intermediate(&tls.cert_path, &tls.key_path) {
+                    Ok(mut settings) => {
+                        settings.enable_h2();
+                        lb_service.add_tls_with_settings(&tls_listen, None, settings);
+                        tracing::info!(addr = %tls_listen, h2_enabled = true, "Proxy listening (HTTPS/TLS)");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to configure TLS listener");
+                    }
                 }
             }
             Err(e) => {

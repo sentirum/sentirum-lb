@@ -15,10 +15,13 @@ Default runtime behavior is now **Consul-first**: you can start without a config
 - Multiple balancing strategies: `round-robin`, `random`, `least-connections`
 - Matchers: `prefix`, `iprefix`, `glob`
 - Optional TLS termination for downstream traffic
+- Downstream h2c support for cleartext gRPC clients
+- Upstream protocol-aware proxying for HTTP, HTTPS, gRPC, gRPCS, WS, and WSS
+- gRPC-Web bridge support
 - Path rewrite support with `strip` and `prepend`
 - Admin API and Prometheus metrics
 - Basic SSRF protection for upstream targets
-- Configurable upstream keepalive pool size and per-upstream concurrency limit
+- Configurable upstream keepalive pool size, HTTP/2 stream concurrency, and per-upstream concurrency limit
 
 ## Project layout
 
@@ -79,6 +82,9 @@ connect_timeout = "5s"
 read_timeout = "30s"
 write_timeout = "30s"
 idle_timeout = "120s"
+enable_h2c = false
+upstream_h2_max_streams = 128
+upstream_h2_ping_interval = ""
 pool_size = 128
 max_connections = 10000
 
@@ -97,6 +103,9 @@ listen = ""
 - `server.workers`: Pingora service thread count. `0` keeps Pingora defaults.
 - `proxy.pool_size`: upstream keepalive pool size.
 - `proxy.max_connections`: max active requests per upstream target. `0` means unlimited.
+- `proxy.enable_h2c`: accept cleartext HTTP/2 on the plaintext listener for gRPC clients.
+- `proxy.upstream_h2_max_streams`: max concurrent streams per upstream H2 connection.
+- `proxy.upstream_h2_ping_interval`: optional upstream H2 ping interval for long-lived gRPC streams.
 - `consul.poll_interval`: blocking query wait duration for Consul watchers.
 - `proxy.no_route_status`: status returned when no route matches.
 
@@ -130,10 +139,27 @@ route add static static.example.com/static/ http://127.0.0.1:3000/ opts "strip=/
 
 - `strip=/prefix`: remove a path prefix before proxying
 - `prepend=/prefix`: prepend a path prefix before proxying
-- `tlsskipverify=true`: disable upstream certificate verification
+- `tlsskipverify=true`: request upstream certificate verification bypass (note: Pingora rustls upstream connectors currently do not fully honor this for self-signed upstream TLS; prefer trusted/internal CA certificates for `grpcs` / `wss` upstreams)
 - `ssrfskipverify=true`: bypass SSRF checks for a target
-- `host=example.internal`: reserved for host override-style usage
-- `proto=https`: mark a service-discovery target as HTTPS
+- `host=example.internal`: override upstream Host header and TLS SNI
+- `proto=https|grpc|grpcs|ws|wss`: override the upstream transport/protocol semantics for service-discovery targets
+
+### Protocol notes
+
+- `http` / `https`: standard HTTP proxying
+- `grpc` / `grpcs`: upstream HTTP/2 proxying for native gRPC
+- `ws` / `wss`: WebSocket proxying over HTTP/1.1 upgrade
+- gRPC-Web requests are bridged to native gRPC upstreams automatically
+- gRPC rewrites are guarded: only safe path rewrites that preserve a valid `/Service/Method`-style path are applied
+
+Examples:
+
+```text
+route add grpc / grpc://10.0.0.10:50051/
+route add grpcs localhost/ grpcs://10.0.0.11:8443/ opts "tlsskipverify=true"
+route add ws /socket ws://10.0.0.20:8080/socket
+route add wss localhost/realtime wss://10.0.0.21:9443/realtime opts "tlsskipverify=true"
+```
 
 ## Consul integration
 
@@ -148,6 +174,8 @@ Service discovery expects Fabio-like tags, for example:
 urlprefix-/api
 urlprefix-example.com/api
 urlprefix-/ proto=https strip=/api prepend=/v1
+urlprefix-/ proto=grpc
+urlprefix-example.com/realtime proto=wss
 ```
 
 Fabio-compatible semantics:
@@ -191,6 +219,9 @@ Tracked metrics include:
 
 - total requests
 - error requests
+- gRPC request count
+- gRPC-Web request count
+- WebSocket request count
 - active connections
 - route and target counts
 - status code buckets
@@ -202,7 +233,7 @@ Tracked metrics include:
 - Consul-discovered targets are allowed to use RFC1918/private addresses by default to support Nomad/Consul internal networking
 - Hostnames like `localhost` and `.local` are blocked
 - You can bypass SSRF checks per target with `ssrfskipverify=true` if your environment requires it
-- Upstream TLS verification can be disabled per target with `tlsskipverify=true`
+- Upstream TLS verification bypass can be requested per target with `tlsskipverify=true`, but with the current Pingora rustls connector you should still prefer trusted/internal CA certificates for `grpcs` / `wss` upstreams because self-signed bypass is not fully reliable yet
 
 ## Development
 
@@ -223,8 +254,12 @@ cargo test
 
 Implemented today:
 
-- HTTP proxying
+- HTTP / HTTPS proxying
+- gRPC / gRPCS proxying
+- gRPC-Web bridging
+- WebSocket / WSS proxying
 - TLS termination
+- Downstream h2c support
 - Consul KV + service discovery
 - Admin API
 - Metrics

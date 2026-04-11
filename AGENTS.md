@@ -18,6 +18,7 @@ This file gives coding agents and contributors a fast map of the repository and 
   - route lookup
   - upstream peer construction
   - SSRF checks
+  - protocol-aware HTTP/2 / gRPC / gRPC-Web / WebSocket handling
   - path rewriting
   - request/response logging and metrics
 
@@ -66,6 +67,9 @@ These config values are live and should stay wired unless intentionally redesign
 - `proxy.read_timeout`
 - `proxy.write_timeout`
 - `proxy.idle_timeout`
+- `proxy.enable_h2c`
+- `proxy.upstream_h2_max_streams`
+- `proxy.upstream_h2_ping_interval`
 - `proxy.pool_size`
 - `proxy.max_connections`
 - `tls.cert_path`
@@ -82,6 +86,11 @@ If you introduce a new config field, wire it into runtime behavior and cover it 
 - `strip` happens before `prepend`
 - Query strings must survive rewrites
 - `host=` route option overrides upstream Host header and TLS SNI
+- `grpc` / `grpcs` targets must stay on HTTP/2-capable upstream paths
+- gRPC-Web requests are bridged to native gRPC upstreams in the proxy layer
+- WebSocket support relies on Pingora’s upgrade path; keep upgrade semantics intact
+- `strip` / `prepend` remain available, but gRPC rewrites must preserve a valid `/Service/Method` path
+- With the current Pingora rustls upstream connector, `tlsskipverify=true` is not fully reliable for self-signed `grpcs` / `wss` upstreams; prefer trusted/internal CA certificates and do not document self-signed bypass as production-safe
 - `max_connections` is enforced per upstream target
 - `0` for `max_connections` means unlimited
 
@@ -112,6 +121,14 @@ Add or update unit tests when you touch:
 - rewrite behavior
 - metrics accounting
 - Consul URL construction
+- protocol detection / HTTP/2 wiring / gRPC trailer behavior
+
+Add or update ignored integration tests when you touch:
+
+- gRPC / gRPCS routing
+- gRPC-Web bridging
+- WebSocket / WSS proxying
+- h2c enablement
 
 ## Documentation expectations
 
