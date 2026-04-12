@@ -1,12 +1,12 @@
 //! Consul integration module for Sentirum LB
-//! 
+//!
 //! Provides Consul KV watching and service discovery for dynamic routing.
-//! 
+//!
 //! # Example
 //! ```ignore
 //! use sentirum_lb::consul::{ConsulClient, ConsulConfig};
 //! use sentirum_lb::route::table::RouteTable;
-//! 
+//!
 //! # async fn example() {
 //! let config = ConsulConfig::default();
 //! let client = ConsulClient::new(config.clone()).unwrap();

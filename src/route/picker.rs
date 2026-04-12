@@ -1,21 +1,31 @@
 use crate::route::target::Target;
 use rand::Rng;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 /// Target selection strategy
 pub trait Picker: Send + Sync {
     /// Pick a target from the list of targets.
     /// `w_targets` is the pre-computed weighted target list (Arc references for zero-copy pick).
     /// `targets` is the original target list.
-    fn pick(&self, targets: &[Arc<Target>], w_targets: &[Arc<Target>], counter: &std::sync::atomic::AtomicU64) -> Option<Arc<Target>>;
+    fn pick(
+        &self,
+        targets: &[Arc<Target>],
+        w_targets: &[Arc<Target>],
+        counter: &std::sync::atomic::AtomicU64,
+    ) -> Option<Arc<Target>>;
 }
 
 /// Round-robin picker — cycles through targets in order
 pub struct RoundRobinPicker;
 
 impl Picker for RoundRobinPicker {
-    fn pick(&self, _targets: &[Arc<Target>], w_targets: &[Arc<Target>], counter: &std::sync::atomic::AtomicU64) -> Option<Arc<Target>> {
+    fn pick(
+        &self,
+        _targets: &[Arc<Target>],
+        w_targets: &[Arc<Target>],
+        counter: &std::sync::atomic::AtomicU64,
+    ) -> Option<Arc<Target>> {
         if w_targets.is_empty() {
             return None;
         }
@@ -44,7 +54,12 @@ impl Default for RandomPicker {
 }
 
 impl Picker for RandomPicker {
-    fn pick(&self, _targets: &[Arc<Target>], w_targets: &[Arc<Target>], _counter: &std::sync::atomic::AtomicU64) -> Option<Arc<Target>> {
+    fn pick(
+        &self,
+        _targets: &[Arc<Target>],
+        w_targets: &[Arc<Target>],
+        _counter: &std::sync::atomic::AtomicU64,
+    ) -> Option<Arc<Target>> {
         if w_targets.is_empty() {
             return None;
         }
@@ -60,7 +75,12 @@ impl Picker for RandomPicker {
 pub struct LeastConnectionsPicker;
 
 impl Picker for LeastConnectionsPicker {
-    fn pick(&self, targets: &[Arc<Target>], _w_targets: &[Arc<Target>], _counter: &std::sync::atomic::AtomicU64) -> Option<Arc<Target>> {
+    fn pick(
+        &self,
+        targets: &[Arc<Target>],
+        _w_targets: &[Arc<Target>],
+        _counter: &std::sync::atomic::AtomicU64,
+    ) -> Option<Arc<Target>> {
         if targets.is_empty() {
             return None;
         }

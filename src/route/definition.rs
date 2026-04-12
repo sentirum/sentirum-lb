@@ -57,10 +57,6 @@ impl RouteDef {
     /// e.g. "myhost.com/api/" -> "/api/"
     pub fn src_path(&self) -> &str {
         let parts: Vec<&str> = self.src.splitn(2, '/').collect();
-        if parts.len() > 1 {
-            parts[1]
-        } else {
-            ""
-        }
+        if parts.len() > 1 { parts[1] } else { "" }
     }
 }

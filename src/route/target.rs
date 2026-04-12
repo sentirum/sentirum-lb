@@ -1,6 +1,66 @@
 use crate::route::definition::RouteSource;
+use pingora::protocols::tls::ALPN;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum UpstreamProtocol {
+    #[default]
+    Http,
+    Https,
+    Grpc,
+    Grpcs,
+    Ws,
+    Wss,
+    Tcp,
+}
+
+impl UpstreamProtocol {
+    fn from_scheme_or_proto(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "http" => Some(Self::Http),
+            "https" => Some(Self::Https),
+            "grpc" => Some(Self::Grpc),
+            "grpcs" => Some(Self::Grpcs),
+            "ws" => Some(Self::Ws),
+            "wss" => Some(Self::Wss),
+            "tcp" => Some(Self::Tcp),
+            _ => None,
+        }
+    }
+
+    pub fn uses_tls(self) -> bool {
+        matches!(self, Self::Https | Self::Grpcs | Self::Wss)
+    }
+
+    pub fn requires_http2(self) -> bool {
+        matches!(self, Self::Grpc | Self::Grpcs)
+    }
+
+    pub fn is_websocket(self) -> bool {
+        matches!(self, Self::Ws | Self::Wss)
+    }
+
+    pub fn default_port(self) -> Option<u16> {
+        match self {
+            Self::Http | Self::Ws => Some(80),
+            Self::Https | Self::Wss => Some(443),
+            Self::Grpc => Some(80),
+            Self::Grpcs => Some(443),
+            Self::Tcp => None,
+        }
+    }
+
+    pub fn preferred_alpn(self) -> ALPN {
+        if self.requires_http2() {
+            ALPN::H2
+        } else if self.is_websocket() {
+            ALPN::H1
+        } else {
+            ALPN::H2H1
+        }
+    }
+}
 
 /// A target backend for a route.
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,6 +95,9 @@ pub struct Target {
     /// Whether upstream uses TLS
     #[serde(skip)]
     pub parsed_tls: bool,
+    /// Parsed upstream transport protocol
+    #[serde(skip)]
+    pub parsed_protocol: UpstreamProtocol,
     /// Active connection count for least-connections picker
     #[serde(skip)]
     pub active_connections: std::sync::atomic::AtomicU64,
@@ -54,6 +117,7 @@ impl Clone for Target {
             parsed_host: self.parsed_host.clone(),
             parsed_port: self.parsed_port,
             parsed_tls: self.parsed_tls,
+            parsed_protocol: self.parsed_protocol,
             // Reset active connections on clone (fresh snapshot)
             active_connections: std::sync::atomic::AtomicU64::new(0),
         }
@@ -73,6 +137,7 @@ impl Default for Target {
             parsed_host: None,
             parsed_port: None,
             parsed_tls: false,
+            parsed_protocol: UpstreamProtocol::Http,
             active_connections: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -95,8 +160,17 @@ impl Target {
     pub fn pre_parse(&mut self) {
         if let Ok(parsed) = url::Url::parse(&self.url) {
             self.parsed_host = parsed.host_str().map(|h| h.to_string());
-            self.parsed_port = parsed.port_or_known_default();
-            self.parsed_tls = parsed.scheme() == "https";
+            self.parsed_protocol = self
+                .opts
+                .get("proto")
+                .and_then(|proto| UpstreamProtocol::from_scheme_or_proto(proto))
+                .or_else(|| UpstreamProtocol::from_scheme_or_proto(parsed.scheme()))
+                .unwrap_or(UpstreamProtocol::Http);
+            self.parsed_port = parsed
+                .port()
+                .or_else(|| self.parsed_protocol.default_port())
+                .or_else(|| parsed.port_or_known_default());
+            self.parsed_tls = self.parsed_protocol.uses_tls();
         }
     }
 
@@ -137,7 +211,10 @@ impl Target {
     }
 
     pub fn source_allows_private_upstreams(&self) -> bool {
-        matches!(self.source, RouteSource::ConsulKv | RouteSource::ConsulService)
+        matches!(
+            self.source,
+            RouteSource::ConsulKv | RouteSource::ConsulService
+        )
     }
 
     /// Get the upstream host (pre-parsed, no allocation)
@@ -150,12 +227,30 @@ impl Target {
 
     /// Get the upstream port (pre-parsed)
     pub fn upstream_port(&self) -> u16 {
-        self.parsed_port.unwrap_or(80)
+        self.parsed_port
+            .or_else(|| self.parsed_protocol.default_port())
+            .unwrap_or(80)
     }
 
     /// Whether upstream uses TLS
     pub fn upstream_tls(&self) -> bool {
         self.parsed_tls
+    }
+
+    pub fn upstream_protocol(&self) -> UpstreamProtocol {
+        self.parsed_protocol
+    }
+
+    pub fn requires_http2(&self) -> bool {
+        self.parsed_protocol.requires_http2()
+    }
+
+    pub fn preferred_alpn(&self) -> ALPN {
+        self.parsed_protocol.preferred_alpn()
+    }
+
+    pub fn is_websocket(&self) -> bool {
+        self.parsed_protocol.is_websocket()
     }
 
     /// Get the strip path option.
@@ -178,18 +273,37 @@ impl Target {
 
     /// Whether this is a TCP proxy target.
     pub fn is_tcp(&self) -> bool {
-        self.opts.get("proto").map(|v| v == "tcp").unwrap_or(false)
+        self.parsed_protocol == UpstreamProtocol::Tcp
     }
 
     /// Whether this is an HTTPS upstream target.
     pub fn is_https(&self) -> bool {
-        self.parsed_tls
-            || self.opts.get("proto").map(|v| v == "https").unwrap_or(false)
+        self.parsed_protocol == UpstreamProtocol::Https
+    }
+
+    pub fn is_grpc(&self) -> bool {
+        matches!(
+            self.parsed_protocol,
+            UpstreamProtocol::Grpc | UpstreamProtocol::Grpcs
+        )
     }
 
     /// Get the host header override.
     pub fn host_override(&self) -> Option<&str> {
         self.opts.get("host").map(|s| s.as_str())
+    }
+
+    pub fn upstream_authority(&self) -> String {
+        if let Some(host) = self.host_override() {
+            return host.to_string();
+        }
+
+        let host = self.upstream_host();
+        let port = self.upstream_port();
+        match self.parsed_protocol.default_port() {
+            Some(default_port) if default_port == port => host.to_string(),
+            _ => format!("{host}:{port}"),
+        }
     }
 }
 
@@ -210,7 +324,9 @@ pub fn is_ip_always_blocked(ip: &std::net::IpAddr) -> bool {
         std::net::IpAddr::V4(v4) => {
             v4.is_loopback() || v4.is_link_local() || v4.is_broadcast() || v4.is_unspecified()
         }
-        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local()
+        }
     }
 }
 
@@ -297,7 +413,43 @@ mod tests {
     #[test]
     fn test_ssrf_skip_verify_opt() {
         let mut t = Target::new("svc".into(), "http://10.0.0.1:8080/".into());
-        t.opts.insert("ssrfskipverify".to_string(), "true".to_string());
+        t.opts
+            .insert("ssrfskipverify".to_string(), "true".to_string());
         assert!(t.ssrf_skip_verify());
+    }
+
+    #[test]
+    fn test_grpcs_targets_use_tls_and_require_http2() {
+        let t = Target::new("svc".into(), "grpcs://api.example.com/".into());
+        assert!(t.upstream_tls());
+        assert!(t.requires_http2());
+        assert!(t.is_grpc());
+        assert_eq!(t.upstream_port(), 443);
+    }
+
+    #[test]
+    fn test_wss_targets_use_tls_without_requiring_http2() {
+        let t = Target::new("svc".into(), "wss://api.example.com/socket".into());
+        assert!(t.upstream_tls());
+        assert!(t.is_websocket());
+        assert!(!t.requires_http2());
+        assert_eq!(t.upstream_port(), 443);
+    }
+
+    #[test]
+    fn test_proto_option_overrides_url_scheme_for_grpc() {
+        let mut t = Target::new("svc".into(), "http://api.example.com/service".into());
+        t.opts.insert("proto".into(), "grpc".into());
+        t.pre_parse();
+        assert_eq!(t.upstream_protocol(), UpstreamProtocol::Grpc);
+        assert!(t.requires_http2());
+        assert!(!t.upstream_tls());
+    }
+
+    #[test]
+    fn test_websocket_targets_force_h1_alpn() {
+        let t = Target::new("svc".into(), "wss://api.example.com/socket".into());
+        assert_eq!(t.preferred_alpn().get_max_http_version(), 1);
+        assert_eq!(t.preferred_alpn().get_min_http_version(), 1);
     }
 }

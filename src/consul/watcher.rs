@@ -1,7 +1,7 @@
 //! Consul watcher for Sentirum LB
 //! Implements blocking queries to watch for Consul state changes
 
-use crate::consul::client::{ConsulClient, ConsulConfig, HealthCheck, HEALTH_STATUS_PASSING};
+use crate::consul::client::{ConsulClient, ConsulConfig, HEALTH_STATUS_PASSING, HealthCheck};
 use crate::route::definition::{RouteCmd, RouteDef};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,7 +43,11 @@ impl ServiceMonitor {
                     if new_index != last_index || !checks.is_empty() {
                         last_index = new_index;
                         let route_defs = self.process_checks(&checks, &tag_prefix).await;
-                        if updates.send(RouteUpdate::Services(route_defs)).await.is_err() {
+                        if updates
+                            .send(RouteUpdate::Services(route_defs))
+                            .await
+                            .is_err()
+                        {
                             tracing::warn!("Consul watcher: channel closed, stopping");
                             break;
                         }
@@ -116,15 +120,15 @@ impl ServiceMonitor {
                         };
 
                         for tag in &instance.service_tags {
-                            if tag.starts_with(tag_prefix) {
-                                if let Some(route_def) = self.parse_tag(
+                            if tag.starts_with(tag_prefix)
+                                && let Some(route_def) = self.parse_tag(
                                     tag,
                                     address,
                                     instance.service_port,
                                     service_name,
-                                ) {
-                                    config.push(route_def);
-                                }
+                                )
+                            {
+                                config.push(route_def);
                             }
                         }
                     }
@@ -160,8 +164,13 @@ impl ServiceMonitor {
                 "_node_maintenance" => {
                     node_maintenance.insert(check.node.clone(), true);
                 }
-                _ if check.check_id.starts_with("_service_maintenance:") && check.status == "critical" => {
-                    let service_id = check.check_id.trim_start_matches("_service_maintenance:").to_string();
+                _ if check.check_id.starts_with("_service_maintenance:")
+                    && check.status == "critical" =>
+                {
+                    let service_id = check
+                        .check_id
+                        .trim_start_matches("_service_maintenance:")
+                        .to_string();
                     service_maintenance.insert((check.node.clone(), service_id), true);
                 }
                 _ if is_service_check(check) => {
@@ -211,13 +220,7 @@ impl ServiceMonitor {
     }
 
     /// Parse a Fabio-style tag like "urlprefix-/api" -> route add.
-    fn parse_tag(
-        &self,
-        tag: &str,
-        address: &str,
-        port: u16,
-        service: &str,
-    ) -> Option<RouteDef> {
+    fn parse_tag(&self, tag: &str, address: &str, port: u16, service: &str) -> Option<RouteDef> {
         let (src, raw_opts) = parse_urlprefix_tag(tag, &self.config.tag_prefix)?;
         let opts = parse_opts(raw_opts);
 
@@ -244,10 +247,7 @@ impl ServiceMonitor {
                 .and_then(|w| w.parse::<f64>().ok())
                 .unwrap_or(0.0),
             tags: vec![],
-            opts: opts
-                .into_iter()
-                .filter(|(k, _)| k != "weight")
-                .collect(),
+            opts: opts.into_iter().filter(|(k, _)| k != "weight").collect(),
             source: crate::route::definition::RouteSource::ConsulService,
         })
     }
@@ -417,8 +417,9 @@ mod tests {
 
     #[test]
     fn parse_urlprefix_tag_matches_fabio_path_only_routes() {
-        let (route, opts) = parse_urlprefix_tag("urlprefix-/api proto=https strip=/api", "urlprefix-")
-            .expect("tag should parse");
+        let (route, opts) =
+            parse_urlprefix_tag("urlprefix-/api proto=https strip=/api", "urlprefix-")
+                .expect("tag should parse");
         assert_eq!(route, "/api");
         assert_eq!(opts, "proto=https strip=/api");
     }
@@ -432,6 +433,55 @@ mod tests {
     }
 
     #[test]
+    fn parse_urlprefix_tag_preserves_grpc_and_grpcs_opts() {
+        let (route, opts) = parse_urlprefix_tag(
+            "urlprefix-api.example.com/pkg.Service proto=grpc strip=/edge",
+            "urlprefix-",
+        )
+        .expect("tag should parse");
+        assert_eq!(route, "api.example.com/pkg.Service");
+        assert_eq!(opts, "proto=grpc strip=/edge");
+
+        let (route, opts) = parse_urlprefix_tag("urlprefix-/pkg.Service proto=grpcs", "urlprefix-")
+            .expect("tag should parse");
+        assert_eq!(route, "/pkg.Service");
+        assert_eq!(opts, "proto=grpcs");
+    }
+
+    #[test]
+    fn parse_tag_builds_grpc_destinations() {
+        let monitor = ServiceMonitor {
+            client: Arc::new(ConsulClient::new(ConsulConfig::default()).unwrap()),
+            config: ConsulConfig::default(),
+        };
+
+        let grpc = monitor
+            .parse_tag(
+                "urlprefix-api.example.com/pkg.Service proto=grpc strip=/edge",
+                "10.0.0.10",
+                50051,
+                "orders",
+            )
+            .expect("grpc tag should parse");
+        assert_eq!(grpc.src, "api.example.com/pkg.Service");
+        assert_eq!(grpc.dst, "grpc://10.0.0.10:50051/");
+        assert_eq!(grpc.opts.get("proto"), Some(&"grpc".to_string()));
+        assert_eq!(grpc.opts.get("strip"), Some(&"/edge".to_string()));
+
+        let grpcs = monitor
+            .parse_tag(
+                "urlprefix-/pkg.Service proto=grpcs",
+                "10.0.0.11",
+                8443,
+                "orders",
+            )
+            .expect("grpcs tag should parse");
+        assert_eq!(grpcs.src, "/pkg.Service");
+        assert_eq!(grpcs.dst, "grpcs://10.0.0.11:8443/");
+        assert_eq!(grpcs.opts.get("proto"), Some(&"grpcs".to_string()));
+    }
+
+    #[test]
     fn passing_services_require_all_service_checks_to_pass() {
         let monitor = ServiceMonitor {
             client: Arc::new(ConsulClient::new(ConsulConfig::default()).unwrap()),
@@ -439,8 +489,22 @@ mod tests {
         };
 
         let checks = vec![
-            check("node-1", "service:web:1", HEALTH_STATUS_PASSING, "web", "svc-1", &["urlprefix-/"]),
-            check("node-1", "service:web:2", "critical", "web", "svc-1", &["urlprefix-/"]),
+            check(
+                "node-1",
+                "service:web:1",
+                HEALTH_STATUS_PASSING,
+                "web",
+                "svc-1",
+                &["urlprefix-/"],
+            ),
+            check(
+                "node-1",
+                "service:web:2",
+                "critical",
+                "web",
+                "svc-1",
+                &["urlprefix-/"],
+            ),
             check("node-1", "serfHealth", HEALTH_STATUS_PASSING, "", "", &[]),
         ];
         let refs: Vec<&HealthCheck> = checks.iter().collect();
@@ -457,8 +521,22 @@ mod tests {
         };
 
         let checks = vec![
-            check("node-1", "service:web:1", HEALTH_STATUS_PASSING, "web", "svc-1", &["urlprefix-/"]),
-            check("node-1", "_node_maintenance", HEALTH_STATUS_PASSING, "", "", &[]),
+            check(
+                "node-1",
+                "service:web:1",
+                HEALTH_STATUS_PASSING,
+                "web",
+                "svc-1",
+                &["urlprefix-/"],
+            ),
+            check(
+                "node-1",
+                "_node_maintenance",
+                HEALTH_STATUS_PASSING,
+                "",
+                "",
+                &[],
+            ),
         ];
         let refs: Vec<&HealthCheck> = checks.iter().collect();
 

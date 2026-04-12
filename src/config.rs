@@ -105,6 +105,15 @@ pub struct ProxyConfig {
     /// Idle timeout
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout: String,
+    /// Enable downstream cleartext HTTP/2 (h2c) on the plaintext listener.
+    #[serde(default)]
+    pub enable_h2c: bool,
+    /// Max concurrent streams per upstream HTTP/2 connection.
+    #[serde(default = "default_upstream_h2_max_streams")]
+    pub upstream_h2_max_streams: usize,
+    /// Optional upstream HTTP/2 ping interval for long-lived streams.
+    #[serde(default)]
+    pub upstream_h2_ping_interval: String,
     /// Upstream connection pool size per thread (Pingora default: 128)
     #[serde(default = "default_pool_size")]
     pub pool_size: usize,
@@ -129,6 +138,9 @@ impl Default for ProxyConfig {
             read_timeout: default_read_timeout(),
             write_timeout: default_write_timeout(),
             idle_timeout: default_idle_timeout(),
+            enable_h2c: false,
+            upstream_h2_max_streams: default_upstream_h2_max_streams(),
+            upstream_h2_ping_interval: String::new(),
             pool_size: default_pool_size(),
             max_connections: default_max_connections(),
             trusted_proxies: Vec::new(),
@@ -159,6 +171,9 @@ fn default_write_timeout() -> String {
 }
 fn default_idle_timeout() -> String {
     "120s".to_string()
+}
+fn default_upstream_h2_max_streams() -> usize {
+    128
 }
 fn default_pool_size() -> usize {
     128
@@ -193,8 +208,7 @@ fn default_log_format() -> String {
     "json".to_string()
 }
 
-#[derive(Debug, Deserialize, Clone)]
-#[derive(Default)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct TlsConfig {
     /// Path to TLS certificate (PEM)
     pub cert_path: String,
@@ -205,22 +219,83 @@ pub struct TlsConfig {
     pub listen: String,
 }
 
-
 impl Config {
-    pub fn parse_duration(s: &str) -> Duration {
+    pub fn parse_optional_duration(s: &str) -> Option<Duration> {
         let s = s.trim();
+        if s.is_empty() {
+            return None;
+        }
+
         let result = if s.ends_with("ms") {
-            s.trim_end_matches("ms").parse::<u64>().ok().map(Duration::from_millis)
+            s.trim_end_matches("ms")
+                .parse::<u64>()
+                .ok()
+                .map(Duration::from_millis)
         } else if s.ends_with('s') {
-            s.trim_end_matches('s').parse::<u64>().ok().map(Duration::from_secs)
+            s.trim_end_matches('s')
+                .parse::<u64>()
+                .ok()
+                .map(Duration::from_secs)
         } else if s.ends_with('m') {
-            s.trim_end_matches('m').parse::<u64>().ok().map(|m| Duration::from_secs(m * 60))
+            s.trim_end_matches('m')
+                .parse::<u64>()
+                .ok()
+                .map(|m| Duration::from_secs(m * 60))
         } else {
             None
         };
-        result.unwrap_or_else(|| {
-            tracing::warn!(value = s, "Unrecognised duration format; defaulting to 0s");
+
+        result.or_else(|| {
+            tracing::warn!(
+                value = s,
+                "Unrecognised duration format; ignoring optional duration"
+            );
+            None
+        })
+    }
+
+    pub fn parse_duration(s: &str) -> Duration {
+        let s = s.trim();
+        Self::parse_optional_duration(s).unwrap_or_else(|| {
+            if !s.is_empty() {
+                tracing::warn!(value = s, "Unrecognised duration format; defaulting to 0s");
+            }
             Duration::ZERO
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_optional_duration_accepts_empty_values() {
+        assert_eq!(Config::parse_optional_duration(""), None);
+        assert_eq!(Config::parse_optional_duration("   "), None);
+    }
+
+    #[test]
+    fn parse_optional_duration_parses_supported_units() {
+        assert_eq!(
+            Config::parse_optional_duration("150ms"),
+            Some(Duration::from_millis(150))
+        );
+        assert_eq!(
+            Config::parse_optional_duration("5s"),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            Config::parse_optional_duration("2m"),
+            Some(Duration::from_secs(120))
+        );
+    }
+
+    #[test]
+    fn proxy_config_defaults_long_lived_http2_fields() {
+        let proxy = ProxyConfig::default();
+        assert!(!proxy.enable_h2c);
+        assert_eq!(proxy.upstream_h2_max_streams, 128);
+        assert!(proxy.upstream_h2_ping_interval.is_empty());
     }
 }

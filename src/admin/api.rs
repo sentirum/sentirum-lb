@@ -8,12 +8,12 @@
 
 use crate::config::Config;
 use crate::route::registry::ManagedRouteTable;
+use axum::Router;
 use axum::extract::State;
-use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
-use axum::middleware::{from_fn_with_state, Next};
+use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
+use axum::middleware::{Next, from_fn_with_state};
 use axum::response::Response;
 use axum::routing::get;
-use axum::Router;
 use std::sync::Arc;
 
 /// Shared state for admin API handlers
@@ -75,6 +75,11 @@ async fn routes_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
                             "service": t.service,
                             "url": t.url,
                             "weight": t.weight,
+                            "protocol": format!("{:?}", t.upstream_protocol()).to_lowercase(),
+                            "tls": t.upstream_tls(),
+                            "http2": t.requires_http2(),
+                            "websocket": t.is_websocket(),
+                            "opts": t.opts,
                         })
                     })
                     .collect();
@@ -123,6 +128,11 @@ async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
             "matcher": state.config.proxy.matcher,
             "connect_timeout": state.config.proxy.connect_timeout,
             "read_timeout": state.config.proxy.read_timeout,
+            "write_timeout": state.config.proxy.write_timeout,
+            "idle_timeout": state.config.proxy.idle_timeout,
+            "enable_h2c": state.config.proxy.enable_h2c,
+            "upstream_h2_max_streams": state.config.proxy.upstream_h2_max_streams,
+            "upstream_h2_ping_interval": state.config.proxy.upstream_h2_ping_interval,
             "pool_size": state.config.proxy.pool_size,
             "max_connections": state.config.proxy.max_connections,
         },
@@ -130,10 +140,7 @@ async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
 }
 
 /// Run the admin API server using axum
-pub async fn run_admin_server(
-    config: Arc<Config>,
-    route_table: Arc<ManagedRouteTable>,
-) {
+pub async fn run_admin_server(config: Arc<Config>, route_table: Arc<ManagedRouteTable>) {
     let addr = config.server.admin_listen.clone();
 
     if config.server.admin_token.is_empty() && !is_loopback_bind(&addr) {
@@ -142,7 +149,10 @@ pub async fn run_admin_server(
     }
 
     let auth_enabled = !config.server.admin_token.is_empty();
-    let state = AdminState { config, route_table };
+    let state = AdminState {
+        config,
+        route_table,
+    };
     let app = build_router(state);
 
     tracing::info!(addr = %addr, auth_enabled, "Admin API server starting (axum)");
@@ -184,7 +194,9 @@ async fn admin_auth_middleware(
     } else {
         Err((
             StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized", "message": "Valid Bearer token or X-Admin-Token required"})),
+            axum::Json(
+                serde_json::json!({"error": "unauthorized", "message": "Valid Bearer token or X-Admin-Token required"}),
+            ),
         ))
     }
 }
@@ -193,8 +205,10 @@ fn is_loopback_bind(addr: &str) -> bool {
     if addr.starts_with("0.0.0.0") || addr.starts_with("[::]") || addr.starts_with(':') {
         return false;
     }
-    addr.starts_with("127.") || addr.starts_with("localhost:") || addr == "localhost" || addr.starts_with("[::1]")
-
+    addr.starts_with("127.")
+        || addr.starts_with("localhost:")
+        || addr == "localhost"
+        || addr.starts_with("[::1]")
 }
 
 #[cfg(test)]
@@ -241,7 +255,12 @@ mod tests {
         let state = make_test_state();
         let app = build_router(state);
         let response = app
-            .oneshot(Request::builder().uri("/admin/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
@@ -252,7 +271,28 @@ mod tests {
         let state = make_test_state();
         let app = build_router(state);
         let response = app
-            .oneshot(Request::builder().uri("/admin/routes").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/routes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_admin_config_includes_http2_fields() {
+        let state = make_test_state();
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
@@ -263,7 +303,12 @@ mod tests {
         let state = make_test_state();
         let app = build_router(state);
         let response = app
-            .oneshot(Request::builder().uri("/admin/metrics").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
@@ -274,7 +319,12 @@ mod tests {
         let state = make_test_state();
         let app = build_router(state);
         let response = app
-            .oneshot(Request::builder().uri("/admin/config").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
@@ -285,7 +335,12 @@ mod tests {
         let state = make_test_state();
         let app = build_router(state);
         let response = app
-            .oneshot(Request::builder().uri("/admin/nonexistent").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), 404);
@@ -297,7 +352,12 @@ mod tests {
         Arc::make_mut(&mut state.config).server.admin_token = "secret".to_string();
         let app = build_router(state);
         let response = app
-            .oneshot(Request::builder().uri("/admin/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), 401);

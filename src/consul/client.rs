@@ -49,7 +49,11 @@ impl From<&AppConsulConfig> for ConsulConfig {
         Self {
             address: cfg.address.clone(),
             scheme: cfg.scheme.clone(),
-            token: if cfg.token.is_empty() { None } else { Some(cfg.token.clone()) },
+            token: if cfg.token.is_empty() {
+                None
+            } else {
+                Some(cfg.token.clone())
+            },
             kv_prefix: cfg.kv_prefix.clone(),
             tag_prefix: cfg.tag_prefix.clone(),
             allow_stale: true,
@@ -137,7 +141,11 @@ impl ConsulClient {
     /// Create a new Consul client
     pub fn new(config: ConsulConfig) -> Result<Self, ConsulError> {
         let query_wait = crate::config::Config::parse_duration(&config.query_wait);
-        let query_wait = if query_wait.is_zero() { Duration::from_secs(300) } else { query_wait };
+        let query_wait = if query_wait.is_zero() {
+            Duration::from_secs(300)
+        } else {
+            query_wait
+        };
         let http_timeout = query_wait + Duration::from_secs(10);
 
         let client = Client::builder()
@@ -257,7 +265,10 @@ impl ConsulClient {
     }
 
     /// Get health checks for all services
-    pub async fn get_health_checks(&self, index: u64) -> Result<(Vec<HealthCheck>, u64), ConsulError> {
+    pub async fn get_health_checks(
+        &self,
+        index: u64,
+    ) -> Result<(Vec<HealthCheck>, u64), ConsulError> {
         let url = self.health_checks_url(index)?;
         let mut request = self.client.get(url);
 
@@ -280,8 +291,11 @@ impl ConsulClient {
     }
 
     fn catalog_service_url(&self, service_name: &str) -> Result<Url, ConsulError> {
-        let mut url = Url::parse(&format!("{}/v1/catalog/service/{}", self.base_url, service_name))
-            .map_err(|e| ConsulError::ClientError(e.to_string()))?;
+        let mut url = Url::parse(&format!(
+            "{}/v1/catalog/service/{}",
+            self.base_url, service_name
+        ))
+        .map_err(|e| ConsulError::ClientError(e.to_string()))?;
 
         {
             let mut query = url.query_pairs_mut();
