@@ -101,7 +101,13 @@ impl Route {
             let total_fixed: f64 = self
                 .targets
                 .iter()
-                .map(|t| if t.fixed_weight > 0.0 { t.fixed_weight } else { 0.0 })
+                .map(|t| {
+                    if t.fixed_weight > 0.0 {
+                        t.fixed_weight
+                    } else {
+                        0.0
+                    }
+                })
                 .sum();
 
             let dynamic_count = self
@@ -193,17 +199,17 @@ impl Table {
     /// Returns the matching route (with targets) for the given matcher strategy.
     pub fn lookup_route(&self, host: &str, path: &str, matcher: &str) -> Option<&Arc<Route>> {
         // Try exact host match first
-        if let Some(routes) = self.routes.get(host) {
-            if let Some(route) = Self::find_matching_route(routes, path, matcher) {
-                return Some(route);
-            }
+        if let Some(routes) = self.routes.get(host)
+            && let Some(route) = Self::find_matching_route(routes, path, matcher)
+        {
+            return Some(route);
         }
 
         // Try empty host (catch-all)
-        if let Some(routes) = self.routes.get("") {
-            if let Some(route) = Self::find_matching_route(routes, path, matcher) {
-                return Some(route);
-            }
+        if let Some(routes) = self.routes.get("")
+            && let Some(route) = Self::find_matching_route(routes, path, matcher)
+        {
+            return Some(route);
         }
 
         None
@@ -368,10 +374,15 @@ impl Table {
             for route in host_routes.iter_mut() {
                 if route.path == path {
                     let mut r = (**route).clone();
-                    let match_count = r.targets.iter().filter(|target| {
-                        (def.service.is_empty() || target.service == def.service)
-                            && (def.tags.is_empty() || def.tags.iter().all(|t| target.tags.contains(t)))
-                    }).count();
+                    let match_count = r
+                        .targets
+                        .iter()
+                        .filter(|target| {
+                            (def.service.is_empty() || target.service == def.service)
+                                && (def.tags.is_empty()
+                                    || def.tags.iter().all(|t| target.tags.contains(t)))
+                        })
+                        .count();
 
                     if match_count == 0 {
                         continue;
@@ -386,7 +397,9 @@ impl Table {
                     for i in 0..r.targets.len() {
                         let target = Arc::make_mut(&mut r.targets[i]);
                         if (def.service.is_empty() || target.service == def.service)
-                            && (def.tags.is_empty() || def.tags.iter().all(|t| target.tags.contains(t))) {
+                            && (def.tags.is_empty()
+                                || def.tags.iter().all(|t| target.tags.contains(t)))
+                        {
                             target.fixed_weight = fixed_weight;
                         }
                     }
@@ -466,11 +479,7 @@ impl RouteTable {
         metrics
             .target_count
             .store(target_count as i64, std::sync::atomic::Ordering::Relaxed);
-        tracing::info!(
-            route_count,
-            target_count,
-            "Routing table updated"
-        );
+        tracing::info!(route_count, target_count, "Routing table updated");
     }
 
     /// Apply definitions and swap the table.
@@ -531,8 +540,16 @@ mod tests {
 
         // Both should get equal distribution (500 slots each = 1000 total)
         assert_eq!(route.w_targets.len(), 1000);
-        let svc1_count = route.w_targets.iter().filter(|t| t.service == "svc1").count();
-        let svc2_count = route.w_targets.iter().filter(|t| t.service == "svc2").count();
+        let svc1_count = route
+            .w_targets
+            .iter()
+            .filter(|t| t.service == "svc1")
+            .count();
+        let svc2_count = route
+            .w_targets
+            .iter()
+            .filter(|t| t.service == "svc2")
+            .count();
         assert_eq!(svc1_count, 500);
         assert_eq!(svc2_count, 500);
     }
@@ -551,8 +568,16 @@ mod tests {
         }];
 
         let table = Table::from_definitions(&defs);
-        assert!(table.lookup_route("example.com", "/api/users", "iprefix").is_some());
-        assert!(table.lookup_route("example.com", "/API/users", "iprefix").is_some());
+        assert!(
+            table
+                .lookup_route("example.com", "/api/users", "iprefix")
+                .is_some()
+        );
+        assert!(
+            table
+                .lookup_route("example.com", "/API/users", "iprefix")
+                .is_some()
+        );
     }
 
     #[test]
@@ -646,8 +671,16 @@ mod tests {
         ];
 
         let table = Table::from_definitions(&defs);
-        assert!(table.lookup_route("example.com", "/api", "prefix").is_none());
-        assert!(table.lookup_route("example.com", "/other", "prefix").is_some());
+        assert!(
+            table
+                .lookup_route("example.com", "/api", "prefix")
+                .is_none()
+        );
+        assert!(
+            table
+                .lookup_route("example.com", "/other", "prefix")
+                .is_some()
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! and route-level metrics for observability.
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
- // keep for future use with per-route metrics
+// keep for future use with per-route metrics
 use std::time::Instant;
 
 /// Global metrics instance
@@ -132,13 +132,20 @@ impl Metrics {
 
         // Record status code
         match status {
-            200..=299 => { self.status_2xx.fetch_add(1, Ordering::Relaxed); }
-            300..=399 => { self.status_3xx.fetch_add(1, Ordering::Relaxed); }
+            200..=299 => {
+                self.status_2xx.fetch_add(1, Ordering::Relaxed);
+            }
+            300..=399 => {
+                self.status_3xx.fetch_add(1, Ordering::Relaxed);
+            }
             400..=499 => {
                 self.status_4xx.fetch_add(1, Ordering::Relaxed);
                 self.requests_error_total.fetch_add(1, Ordering::Relaxed);
             }
-            _ => { self.status_5xx.fetch_add(1, Ordering::Relaxed); self.requests_error_total.fetch_add(1, Ordering::Relaxed); }
+            _ => {
+                self.status_5xx.fetch_add(1, Ordering::Relaxed);
+                self.requests_error_total.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -150,7 +157,8 @@ impl Metrics {
             self.grpc_web_requests_total.fetch_add(1, Ordering::Relaxed);
         }
         if websocket {
-            self.websocket_requests_total.fetch_add(1, Ordering::Relaxed);
+            self.websocket_requests_total
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -282,7 +290,9 @@ impl RequestTimer {
     pub fn new() -> Self {
         let metrics = global();
         metrics.connect();
-        Self { start: Instant::now() }
+        Self {
+            start: Instant::now(),
+        }
     }
 
     /// Complete the request and record metrics
@@ -349,7 +359,10 @@ mod tests {
             .expect("missing duration sum value")
             .parse()
             .expect("sum should parse as f64");
-        assert!((sum - 0.005_f64).abs() < 1e-9, "unexpected duration sum: {sum}");
+        assert!(
+            (sum - 0.005_f64).abs() < 1e-9,
+            "unexpected duration sum: {sum}"
+        );
         assert!(output.contains("sentirum_lb_response_status_total"));
         assert!(output.contains("sentirum_lb_grpc_requests_total 1"));
         assert!(output.contains("sentirum_lb_grpc_web_requests_total 1"));
@@ -369,12 +382,12 @@ mod tests {
     #[test]
     fn test_latency_buckets() {
         let metrics = Metrics::new();
-        metrics.record_request(200, 500);      // <=1ms
-        metrics.record_request(200, 1_000);    // boundary <=1ms
-        metrics.record_request(200, 3_000);    // <=5ms
-        metrics.record_request(200, 8_000);    // <=10ms
-        metrics.record_request(200, 20_000);   // <=25ms
-        metrics.record_request(200, 80_000);   // <=100ms
+        metrics.record_request(200, 500); // <=1ms
+        metrics.record_request(200, 1_000); // boundary <=1ms
+        metrics.record_request(200, 3_000); // <=5ms
+        metrics.record_request(200, 8_000); // <=10ms
+        metrics.record_request(200, 20_000); // <=25ms
+        metrics.record_request(200, 80_000); // <=100ms
         metrics.record_request(200, 2_000_000); // <=5s
 
         assert_eq!(metrics.latency_bucket_1ms.load(Ordering::Relaxed), 2);

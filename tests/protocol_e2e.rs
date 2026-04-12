@@ -8,8 +8,8 @@ use std::time::Duration;
 use futures::{SinkExt, StreamExt};
 use prost::Message;
 use rcgen::generate_simple_self_signed;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::ServerConfig as RustlsServerConfig;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::time::sleep;
@@ -35,7 +35,10 @@ type BoxStream<T> = Pin<Box<dyn tokio_stream::Stream<Item = Result<T, Status>> +
 
 #[tonic::async_trait]
 impl EchoService for EchoSvc {
-    async fn unary_echo(&self, request: Request<EchoRequest>) -> Result<Response<EchoReply>, Status> {
+    async fn unary_echo(
+        &self,
+        request: Request<EchoRequest>,
+    ) -> Result<Response<EchoReply>, Status> {
         Ok(Response::new(EchoReply {
             message: request.into_inner().message,
         }))
@@ -49,9 +52,15 @@ impl EchoService for EchoSvc {
     ) -> Result<Response<Self::ServerStreamStream>, Status> {
         let base = request.into_inner().message;
         let items = vec![
-            Ok(EchoReply { message: format!("{base}-1") }),
-            Ok(EchoReply { message: format!("{base}-2") }),
-            Ok(EchoReply { message: format!("{base}-3") }),
+            Ok(EchoReply {
+                message: format!("{base}-1"),
+            }),
+            Ok(EchoReply {
+                message: format!("{base}-2"),
+            }),
+            Ok(EchoReply {
+                message: format!("{base}-3"),
+            }),
         ];
         Ok(Response::new(Box::pin(tokio_stream::iter(items))))
     }
@@ -82,7 +91,13 @@ impl EchoService for EchoSvc {
             while let Some(item) = inbound.next().await {
                 match item {
                     Ok(msg) => {
-                        if tx.send(Ok(EchoReply { message: msg.message })).await.is_err() {
+                        if tx
+                            .send(Ok(EchoReply {
+                                message: msg.message,
+                            }))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -150,7 +165,11 @@ async fn protocol_end_to_end_smoke() {
     )
     .await;
 
-    run_grpcs_checks(secure_downstream_runtime.tls_port, &secure_downstream_runtime.proxy_cert_pem).await;
+    run_grpcs_checks(
+        secure_downstream_runtime.tls_port,
+        &secure_downstream_runtime.proxy_cert_pem,
+    )
+    .await;
 }
 
 struct SpawnedGrpc {
@@ -191,7 +210,10 @@ async fn spawn_grpc_server(tls: bool) -> SpawnedGrpc {
         });
     }
 
-    SpawnedGrpc { addr, _shutdown: tx }
+    SpawnedGrpc {
+        addr,
+        _shutdown: tx,
+    }
 }
 
 struct SpawnedWs {
@@ -256,7 +278,10 @@ async fn spawn_websocket_server(tls: bool) -> SpawnedWs {
         });
     }
 
-    SpawnedWs { addr, _shutdown: tx }
+    SpawnedWs {
+        addr,
+        _shutdown: tx,
+    }
 }
 
 async fn spawn_proxy(routes: String) -> TestRuntime {
@@ -360,7 +385,6 @@ async fn wait_for_ready(http_port: u16) {
     panic!("proxy did not become ready in time");
 }
 
-
 async fn run_grpc_h2c_checks(http_port: u16) {
     let mut client = EchoServiceClient::connect(format!("http://127.0.0.1:{http_port}"))
         .await
@@ -388,19 +412,40 @@ async fn run_grpc_h2c_checks(http_port: u16) {
     assert_eq!(items, vec!["stream-1", "stream-2", "stream-3"]);
 
     let input = tokio_stream::iter(vec![
-        EchoRequest { message: "a".into() },
-        EchoRequest { message: "b".into() },
-        EchoRequest { message: "c".into() },
+        EchoRequest {
+            message: "a".into(),
+        },
+        EchoRequest {
+            message: "b".into(),
+        },
+        EchoRequest {
+            message: "c".into(),
+        },
     ]);
-    let client_stream = client.client_stream(Request::new(input)).await.unwrap().into_inner();
+    let client_stream = client
+        .client_stream(Request::new(input))
+        .await
+        .unwrap()
+        .into_inner();
     assert_eq!(client_stream.message, "a,b,c");
 
     let bidi_input = tokio_stream::iter(vec![
-        EchoRequest { message: "x".into() },
-        EchoRequest { message: "y".into() },
+        EchoRequest {
+            message: "x".into(),
+        },
+        EchoRequest {
+            message: "y".into(),
+        },
     ]);
-    let bidi = client.bidi_stream(Request::new(bidi_input)).await.unwrap().into_inner();
-    let messages = bidi.map(|item| item.unwrap().message).collect::<Vec<_>>().await;
+    let bidi = client
+        .bidi_stream(Request::new(bidi_input))
+        .await
+        .unwrap()
+        .into_inner();
+    let messages = bidi
+        .map(|item| item.unwrap().message)
+        .collect::<Vec<_>>()
+        .await;
     assert_eq!(messages, vec!["x", "y"]);
 }
 
@@ -453,7 +498,9 @@ async fn run_grpc_web_check(http_port: u16) {
         .http1_only()
         .build()
         .unwrap()
-        .post(format!("http://127.0.0.1:{http_port}/echo.EchoService/UnaryEcho"))
+        .post(format!(
+            "http://127.0.0.1:{http_port}/echo.EchoService/UnaryEcho"
+        ))
         .header("content-type", "application/grpc-web+proto")
         .header("x-grpc-web", "1")
         .body(body)
@@ -462,7 +509,12 @@ async fn run_grpc_web_check(http_port: u16) {
         .unwrap();
 
     assert!(resp.status().is_success());
-    let content_type = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(content_type.starts_with("application/grpc-web"));
 
     let bytes = resp.bytes().await.unwrap();

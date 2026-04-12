@@ -4,7 +4,10 @@ use crate::route::registry::ManagedRouteTable;
 use crate::route::table::Table;
 use async_trait::async_trait;
 use pingora::http::ResponseHeader;
-use pingora::modules::http::{grpc_web::{GrpcWeb, GrpcWebBridge}, HttpModules};
+use pingora::modules::http::{
+    HttpModules,
+    grpc_web::{GrpcWeb, GrpcWebBridge},
+};
 use pingora::prelude::*;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
@@ -30,20 +33,31 @@ impl CidrRange {
             IpAddr::V6(_) if prefix_len > 128 => return None,
             _ => {}
         }
-        Some(Self { network, prefix_len })
+        Some(Self {
+            network,
+            prefix_len,
+        })
     }
 
     pub fn contains(&self, addr: &IpAddr) -> bool {
         match (self.network, addr) {
             (IpAddr::V4(net), IpAddr::V4(ip)) => {
-                if self.prefix_len == 0 { return true; }
-                if self.prefix_len >= 32 { return net == *ip; }
+                if self.prefix_len == 0 {
+                    return true;
+                }
+                if self.prefix_len >= 32 {
+                    return net == *ip;
+                }
                 let mask = u32::MAX << (32 - self.prefix_len);
                 (u32::from(net) & mask) == (u32::from(*ip) & mask)
             }
             (IpAddr::V6(net), IpAddr::V6(ip)) => {
-                if self.prefix_len == 0 { return true; }
-                if self.prefix_len >= 128 { return net == *ip; }
+                if self.prefix_len == 0 {
+                    return true;
+                }
+                if self.prefix_len >= 128 {
+                    return net == *ip;
+                }
                 let net_bits = u128::from(net);
                 let ip_bits = u128::from(*ip);
                 let mask = u128::MAX << (128 - self.prefix_len);
@@ -97,7 +111,9 @@ impl SentirumProxy {
     pub fn new(route_table: Arc<ManagedRouteTable>, config: Arc<Config>) -> Self {
         let picker = crate::route::picker::create_picker(&config.proxy.strategy);
         let matcher = config.proxy.matcher.clone();
-        let trusted_proxies: Vec<CidrRange> = config.proxy.trusted_proxies
+        let trusted_proxies: Vec<CidrRange> = config
+            .proxy
+            .trusted_proxies
             .iter()
             .filter_map(|s| {
                 let parsed = CidrRange::parse(s);
@@ -110,18 +126,30 @@ impl SentirumProxy {
         if !trusted_proxies.is_empty() {
             tracing::info!(count = trusted_proxies.len(), "Loaded trusted proxy ranges");
         }
-        Self { route_table, picker, matcher, config, trusted_proxies }
+        Self {
+            route_table,
+            picker,
+            matcher,
+            config,
+            trusted_proxies,
+        }
     }
 
-    fn lookup_target(&self, host: &str, path: &str) -> Option<std::sync::Arc<crate::route::target::Target>> {
+    fn lookup_target(
+        &self,
+        host: &str,
+        path: &str,
+    ) -> Option<std::sync::Arc<crate::route::target::Target>> {
         let table = self.route_table.get();
         let table: &Table = &table;
 
         // Use Table's consolidated lookup (no duplication)
-        if let Some(route) = table.lookup_route(host, path, &self.matcher) {
-            if !route.w_targets.is_empty() {
-                return self.picker.pick(&route.targets, &route.w_targets, &route.rr_counter);
-            }
+        if let Some(route) = table.lookup_route(host, path, &self.matcher)
+            && !route.w_targets.is_empty()
+        {
+            return self
+                .picker
+                .pick(&route.targets, &route.w_targets, &route.rr_counter);
         }
 
         None
@@ -195,7 +223,9 @@ impl ProxyHttp for SentirumProxy {
             resp.insert_header("X-Served-By", "sentirum-lb")?;
 
             session.write_response_header(Box::new(resp), false).await?;
-            session.write_response_body(Some(bytes::Bytes::from(body)), true).await?;
+            session
+                .write_response_body(Some(bytes::Bytes::from(body)), true)
+                .await?;
 
             ctx.response_status = 200;
             return Ok(true); // Request handled, no proxy needed
@@ -276,7 +306,8 @@ impl ProxyHttp for SentirumProxy {
         if !target.ssrf_skip_verify()
             && (crate::route::target::is_ip_always_blocked(&resolved_addr.ip())
                 || (!target.source_allows_private_upstreams()
-                    && crate::route::target::is_ip_rfc1918(&resolved_addr.ip()))) {
+                    && crate::route::target::is_ip_rfc1918(&resolved_addr.ip())))
+        {
             tracing::warn!(
                 host = host,
                 resolved_ip = %resolved_addr.ip(),
@@ -288,11 +319,7 @@ impl ProxyHttp for SentirumProxy {
         }
 
         // Use pre-parsed URL fields (no per-request URL parsing!)
-        let mut peer = HttpPeer::new(
-            resolved_addr,
-            target.upstream_tls(),
-            host.to_string(),
-        );
+        let mut peer = HttpPeer::new(resolved_addr, target.upstream_tls(), host.to_string());
         configure_peer_options(&mut peer, &target, &self.config);
 
         Ok(Box::new(peer))
@@ -307,9 +334,21 @@ impl ProxyHttp for SentirumProxy {
     ) {
         let header = session.req_header();
         let method = header.method.as_str();
-        let path = header.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or(header.uri.path());
-        let host = header.headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("-");
-        let target_url = ctx.picked_target.as_ref().map(|t| t.url.as_str()).unwrap_or("-");
+        let path = header
+            .uri
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or(header.uri.path());
+        let host = header
+            .headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-");
+        let target_url = ctx
+            .picked_target
+            .as_ref()
+            .map(|t| t.url.as_str())
+            .unwrap_or("-");
 
         // Determine status: use stored response_status, or infer from error
         let status = if ctx.response_status > 0 {
@@ -328,7 +367,10 @@ impl ProxyHttp for SentirumProxy {
         };
 
         // Record Prometheus metrics
-        let latency_us = ctx.request_start.map(|s| s.elapsed().as_micros() as u64).unwrap_or(0);
+        let latency_us = ctx
+            .request_start
+            .map(|s| s.elapsed().as_micros() as u64)
+            .unwrap_or(0);
         crate::metrics::prometheus::global().record_protocol_request(
             ctx.is_grpc,
             ctx.is_grpc_web,
@@ -338,7 +380,9 @@ impl ProxyHttp for SentirumProxy {
         crate::metrics::prometheus::global().disconnect();
 
         if let Some(target) = &ctx.picked_target {
-            target.active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            target
+                .active_connections
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         tracing::info!(
@@ -379,7 +423,11 @@ impl ProxyHttp for SentirumProxy {
             let s = a.to_string();
             // Strip port from "ip:port" or "[ipv6]:port"
             if s.starts_with('[') {
-                s.split(']').next().unwrap_or(&s).trim_start_matches('[').to_string()
+                s.split(']')
+                    .next()
+                    .unwrap_or(&s)
+                    .trim_start_matches('[')
+                    .to_string()
             } else if let Some(pos) = s.rfind(':') {
                 s[..pos].to_string()
             } else {
@@ -520,13 +568,18 @@ impl ProxyHttp for SentirumProxy {
                 resp.insert_header("Content-Type", content_type).ok();
                 resp.insert_header("X-Served-By", "sentirum-lb").ok();
 
-                session.write_response_header(Box::new(resp), false).await.map(|_| body)
+                session
+                    .write_response_header(Box::new(resp), false)
+                    .await
+                    .map(|_| body)
             };
 
             match write_result {
                 Ok(body) => {
                     if !body.is_empty() {
-                        let _ = session.write_response_body(Some(bytes::Bytes::from(body)), true).await;
+                        let _ = session
+                            .write_response_body(Some(bytes::Bytes::from(body)), true)
+                            .await;
                     }
                 }
                 Err(write_err) => {
@@ -618,8 +671,8 @@ async fn write_grpc_error_response(
     http_status: u16,
     message: &str,
 ) -> pingora::Result<String> {
-    let mut resp = ResponseHeader::build(200, None)
-        .or_else(|_| ResponseHeader::build(500, None))?;
+    let mut resp =
+        ResponseHeader::build(200, None).or_else(|_| ResponseHeader::build(500, None))?;
     resp.insert_header("Content-Type", "application/grpc")?;
     resp.insert_header("X-Served-By", "sentirum-lb")?;
     resp.insert_header("grpc-status", grpc_status_for_http_status(http_status))?;
@@ -665,7 +718,13 @@ fn grpc_status_for_http_status(status: u16) -> &'static str {
 fn sanitize_grpc_message(message: &str) -> String {
     let sanitized: String = message
         .chars()
-        .map(|c| if c.is_ascii_control() && c != ' ' { ' ' } else { c })
+        .map(|c| {
+            if c.is_ascii_control() && c != ' ' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
 
     let mut encoded = String::with_capacity(sanitized.len());
@@ -698,7 +757,8 @@ fn configure_peer_options(
 
     if target.requires_http2() {
         peer.options.max_h2_streams = config.proxy.upstream_h2_max_streams.max(1);
-        peer.options.h2_ping_interval = Config::parse_optional_duration(&config.proxy.upstream_h2_ping_interval);
+        peer.options.h2_ping_interval =
+            Config::parse_optional_duration(&config.proxy.upstream_h2_ping_interval);
     }
 
     if target.upstream_tls() {
@@ -753,14 +813,13 @@ fn append_forwarded_headers(
     }
 
     // CF-Connecting-IP: only forward from trusted proxies (e.g. Cloudflare)
-    if trusted {
-        if let Some(cf_ip) = downstream_request
+    if trusted
+        && let Some(cf_ip) = downstream_request
             .headers
             .get("cf-connecting-ip")
             .and_then(|v| v.to_str().ok())
-        {
-            upstream_request.insert_header("CF-Connecting-IP", cf_ip)?;
-        }
+    {
+        upstream_request.insert_header("CF-Connecting-IP", cf_ip)?;
     }
 
     if !host.is_empty() {
@@ -781,13 +840,16 @@ fn append_forwarded_headers(
     Ok(())
 }
 
-fn rewrite_upstream_uri(uri: &http::Uri, target: &crate::route::target::Target) -> Option<http::Uri> {
+fn rewrite_upstream_uri(
+    uri: &http::Uri,
+    target: &crate::route::target::Target,
+) -> Option<http::Uri> {
     let mut path = uri.path().to_string();
 
-    if let Some(strip) = target.strip_path() {
-        if let Some(new_path) = strip_path_prefix(&path, strip) {
-            path = new_path.into_owned();
-        }
+    if let Some(strip) = target.strip_path()
+        && let Some(new_path) = strip_path_prefix(&path, strip)
+    {
+        path = new_path.into_owned();
     }
 
     if let Some(prepend) = target.prepend_path() {
@@ -911,7 +973,9 @@ mod tests {
                 &input[1..bracket_end]
             } else if let Some(colon_pos) = input.rfind(':') {
                 let potential_host = &input[..colon_pos];
-                if potential_host.contains('.') || potential_host.parse::<std::net::Ipv6Addr>().is_ok() {
+                if potential_host.contains('.')
+                    || potential_host.parse::<std::net::Ipv6Addr>().is_ok()
+                {
                     potential_host
                 } else {
                     input
@@ -932,7 +996,10 @@ mod tests {
 
         append_forwarded_headers(&downstream, &mut upstream, false, None, &[]).unwrap();
 
-        assert_eq!(upstream.headers.get("x-forwarded-host").unwrap(), "example.com");
+        assert_eq!(
+            upstream.headers.get("x-forwarded-host").unwrap(),
+            "example.com"
+        );
         assert_eq!(upstream.headers.get("x-forwarded-proto").unwrap(), "http");
     }
 
@@ -940,7 +1007,9 @@ mod tests {
     fn test_append_forwarded_headers_untrusted_ignores_client_proto() {
         let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
         downstream.insert_header("Host", "example.com").unwrap();
-        downstream.insert_header("X-Forwarded-Proto", "https").unwrap();
+        downstream
+            .insert_header("X-Forwarded-Proto", "https")
+            .unwrap();
         let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
 
         // Untrusted peer: client-supplied proto must be ignored
@@ -962,10 +1031,8 @@ mod tests {
 
     #[test]
     fn test_rewrite_upstream_uri_preserves_query_and_chains_rewrites() {
-        let mut target = crate::route::target::Target::new(
-            "svc".into(),
-            "http://example.com".into(),
-        );
+        let mut target =
+            crate::route::target::Target::new("svc".into(), "http://example.com".into());
         target.opts.insert("strip".into(), "/api".into());
         target.opts.insert("prepend".into(), "/v2".into());
 
@@ -978,10 +1045,8 @@ mod tests {
 
     #[test]
     fn test_rewrite_upstream_uri_keeps_path_when_strip_misses() {
-        let mut target = crate::route::target::Target::new(
-            "svc".into(),
-            "http://example.com".into(),
-        );
+        let mut target =
+            crate::route::target::Target::new("svc".into(), "http://example.com".into());
         target.opts.insert("strip".into(), "/api".into());
         target.opts.insert("prepend".into(), "/v2".into());
 
@@ -993,10 +1058,8 @@ mod tests {
 
     #[test]
     fn test_rewrite_upstream_uri_preserves_safe_grpc_method_paths() {
-        let mut target = crate::route::target::Target::new(
-            "svc".into(),
-            "grpc://example.com".into(),
-        );
+        let mut target =
+            crate::route::target::Target::new("svc".into(), "grpc://example.com".into());
         target.opts.insert("strip".into(), "/api".into());
 
         let uri: http::Uri = "/api/pkg.Service/Method?x=1".parse().unwrap();
@@ -1008,10 +1071,8 @@ mod tests {
 
     #[test]
     fn test_rewrite_upstream_uri_rejects_invalid_grpc_method_rewrites() {
-        let mut target = crate::route::target::Target::new(
-            "svc".into(),
-            "grpc://example.com".into(),
-        );
+        let mut target =
+            crate::route::target::Target::new("svc".into(), "grpc://example.com".into());
         target.opts.insert("prepend".into(), "/v1".into());
 
         let uri: http::Uri = "/pkg.Service/Method".parse().unwrap();
@@ -1042,7 +1103,9 @@ mod tests {
     fn test_untrusted_client_xff_overwritten() {
         let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
         downstream.insert_header("Host", "example.com").unwrap();
-        downstream.insert_header("X-Forwarded-For", "1.2.3.4").unwrap();
+        downstream
+            .insert_header("X-Forwarded-For", "1.2.3.4")
+            .unwrap();
         let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
 
         append_forwarded_headers(&downstream, &mut upstream, false, Some("10.0.0.1"), &[]).unwrap();
@@ -1056,13 +1119,25 @@ mod tests {
         let trusted = vec![CidrRange::parse("10.0.0.0/8").unwrap()];
         let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
         downstream.insert_header("Host", "example.com").unwrap();
-        downstream.insert_header("X-Forwarded-For", "203.0.113.50").unwrap();
+        downstream
+            .insert_header("X-Forwarded-For", "203.0.113.50")
+            .unwrap();
         let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
 
-        append_forwarded_headers(&downstream, &mut upstream, false, Some("10.0.0.1"), &trusted).unwrap();
+        append_forwarded_headers(
+            &downstream,
+            &mut upstream,
+            false,
+            Some("10.0.0.1"),
+            &trusted,
+        )
+        .unwrap();
 
         // Trusted: chain preserved + peer appended
-        assert_eq!(upstream.headers.get("x-forwarded-for").unwrap(), "203.0.113.50, 10.0.0.1");
+        assert_eq!(
+            upstream.headers.get("x-forwarded-for").unwrap(),
+            "203.0.113.50, 10.0.0.1"
+        );
     }
 
     #[test]
@@ -1070,19 +1145,33 @@ mod tests {
         let trusted = vec![CidrRange::parse("173.245.48.0/20").unwrap()];
         let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
         downstream.insert_header("Host", "example.com").unwrap();
-        downstream.insert_header("CF-Connecting-IP", "203.0.113.99").unwrap();
+        downstream
+            .insert_header("CF-Connecting-IP", "203.0.113.99")
+            .unwrap();
         let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
 
-        append_forwarded_headers(&downstream, &mut upstream, false, Some("173.245.48.5"), &trusted).unwrap();
+        append_forwarded_headers(
+            &downstream,
+            &mut upstream,
+            false,
+            Some("173.245.48.5"),
+            &trusted,
+        )
+        .unwrap();
 
-        assert_eq!(upstream.headers.get("cf-connecting-ip").unwrap(), "203.0.113.99");
+        assert_eq!(
+            upstream.headers.get("cf-connecting-ip").unwrap(),
+            "203.0.113.99"
+        );
     }
 
     #[test]
     fn test_untrusted_peer_strips_cf_connecting_ip() {
         let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
         downstream.insert_header("Host", "example.com").unwrap();
-        downstream.insert_header("CF-Connecting-IP", "203.0.113.99").unwrap();
+        downstream
+            .insert_header("CF-Connecting-IP", "203.0.113.99")
+            .unwrap();
         let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
 
         append_forwarded_headers(&downstream, &mut upstream, false, Some("8.8.8.8"), &[]).unwrap();
@@ -1096,10 +1185,19 @@ mod tests {
         let trusted = vec![CidrRange::parse("10.0.0.0/8").unwrap()];
         let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
         downstream.insert_header("Host", "example.com").unwrap();
-        downstream.insert_header("X-Forwarded-Proto", "https").unwrap();
+        downstream
+            .insert_header("X-Forwarded-Proto", "https")
+            .unwrap();
         let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
 
-        append_forwarded_headers(&downstream, &mut upstream, false, Some("10.0.0.1"), &trusted).unwrap();
+        append_forwarded_headers(
+            &downstream,
+            &mut upstream,
+            false,
+            Some("10.0.0.1"),
+            &trusted,
+        )
+        .unwrap();
 
         assert_eq!(upstream.headers.get("x-forwarded-proto").unwrap(), "https");
     }
@@ -1129,10 +1227,7 @@ mod tests {
 
     #[test]
     fn test_try_acquire_upstream_slot_enforces_limit() {
-        let target = crate::route::target::Target::new(
-            "svc".into(),
-            "http://example.com".into(),
-        );
+        let target = crate::route::target::Target::new("svc".into(), "http://example.com".into());
 
         assert!(try_acquire_upstream_slot(&target, 1));
         assert!(!try_acquire_upstream_slot(&target, 1));
@@ -1171,17 +1266,18 @@ mod tests {
             logging: crate::config::LoggingConfig::default(),
             tls: crate::config::TlsConfig::default(),
         });
-        let target = crate::route::target::Target::new(
-            "svc".into(),
-            "grpcs://example.com/service".into(),
-        );
+        let target =
+            crate::route::target::Target::new("svc".into(), "grpcs://example.com/service".into());
         let mut peer = HttpPeer::new("127.0.0.1:443", true, "example.com".into());
 
         configure_peer_options(&mut peer, &target, &config);
 
         assert_eq!(peer.options.alpn.get_min_http_version(), 2);
         assert_eq!(peer.options.max_h2_streams, 64);
-        assert_eq!(peer.options.h2_ping_interval, Some(std::time::Duration::from_secs(15)));
+        assert_eq!(
+            peer.options.h2_ping_interval,
+            Some(std::time::Duration::from_secs(15))
+        );
         assert_eq!(peer.sni, "example.com");
     }
 
@@ -1208,11 +1304,11 @@ mod tests {
             logging: crate::config::LoggingConfig::default(),
             tls: crate::config::TlsConfig::default(),
         });
-        let mut target = crate::route::target::Target::new(
-            "svc".into(),
-            "wss://example.com/socket".into(),
-        );
-        target.opts.insert("host".into(), "override.example.com".into());
+        let mut target =
+            crate::route::target::Target::new("svc".into(), "wss://example.com/socket".into());
+        target
+            .opts
+            .insert("host".into(), "override.example.com".into());
         target.pre_parse();
         let mut peer = HttpPeer::new("127.0.0.1:443", true, "example.com".into());
 
@@ -1245,11 +1341,11 @@ mod tests {
             logging: crate::config::LoggingConfig::default(),
             tls: crate::config::TlsConfig::default(),
         });
-        let mut target = crate::route::target::Target::new(
-            "svc".into(),
-            "grpcs://example.com/service".into(),
-        );
-        target.opts.insert("host".into(), "override.example.com:8443".into());
+        let mut target =
+            crate::route::target::Target::new("svc".into(), "grpcs://example.com/service".into());
+        target
+            .opts
+            .insert("host".into(), "override.example.com:8443".into());
         target.pre_parse();
         let mut peer = HttpPeer::new("127.0.0.1:443", true, "example.com".into());
 
@@ -1261,7 +1357,9 @@ mod tests {
     #[test]
     fn test_grpc_request_detection() {
         let mut header = pingora_http::RequestHeader::build("POST", b"/svc.Method", None).unwrap();
-        header.insert_header("Content-Type", "application/grpc+proto").unwrap();
+        header
+            .insert_header("Content-Type", "application/grpc+proto")
+            .unwrap();
         assert!(is_grpc_request(&header));
         assert!(!is_grpc_web_request(&header));
     }
@@ -1269,7 +1367,9 @@ mod tests {
     #[test]
     fn test_grpc_web_request_detection() {
         let mut header = pingora_http::RequestHeader::build("POST", b"/svc.Method", None).unwrap();
-        header.insert_header("Content-Type", "application/grpc-web+proto").unwrap();
+        header
+            .insert_header("Content-Type", "application/grpc-web+proto")
+            .unwrap();
         assert!(is_grpc_web_request(&header));
         assert!(!is_websocket_upgrade(&header));
     }

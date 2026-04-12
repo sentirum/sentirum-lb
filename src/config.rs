@@ -208,8 +208,7 @@ fn default_log_format() -> String {
     "json".to_string()
 }
 
-#[derive(Debug, Deserialize, Clone)]
-#[derive(Default)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct TlsConfig {
     /// Path to TLS certificate (PEM)
     pub cert_path: String,
@@ -220,7 +219,6 @@ pub struct TlsConfig {
     pub listen: String,
 }
 
-
 impl Config {
     pub fn parse_optional_duration(s: &str) -> Option<Duration> {
         let s = s.trim();
@@ -229,17 +227,29 @@ impl Config {
         }
 
         let result = if s.ends_with("ms") {
-            s.trim_end_matches("ms").parse::<u64>().ok().map(Duration::from_millis)
+            s.trim_end_matches("ms")
+                .parse::<u64>()
+                .ok()
+                .map(Duration::from_millis)
         } else if s.ends_with('s') {
-            s.trim_end_matches('s').parse::<u64>().ok().map(Duration::from_secs)
+            s.trim_end_matches('s')
+                .parse::<u64>()
+                .ok()
+                .map(Duration::from_secs)
         } else if s.ends_with('m') {
-            s.trim_end_matches('m').parse::<u64>().ok().map(|m| Duration::from_secs(m * 60))
+            s.trim_end_matches('m')
+                .parse::<u64>()
+                .ok()
+                .map(|m| Duration::from_secs(m * 60))
         } else {
             None
         };
 
         result.or_else(|| {
-            tracing::warn!(value = s, "Unrecognised duration format; ignoring optional duration");
+            tracing::warn!(
+                value = s,
+                "Unrecognised duration format; ignoring optional duration"
+            );
             None
         })
     }
@@ -267,9 +277,18 @@ mod tests {
 
     #[test]
     fn parse_optional_duration_parses_supported_units() {
-        assert_eq!(Config::parse_optional_duration("150ms"), Some(Duration::from_millis(150)));
-        assert_eq!(Config::parse_optional_duration("5s"), Some(Duration::from_secs(5)));
-        assert_eq!(Config::parse_optional_duration("2m"), Some(Duration::from_secs(120)));
+        assert_eq!(
+            Config::parse_optional_duration("150ms"),
+            Some(Duration::from_millis(150))
+        );
+        assert_eq!(
+            Config::parse_optional_duration("5s"),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            Config::parse_optional_duration("2m"),
+            Some(Duration::from_secs(120))
+        );
     }
 
     #[test]

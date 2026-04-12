@@ -12,7 +12,11 @@ use sentirum_lb::route::registry::ManagedRouteTable;
 
 /// Sentirum LB -- High-performance Rust load balancer with Consul integration
 #[derive(Parser, Debug)]
-#[command(name = "sentirum-lb", version, about = "High-performance Rust load balancer with Consul integration")]
+#[command(
+    name = "sentirum-lb",
+    version,
+    about = "High-performance Rust load balancer with Consul integration"
+)]
 struct Args {
     /// Optional path to configuration file (TOML)
     #[arg(short, long)]
@@ -36,13 +40,12 @@ struct Args {
 }
 
 fn init_logging(config: &Config) {
-    use tracing_subscriber::{fmt, EnvFilter};
+    use tracing_subscriber::{EnvFilter, fmt};
 
     let level = config.logging.level.clone();
     let format = config.logging.format.clone();
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&level));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&level));
 
     if format == "json" {
         fmt().with_env_filter(env_filter).json().init();
@@ -66,7 +69,9 @@ async fn route_update_handler(
         match update {
             RouteUpdate::Services(defs) => {
                 if defs.is_empty() {
-                    tracing::warn!("No service-based routes available from Consul; clearing service routes");
+                    tracing::warn!(
+                        "No service-based routes available from Consul; clearing service routes"
+                    );
                 } else {
                     tracing::info!(count = defs.len(), "Applying service-based routes");
                 }
@@ -110,8 +115,10 @@ impl BackgroundService for ConsulBackgroundService {
             }
         };
 
-        let watcher = ConsulWatcher::new(Arc::new(client), consul_config)
-            .with_flags(self.config.consul.service_discovery, self.config.consul.kv_watching);
+        let watcher = ConsulWatcher::new(Arc::new(client), consul_config).with_flags(
+            self.config.consul.service_discovery,
+            self.config.consul.kv_watching,
+        );
         let (tx, rx) = mpsc::channel(100);
         let route_table = self.route_table.clone();
 
@@ -173,7 +180,10 @@ fn main() {
             workers: 0,
         };
         let consul = sentirum_lb::config::ConsulConfig {
-            address: args.consul.clone().unwrap_or_else(|| "127.0.0.1:8500".to_string()),
+            address: args
+                .consul
+                .clone()
+                .unwrap_or_else(|| "127.0.0.1:8500".to_string()),
             scheme: "http".to_string(),
             token: String::new(),
             kv_prefix: "/sentirum-lb/routes".to_string(),
@@ -238,9 +248,9 @@ fn main() {
     }
 
     // Build Pingora server
-    let mut server = pingora::server::Server::new(Some(
-        pingora::server::configuration::Opt::default(),
-    )).expect("Failed to create Pingora server");
+    let mut server =
+        pingora::server::Server::new(Some(pingora::server::configuration::Opt::default()))
+            .expect("Failed to create Pingora server");
 
     if let Some(server_conf) = Arc::get_mut(&mut server.configuration) {
         if config.server.workers > 0 {
@@ -253,10 +263,7 @@ fn main() {
     server.bootstrap();
 
     // Create proxy service
-    let proxy_handler = SentirumProxy::new(
-        managed_table.clone(),
-        Arc::new(config.clone()),
-    );
+    let proxy_handler = SentirumProxy::new(managed_table.clone(), Arc::new(config.clone()));
     let mut lb_service = pingora::proxy::http_proxy_service(&server.configuration, proxy_handler);
     if config.server.workers > 0 {
         lb_service.threads = Some(config.server.workers);
@@ -278,14 +285,15 @@ fn main() {
     );
 
     // Add TLS listener if configured
-    let tls_cert_config: Option<sentirum_lb::proxy::tls::TlsCertConfig> =
-        (&config.tls).into();
+    let tls_cert_config: Option<sentirum_lb::proxy::tls::TlsCertConfig> = (&config.tls).into();
     if let Some(tls) = &tls_cert_config {
         match tls.validate() {
             Ok(()) => {
                 // Use explicit TLS listen address, or derive from HTTP port +1
                 let tls_listen = if config.tls.listen.is_empty() {
-                    let http_port: u16 = config.server.listen
+                    let http_port: u16 = config
+                        .server
+                        .listen
                         .rsplit(':')
                         .next()
                         .and_then(|p| p.parse().ok())
@@ -295,7 +303,10 @@ fn main() {
                     config.tls.listen.clone()
                 };
 
-                match pingora::listeners::tls::TlsSettings::intermediate(&tls.cert_path, &tls.key_path) {
+                match pingora::listeners::tls::TlsSettings::intermediate(
+                    &tls.cert_path,
+                    &tls.key_path,
+                ) {
                     Ok(mut settings) => {
                         settings.enable_h2();
                         lb_service.add_tls_with_settings(&tls_listen, None, settings);

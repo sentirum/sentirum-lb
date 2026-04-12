@@ -211,7 +211,10 @@ impl Target {
     }
 
     pub fn source_allows_private_upstreams(&self) -> bool {
-        matches!(self.source, RouteSource::ConsulKv | RouteSource::ConsulService)
+        matches!(
+            self.source,
+            RouteSource::ConsulKv | RouteSource::ConsulService
+        )
     }
 
     /// Get the upstream host (pre-parsed, no allocation)
@@ -279,7 +282,10 @@ impl Target {
     }
 
     pub fn is_grpc(&self) -> bool {
-        matches!(self.parsed_protocol, UpstreamProtocol::Grpc | UpstreamProtocol::Grpcs)
+        matches!(
+            self.parsed_protocol,
+            UpstreamProtocol::Grpc | UpstreamProtocol::Grpcs
+        )
     }
 
     /// Get the host header override.
@@ -318,7 +324,9 @@ pub fn is_ip_always_blocked(ip: &std::net::IpAddr) -> bool {
         std::net::IpAddr::V4(v4) => {
             v4.is_loopback() || v4.is_link_local() || v4.is_broadcast() || v4.is_unspecified()
         }
-        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local()
+        }
     }
 }
 
@@ -405,7 +413,8 @@ mod tests {
     #[test]
     fn test_ssrf_skip_verify_opt() {
         let mut t = Target::new("svc".into(), "http://10.0.0.1:8080/".into());
-        t.opts.insert("ssrfskipverify".to_string(), "true".to_string());
+        t.opts
+            .insert("ssrfskipverify".to_string(), "true".to_string());
         assert!(t.ssrf_skip_verify());
     }
 

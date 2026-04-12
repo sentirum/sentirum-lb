@@ -18,7 +18,10 @@ pub struct TlsCertConfig {
 impl TlsCertConfig {
     /// Create a new TLS certificate configuration.
     pub fn new(cert_path: String, key_path: String) -> Self {
-        Self { cert_path, key_path }
+        Self {
+            cert_path,
+            key_path,
+        }
     }
 
     /// Validate that the certificate and key files exist and are readable.
@@ -31,12 +34,10 @@ impl TlsCertConfig {
         }
 
         // Try to read the files to verify permissions
-        std::fs::read_to_string(&self.cert_path).map_err(|e| {
-            TlsError::CertReadError(self.cert_path.clone(), e.to_string())
-        })?;
-        std::fs::read_to_string(&self.key_path).map_err(|e| {
-            TlsError::KeyReadError(self.key_path.clone(), e.to_string())
-        })?;
+        std::fs::read_to_string(&self.cert_path)
+            .map_err(|e| TlsError::CertReadError(self.cert_path.clone(), e.to_string()))?;
+        std::fs::read_to_string(&self.key_path)
+            .map_err(|e| TlsError::KeyReadError(self.key_path.clone(), e.to_string()))?;
 
         Ok(())
     }

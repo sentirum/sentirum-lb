@@ -1,5 +1,5 @@
 use crate::route::definition::{RouteDef, RouteSource};
-use crate::route::table::{Table, RouteTable};
+use crate::route::table::{RouteTable, Table};
 use arc_swap::ArcSwap;
 use std::sync::Arc;
 
@@ -113,7 +113,12 @@ impl ManagedRouteTable {
         let target_count = table.target_count();
         self.registry.store(Arc::new(registry.clone()));
         self.inner.swap(table);
-        tracing::info!(route_count, target_count, is_empty = registry.is_empty(), "Route table updated");
+        tracing::info!(
+            route_count,
+            target_count,
+            is_empty = registry.is_empty(),
+            "Route table updated"
+        );
     }
 
     /// Get current snapshot of the routing table (for hot path)
@@ -169,8 +174,16 @@ mod tests {
         table.update_kv(vec![def("kv", "kv.example.com/", "http://kv/")]);
 
         let snapshot = table.get();
-        assert!(snapshot.lookup_route("example.com", "/", "prefix").is_some());
-        assert!(snapshot.lookup_route("kv.example.com", "/", "prefix").is_some());
+        assert!(
+            snapshot
+                .lookup_route("example.com", "/", "prefix")
+                .is_some()
+        );
+        assert!(
+            snapshot
+                .lookup_route("kv.example.com", "/", "prefix")
+                .is_some()
+        );
     }
 
     #[test]
@@ -180,7 +193,11 @@ mod tests {
         table.update_services(vec![def("svc", "/api", "http://svc/")]);
 
         let snapshot = table.get();
-        assert!(snapshot.lookup_route("kv.example.com", "/", "prefix").is_some());
+        assert!(
+            snapshot
+                .lookup_route("kv.example.com", "/", "prefix")
+                .is_some()
+        );
         assert!(snapshot.lookup_route("", "/api/users", "prefix").is_some());
     }
 }
