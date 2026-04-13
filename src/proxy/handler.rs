@@ -625,15 +625,15 @@ fn parse_host_from_header(header: &pingora_http::RequestHeader) -> &str {
         // IPv6 literal: `[::1]:8080` → `::1`
         &host_header[1..bracket_end]
     } else if let Some(colon_pos) = host_header.rfind(':') {
-        // Check if the part after the last `:` is a valid port number.
-        // If yes, strip it — this correctly handles dotless hostnames like
-        // `localhost:8080` and `my-service:80` that the old dot-check missed.
-        // Bare IPv6 addresses (e.g. `::1`) without brackets have no valid u16
-        // port after the last colon, so they are returned as-is.
+        // Check if the part after the last `:` is a valid port number AND
+        // the part before it does not contain another `:` (which would mean
+        // it's a bare IPv6 address like `::1` rather than `host:port`).
+        let before_colon = &host_header[..colon_pos];
         let after_colon = &host_header[colon_pos + 1..];
-        if after_colon.parse::<u16>().is_ok() {
-            &host_header[..colon_pos]
+        if !before_colon.contains(':') && after_colon.parse::<u16>().is_ok() {
+            before_colon
         } else {
+            // Either a bare IPv6 address (multiple colons) or no valid port.
             host_header
         }
     } else {
@@ -970,16 +970,18 @@ mod tests {
 
     #[test]
     fn test_host_header_parsing() {
-        // Test cases: (input Host header value, expected stripped hostname)
+        // Test cases: (Host header value, expected stripped hostname)
         let test_cases = vec![
             // IPv6 literals
             ("[::1]:8080", "::1"),
             ("[fe80::1]:8080", "fe80::1"),
             ("[2001:db8::1]:443", "2001:db8::1"),
+            // Bare IPv6 without brackets — no valid port after last ':', return as-is
+            ("::1", "::1"),
             // Dotted hostnames with port
             ("192.168.1.1:8080", "192.168.1.1"),
             ("example.com:8080", "example.com"),
-            // Dotless hostnames with port (the old bug: these used to return host:port)
+            // Dotless hostnames with port (the old bug: these returned host:port)
             ("localhost:8080", "localhost"),
             ("my-service:80", "my-service"),
             ("backend:3000", "backend"),
@@ -988,22 +990,13 @@ mod tests {
             ("localhost", "localhost"),
         ];
 
-        for (input, expected) in test_cases {
-            // Mirror the logic in parse_host_from_header
-            let host = if let Some(bracket_end) = input.find("]:") {
-                &input[1..bracket_end]
-            } else if let Some(colon_pos) = input.rfind(':') {
-                let after_colon = &input[colon_pos + 1..];
-                if after_colon.parse::<u16>().is_ok() {
-                    &input[..colon_pos]
-                } else {
-                    input
-                }
-            } else {
-                input
-            };
-
-            assert_eq!(host, expected, "Failed for input: {}", input);
+        for (input, expected) in &test_cases {
+            // Build a real RequestHeader and call parse_host_from_header directly
+            // so the test exercises the actual function, not a copy of its logic.
+            let mut header = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+            header.insert_header("Host", *input).unwrap();
+            let result = parse_host_from_header(&header);
+            assert_eq!(result, *expected, "Failed for Host: {}", input);
         }
     }
 
