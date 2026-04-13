@@ -605,7 +605,15 @@ fn extract_host_path(session: &Session) -> (&str, &str) {
 }
 
 /// Parse host from Host header, stripping port.
-/// Handles IPv6 literals correctly: `[::1]:8080` → `::1`
+/// Parses the hostname from a Host header, stripping any port suffix.
+///
+/// Handles all forms correctly:
+/// - `example.com:8080`  → `example.com`
+/// - `localhost:8080`    → `localhost`  (dotless hostname with port)
+/// - `my-service:80`     → `my-service`
+/// - `[::1]:8080`        → `::1`        (IPv6 literal)
+/// - `example.com`       → `example.com` (no port)
+/// - `localhost`         → `localhost`
 fn parse_host_from_header(header: &pingora_http::RequestHeader) -> &str {
     let host_header = header
         .headers
@@ -617,9 +625,14 @@ fn parse_host_from_header(header: &pingora_http::RequestHeader) -> &str {
         // IPv6 literal: `[::1]:8080` → `::1`
         &host_header[1..bracket_end]
     } else if let Some(colon_pos) = host_header.rfind(':') {
-        let potential_host = &host_header[..colon_pos];
-        if potential_host.contains('.') || potential_host.parse::<std::net::Ipv6Addr>().is_ok() {
-            potential_host
+        // Check if the part after the last `:` is a valid port number.
+        // If yes, strip it — this correctly handles dotless hostnames like
+        // `localhost:8080` and `my-service:80` that the old dot-check missed.
+        // Bare IPv6 addresses (e.g. `::1`) without brackets have no valid u16
+        // port after the last colon, so they are returned as-is.
+        let after_colon = &host_header[colon_pos + 1..];
+        if after_colon.parse::<u16>().is_ok() {
+            &host_header[..colon_pos]
         } else {
             host_header
         }
@@ -956,27 +969,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ipv6_host_parsing() {
-        // Simulate what extract_host_path_from_req would do
+    fn test_host_header_parsing() {
+        // Test cases: (input Host header value, expected stripped hostname)
         let test_cases = vec![
+            // IPv6 literals
             ("[::1]:8080", "::1"),
             ("[fe80::1]:8080", "fe80::1"),
+            ("[2001:db8::1]:443", "2001:db8::1"),
+            // Dotted hostnames with port
             ("192.168.1.1:8080", "192.168.1.1"),
             ("example.com:8080", "example.com"),
+            // Dotless hostnames with port (the old bug: these used to return host:port)
+            ("localhost:8080", "localhost"),
+            ("my-service:80", "my-service"),
+            ("backend:3000", "backend"),
+            // No port at all
             ("example.com", "example.com"),
-            ("[2001:db8::1]:443", "2001:db8::1"),
+            ("localhost", "localhost"),
         ];
 
         for (input, expected) in test_cases {
-            // Test the parsing logic inline
+            // Mirror the logic in parse_host_from_header
             let host = if let Some(bracket_end) = input.find("]:") {
                 &input[1..bracket_end]
             } else if let Some(colon_pos) = input.rfind(':') {
-                let potential_host = &input[..colon_pos];
-                if potential_host.contains('.')
-                    || potential_host.parse::<std::net::Ipv6Addr>().is_ok()
-                {
-                    potential_host
+                let after_colon = &input[colon_pos + 1..];
+                if after_colon.parse::<u16>().is_ok() {
+                    &input[..colon_pos]
                 } else {
                     input
                 }

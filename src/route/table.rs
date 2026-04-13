@@ -286,8 +286,16 @@ impl Table {
             route.add_target(target);
             route.compute_weights();
             host_routes.push(Arc::new(route));
-            // Sort by path in reverse order (most specific first)
-            host_routes.sort_by(|a, b| b.path.cmp(&a.path));
+            // Sort by most specific (longest) path first, then lexicographic
+            // descending as a tiebreaker — mirrors Fabio's "longest prefix wins"
+            // semantics. Pure lexicographic order would wrongly rank `/z` above
+            // `/api/v2/users` because 'z' > 'a'.
+            host_routes.sort_by(|a, b| {
+                b.path
+                    .len()
+                    .cmp(&a.path.len())
+                    .then_with(|| b.path.cmp(&a.path))
+            });
         }
     }
 
@@ -723,5 +731,68 @@ mod tests {
         assert_eq!(route.targets.len(), 2);
         assert!((route.targets[0].fixed_weight - 0.3).abs() < f64::EPSILON);
         assert!((route.targets[1].fixed_weight - 0.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_route_sort_longest_prefix_wins() {
+        // Regression: lexicographic sort would rank `/z` before `/api/v2/users`
+        // because 'z' > 'a'. Length-first sort must put the longest path first.
+        use crate::route::definition::{RouteCmd, RouteSource};
+        let defs = vec![
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-z".to_string(),
+                src: "example.com/z".to_string(),
+                dst: "http://z-upstream:8080".to_string(),
+                weight: 1.0,
+                tags: vec![],
+                opts: HashMap::new(),
+                source: RouteSource::Static,
+            },
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-api".to_string(),
+                src: "example.com/api/v2/users".to_string(),
+                dst: "http://api-upstream:8080".to_string(),
+                weight: 1.0,
+                tags: vec![],
+                opts: HashMap::new(),
+                source: RouteSource::Static,
+            },
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-api-short".to_string(),
+                src: "example.com/api".to_string(),
+                dst: "http://api-short-upstream:8080".to_string(),
+                weight: 1.0,
+                tags: vec![],
+                opts: HashMap::new(),
+                source: RouteSource::Static,
+            },
+        ];
+
+        let table = Table::from_definitions(&defs);
+
+        // `/api/v2/users` must match before `/api` (longer prefix wins)
+        let route = table
+            .lookup_route("example.com", "/api/v2/users", "prefix")
+            .unwrap();
+        assert_eq!(
+            route.targets[0].service, "svc-api",
+            "/api/v2/users should match svc-api, not svc-api-short"
+        );
+
+        // `/api/other` must fall back to `/api`
+        let route = table
+            .lookup_route("example.com", "/api/other", "prefix")
+            .unwrap();
+        assert_eq!(
+            route.targets[0].service, "svc-api-short",
+            "/api/other should match svc-api-short"
+        );
+
+        // `/z` must still match its own route
+        let route = table.lookup_route("example.com", "/z", "prefix").unwrap();
+        assert_eq!(route.targets[0].service, "svc-z", "/z should match svc-z");
     }
 }
