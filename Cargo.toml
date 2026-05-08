@@ -62,6 +62,7 @@ axum = "0.8.8"
 tower = "0.5.3"
 http = "1"
 rustls = { version = "0.23", features = ["ring"] }
+time = "0.3"
 
 [build-dependencies]
 protoc-bin-vendored = "3"
