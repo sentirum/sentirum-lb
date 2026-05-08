@@ -121,6 +121,16 @@ Each KV value may be a single bundled PEM containing:
 
 Certificates are selected dynamically per SNI and reloaded from Consul without listener restarts.
 
+Example:
+
+```toml
+[tls]
+source = "consul_kv"
+listen = ":443"
+consul_cert_prefix = "/fabio/cert"
+strict_sni = false
+```
+
 ### Important knobs
 
 - `server.workers`: Pingora service thread count. `0` keeps Pingora defaults.
