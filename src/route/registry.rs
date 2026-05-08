@@ -108,7 +108,11 @@ impl ManagedRouteTable {
     /// Rebuild table from registry and atomically swap
     fn rebuild_and_swap(&self, registry: &RouteRegistry, source: &str) {
         let all_defs = registry.get_all();
-        let table = Table::from_definitions_with_stats(&all_defs, self.inner.stats_registry());
+        let table = Table::from_definitions_with_stats(
+            &all_defs,
+            self.inner.stats_registry(),
+            self.inner.cb_config(),
+        );
         let route_count = table.route_count();
         let target_count = table.target_count();
         self.registry.store(Arc::new(registry.clone()));
@@ -121,6 +125,16 @@ impl ManagedRouteTable {
             is_empty = registry.is_empty(),
             "Route table updated"
         );
+    }
+
+    /// Create a new managed route table with circuit breaker configuration.
+    pub fn new_with_cb_config(cb_config: crate::route::target::CircuitBreakerConfig) -> Self {
+        let route_table = RouteTable::new().with_cb_config(cb_config);
+        Self {
+            inner: route_table,
+            registry: ArcSwap::from(Arc::new(RouteRegistry::new())),
+            update_lock: Mutex::new(()),
+        }
     }
 
     /// Get current snapshot of the routing table (for hot path)

@@ -187,6 +187,8 @@ pub struct Table {
     /// host -> sorted routes
     routes: HashMap<String, Vec<Arc<Route>>>,
     stats_registry: Option<Arc<TargetStatsRegistry>>,
+    /// Circuit breaker config for new targets
+    cb_config: Option<crate::route::target::CircuitBreakerConfig>,
 }
 
 impl Default for Table {
@@ -200,6 +202,7 @@ impl Table {
         Self {
             routes: HashMap::new(),
             stats_registry: None,
+            cb_config: None,
         }
     }
 
@@ -207,14 +210,26 @@ impl Table {
         Self {
             routes: HashMap::new(),
             stats_registry: Some(stats_registry),
+            cb_config: None,
         }
+    }
+
+    pub fn with_cb_config(mut self, cb_config: crate::route::target::CircuitBreakerConfig) -> Self {
+        self.cb_config = Some(cb_config);
+        self
     }
 
     /// Lookup a route by host and path.
     /// Returns the matching route (with targets) for the given matcher strategy.
+    /// Host is normalized to lowercase to match Fabio semantics (routes are stored lowercased).
     pub fn lookup_route(&self, host: &str, path: &str, matcher: &str) -> Option<&Arc<Route>> {
+        // Normalize host to lowercase for case-insensitive matching.
+        // HTTP Host headers may be mixed-case (e.g. "Example.com"), but
+        // routes from service discovery and KV are stored lowercased.
+        let host_lower = host.to_ascii_lowercase();
+
         // Try exact host match first
-        if let Some(routes) = self.routes.get(host)
+        if let Some(routes) = self.routes.get(&host_lower)
             && let Some(route) = Self::find_matching_route(routes, path, matcher)
         {
             return Some(route);
@@ -284,7 +299,9 @@ impl Table {
             parsed_tls: false,
             parsed_protocol: crate::route::target::UpstreamProtocol::Http,
             active_connections: self.active_connections_for(&def.dst),
-            health_tracker: crate::route::target::TargetHealthTracker::new(),
+            health_tracker: self.cb_config.as_ref()
+                .map(|cb| crate::route::target::TargetHealthTracker::with_config(cb.clone()))
+                .unwrap_or_else(crate::route::target::TargetHealthTracker::new),
         };
         target.pre_parse();
 
@@ -446,8 +463,13 @@ impl Table {
     pub fn from_definitions_with_stats(
         defs: &[RouteDef],
         stats_registry: Arc<TargetStatsRegistry>,
+        cb_config: Option<crate::route::target::CircuitBreakerConfig>,
     ) -> Self {
-        let mut table = Table::with_stats_registry(stats_registry);
+        let mut table = Table {
+            routes: HashMap::new(),
+            stats_registry: Some(stats_registry),
+            cb_config,
+        };
         for def in defs {
             table.apply(def);
         }
@@ -558,6 +580,7 @@ impl Table {
 pub struct RouteTable {
     inner: ArcSwap<Table>,
     stats_registry: Arc<TargetStatsRegistry>,
+    cb_config: Option<crate::route::target::CircuitBreakerConfig>,
 }
 
 impl RouteTable {
@@ -566,7 +589,13 @@ impl RouteTable {
         Self {
             inner: ArcSwap::from(Arc::new(Table::with_stats_registry(stats_registry.clone()))),
             stats_registry,
+            cb_config: None,
         }
+    }
+
+    pub fn with_cb_config(mut self, cb_config: crate::route::target::CircuitBreakerConfig) -> Self {
+        self.cb_config = Some(cb_config);
+        self
     }
 
     /// Get a snapshot of the current routing table.
@@ -592,12 +621,20 @@ impl RouteTable {
 
     /// Apply definitions and swap the table.
     pub fn apply_and_swap(&self, defs: &[RouteDef]) {
-        let table = Table::from_definitions_with_stats(defs, self.stats_registry.clone());
+        let table = Table::from_definitions_with_stats(
+            defs,
+            self.stats_registry.clone(),
+            self.cb_config.clone(),
+        );
         self.swap(table);
     }
 
     pub fn stats_registry(&self) -> Arc<TargetStatsRegistry> {
         self.stats_registry.clone()
+    }
+
+    pub fn cb_config(&self) -> Option<crate::route::target::CircuitBreakerConfig> {
+        self.cb_config.clone()
     }
 }
 

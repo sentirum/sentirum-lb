@@ -386,7 +386,17 @@ fn main() {
     );
 
     // Create managed routing table (supports multiple sources)
-    let managed_table = Arc::new(ManagedRouteTable::new());
+    let managed_table = if config.proxy.circuit_breaker_enabled {
+        let cb_config = sentirum_lb::route::target::CircuitBreakerConfig {
+            error_threshold: config.proxy.circuit_breaker_error_threshold,
+            window_size: config.proxy.circuit_breaker_window_size,
+            recovery_timeout_secs: config.proxy.circuit_breaker_recovery_timeout,
+            half_open_max_requests: config.proxy.circuit_breaker_half_open_max,
+        };
+        Arc::new(ManagedRouteTable::new_with_cb_config(cb_config))
+    } else {
+        Arc::new(ManagedRouteTable::new())
+    };
 
     // Load static routes if provided (loaded FIRST, highest priority)
     if let Some(routes_path) = &args.routes {

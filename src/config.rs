@@ -101,15 +101,6 @@ fn default_dns_negative_cache_ttl() -> u64 {
     10
 }
 
-fn default_empty_string_vec() -> Vec<String> {
-    Vec::new()
-}
-
-fn default_graceful_shutdown() -> bool {
-    true
-}
-
-
 fn default_circuit_breaker_error_threshold() -> u8 {
     50
 }
