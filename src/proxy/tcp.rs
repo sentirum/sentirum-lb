@@ -341,26 +341,7 @@ async fn handle_tcp_connection(
         }
     };
 
-    if !try_acquire_upstream_slot(&target, config.proxy.max_connections as u64) {
-        tracing::warn!(local_addr = %local_addr_str, target_url = %target.url, max_connections = config.proxy.max_connections, "TCP upstream concurrency limit reached");
-        return Ok(());
-    }
-
-    crate::metrics::prometheus::global().connect();
-    let _guard = TcpConnectionGuard {
-        target: target.clone(),
-    };
-
-    let mut upstream = match connect_upstream(&target, &config).await {
-        Ok(upstream) => upstream,
-        Err(error) => {
-            tracing::warn!(target_url = %target.url, %error, "Failed to open TCP upstream connection");
-            return Ok(());
-        }
-    };
-
-    let _ = copy_bidirectional(&mut downstream, &mut upstream).await?;
-    Ok(())
+    proxy_tcp_streams(downstream, Vec::new(), target, &config, None).await
 }
 
 async fn handle_tcp_sni_connection(
@@ -445,6 +426,61 @@ fn lookup_sni_target(
     create_picker(strategy).pick(&route.targets, &route.w_targets, &route.rr_counter)
 }
 
+async fn proxy_tcp_streams(
+    mut downstream: TcpStream,
+    initial_bytes: Vec<u8>,
+    target: Arc<Target>,
+    config: &Arc<Config>,
+    server_name: Option<&str>,
+) -> Result<(), std::io::Error> {
+    if !try_acquire_upstream_slot(&target, config.proxy.max_connections as u64) {
+        match server_name {
+            Some(server_name) => tracing::warn!(server_name = %server_name, target_url = %target.url, max_connections = config.proxy.max_connections, "TCP SNI upstream concurrency limit reached"),
+            None => tracing::warn!(target_url = %target.url, max_connections = config.proxy.max_connections, "TCP upstream concurrency limit reached"),
+        }
+        return Ok(());
+    }
+
+    crate::metrics::prometheus::global().connect();
+    let _guard = TcpConnectionGuard {
+        target: target.clone(),
+    };
+
+    let mut upstream = match connect_upstream(&target, config.as_ref()).await {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            match server_name {
+                Some(server_name) => tracing::warn!(server_name = %server_name, target_url = %target.url, %error, "Failed to open TCP SNI upstream connection"),
+                None => tracing::warn!(target_url = %target.url, %error, "Failed to open TCP upstream connection"),
+            }
+            return Ok(());
+        }
+    };
+
+    if !initial_bytes.is_empty() {
+        upstream.write_all(&initial_bytes).await?;
+        upstream.flush().await?;
+    }
+
+    let _ = copy_bidirectional(&mut downstream, &mut upstream).await?;
+    Ok(())
+}
+
+async fn proxy_to_https_fallback(
+    mut downstream: TcpStream,
+    initial_bytes: Vec<u8>,
+    config: &Config,
+    fallback_addr: &str,
+) -> Result<(), std::io::Error> {
+    let mut upstream = connect_addr(fallback_addr, config).await?;
+    if !initial_bytes.is_empty() {
+        upstream.write_all(&initial_bytes).await?;
+        upstream.flush().await?;
+    }
+    let _ = copy_bidirectional(&mut downstream, &mut upstream).await?;
+    Ok(())
+}
+
 async fn connect_upstream(target: &Target, config: &Config) -> Result<TcpStream, std::io::Error> {
     if !target.is_host_safe() && !target.ssrf_skip_verify() {
         return Err(std::io::Error::other("blocked private/reserved upstream target"));
@@ -473,12 +509,16 @@ async fn connect_upstream(target: &Target, config: &Config) -> Result<TcpStream,
         ));
     }
 
+    connect_addr(&resolved.to_string(), config).await
+}
+
+async fn connect_addr(addr: &str, config: &Config) -> Result<TcpStream, std::io::Error> {
     let timeout = crate::config::Config::parse_duration(&config.proxy.connect_timeout);
     if timeout.is_zero() {
-        return TcpStream::connect(resolved).await;
+        return TcpStream::connect(addr).await;
     }
 
-    tokio::time::timeout(timeout, TcpStream::connect(resolved))
+    tokio::time::timeout(timeout, TcpStream::connect(addr))
         .await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "TCP connect timed out"))?
 }
