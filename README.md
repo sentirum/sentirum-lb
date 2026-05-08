@@ -15,6 +15,7 @@ Default runtime behavior is now **Consul-first**: you can start without a config
 - Multiple balancing strategies: `round-robin`, `random`, `least-connections`
 - Matchers: `prefix`, `iprefix`, `glob`
 - Optional TLS termination for downstream traffic
+- Fabio-style raw TCP proxy modes: `tcp`, `tcp+sni`, `https+tcp+sni`, and `tcp-dynamic`
 - Downstream h2c support for cleartext gRPC clients
 - Upstream protocol-aware proxying for HTTP, HTTPS, gRPC, gRPCS, WS, and WSS
 - gRPC-Web bridge support
@@ -100,6 +101,11 @@ listen = ""
 consul_cert_prefix = "/fabio/cert"
 strict_sni = false
 require_initial_snapshot = false
+
+[tcp]
+mode = ""
+listen = ""
+refresh = "5s"
 ```
 
 ### TLS sources
@@ -142,6 +148,55 @@ Deployment examples:
 - Canary checklist: `docs/sentirum-lb-canary-checklist.md`
 - Smoke/canary runbook: `docs/sentirum-lb-smoke-and-canary-runbook.md`
 
+### TCP modes
+
+Fabio-style raw TCP support is configured under `[tcp]`:
+
+- `mode = "tcp"` — fixed raw TCP listener from `tcp.listen`
+- `mode = "tcp+sni"` — fixed SNI-aware TCP passthrough listener from `tcp.listen`
+- `mode = "https+tcp+sni"` — public HTTPS listener first checks SNI against `proto=tcp` routes, otherwise falls through to normal HTTPS termination
+- `mode = "tcp-dynamic"` — discovers `:port` / `host:port` TCP routes from the route table and starts/stops listeners dynamically, Fabio-style
+
+Examples:
+
+```toml
+[tcp]
+mode = "tcp"
+listen = ":4222"
+```
+
+```toml
+[tcp]
+mode = "tcp+sni"
+listen = ":443"
+```
+
+```toml
+[tcp]
+mode = "https+tcp+sni"
+```
+
+```toml
+[tcp]
+mode = "tcp-dynamic"
+refresh = "5s"
+```
+
+Service-discovery TCP tags remain Fabio-compatible:
+
+```text
+urlprefix-:4222 proto=tcp
+urlprefix-nats.example.com proto=tcp
+urlprefix-nats.example.com:4222 proto=tcp
+```
+
+Runtime semantics:
+
+- plain `tcp`: lookup by listener local address, then fallback to `:port`
+- `tcp+sni`: lookup by SNI host only
+- `https+tcp+sni`: if SNI maps to a `proto=tcp` target, passthrough; otherwise fall through to HTTPS termination
+- `tcp-dynamic`: listener ports are derived from the live route table and reconciled periodically
+
 ### Important knobs
 
 - `server.workers`: Pingora service thread count. `0` keeps Pingora defaults.
@@ -156,6 +211,9 @@ Deployment examples:
 - `tls.consul_cert_prefix`: Fabio-compatible certificate KV prefix, e.g. `/fabio/cert`.
 - `tls.strict_sni`: if true, fail TLS handshakes without an exact/wildcard SNI match.
 - `tls.require_initial_snapshot`: if true in `consul_kv` mode, refuse startup until the initial cert snapshot is valid.
+- `tcp.mode`: choose `tcp`, `tcp+sni`, `https+tcp+sni`, or `tcp-dynamic`.
+- `tcp.listen`: fixed listen address for `tcp` / `tcp+sni`.
+- `tcp.refresh`: reconciliation interval for `tcp-dynamic`.
 
 ## Route format
 
@@ -190,7 +248,7 @@ route add static static.example.com/static/ http://127.0.0.1:3000/ opts "strip=/
 - `tlsskipverify=true`: request upstream certificate verification bypass (note: Pingora rustls upstream connectors currently do not fully honor this for self-signed upstream TLS; prefer trusted/internal CA certificates for `grpcs` / `wss` upstreams)
 - `ssrfskipverify=true`: bypass SSRF checks for a target
 - `host=example.internal`: override upstream Host header and TLS SNI
-- `proto=https|grpc|grpcs|ws|wss`: override the upstream transport/protocol semantics for service-discovery targets
+- `proto=https|grpc|grpcs|ws|wss|tcp`: override the upstream transport/protocol semantics for service-discovery targets
 
 ### Protocol notes
 
