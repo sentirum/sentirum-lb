@@ -977,7 +977,7 @@ pub fn is_ip_always_blocked(ip: &std::net::IpAddr) -> bool {
             let is_documentation = (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
                 || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
                 || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
-                || (octets[0] == 198 && octets[1] == 18 && octets[2] == 0); // RFC 2544 benchmarking
+                || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)); // RFC 2544 benchmarking (198.18.0.0/15)
             is_cgnat || is_documentation
         }
         std::net::IpAddr::V6(v6) => {
@@ -1263,6 +1263,59 @@ mod tests {
         // With max=1, first success closes
         cb.record_success();
         assert_eq!(cb.current_state(), CircuitState::Closed);
+    }
+
+    // === SSRF IP range tests ===
+
+    #[test]
+    fn test_ssrf_blocks_multicast_ipv4() {
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(224, 0, 0, 1));
+        assert!(is_ip_always_blocked(&ip));
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(239, 255, 255, 255));
+        assert!(is_ip_always_blocked(&ip));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_multicast_ipv6() {
+        let ip = std::net::IpAddr::V6(std::net::Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 1));
+        assert!(is_ip_always_blocked(&ip));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_cgnat() {
+        // 100.64.0.0/10 range (RFC 6598)
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(100, 64, 0, 1));
+        assert!(is_ip_always_blocked(&ip));
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(100, 127, 255, 255));
+        assert!(is_ip_always_blocked(&ip));
+    }
+
+    #[test]
+    fn test_ssrf_allows_100_not_in_cgnat() {
+        // 100.0.0.1 is NOT in CGNAT range (100.64.0.0/10)
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(100, 0, 0, 1));
+        assert!(!is_ip_always_blocked(&ip));
+        // 100.128.0.1 is also NOT in CGNAT range
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(100, 128, 0, 1));
+        assert!(!is_ip_always_blocked(&ip));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_documentation_ranges() {
+        // RFC 5737 documentation ranges
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1));
+        assert!(is_ip_always_blocked(&ip));
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 1));
+        assert!(is_ip_always_blocked(&ip));
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 1));
+        assert!(is_ip_always_blocked(&ip));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_benchmark_range() {
+        // RFC 2544 benchmarking (198.18.0.0/15)
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 18, 0, 1));
+        assert!(is_ip_always_blocked(&ip));
     }
 }
 
