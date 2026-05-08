@@ -7,6 +7,7 @@ use pingora::services::background::{BackgroundService, background_service};
 use sentirum_lb::config::Config;
 use sentirum_lb::consul::{ConsulClient, ConsulConfig, ConsulWatcher, RouteUpdate};
 use sentirum_lb::proxy::handler::SentirumProxy;
+use sentirum_lb::proxy::tls::{DynamicCertStore, TlsMode, build_dynamic_tls_settings, tls_listen_addr};
 use sentirum_lb::route::parser::parse_route_commands;
 use sentirum_lb::route::registry::ManagedRouteTable;
 
@@ -138,6 +139,63 @@ impl BackgroundService for ConsulBackgroundService {
     }
 }
 
+struct ConsulTlsBackgroundService {
+    tls_store: Arc<DynamicCertStore>,
+    consul_config: sentirum_lb::consul::ConsulConfig,
+    cert_prefix: String,
+    initial_index: u64,
+}
+
+#[async_trait]
+impl BackgroundService for ConsulTlsBackgroundService {
+    async fn start(&self, mut shutdown: pingora::server::ShutdownWatch) {
+        let client = match ConsulClient::new(self.consul_config.clone()) {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to create Consul client for TLS certificate watcher");
+                return;
+            }
+        };
+
+        let mut last_index = self.initial_index;
+        let mut backoff_secs: u64 = 1;
+        tracing::info!(prefix = %self.cert_prefix, "Consul TLS certificate watcher started");
+
+        loop {
+            let result = tokio::select! {
+                _ = shutdown.changed() => {
+                    tracing::info!("Consul TLS certificate watcher shutting down");
+                    break;
+                }
+                result = self.tls_store.refresh_from_consul(&client, &self.cert_prefix, last_index) => result,
+            };
+
+            match result {
+                Ok(new_index) => {
+                    backoff_secs = 1;
+                    last_index = new_index;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        prefix = %self.cert_prefix,
+                        backoff_secs,
+                        error = %e,
+                        "Consul TLS certificate watcher error; retrying"
+                    );
+                    tokio::select! {
+                        _ = shutdown.changed() => {
+                            tracing::info!("Consul TLS certificate watcher shutting down");
+                            break;
+                        }
+                        _ = tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)) => {}
+                    }
+                    backoff_secs = (backoff_secs * 2).min(60);
+                }
+            }
+        }
+    }
+}
+
 struct AdminBackgroundService {
     config: Arc<Config>,
     route_table: Arc<ManagedRouteTable>,
@@ -156,8 +214,6 @@ impl BackgroundService for AdminBackgroundService {
 }
 
 fn main() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     let args = Args::parse();
 
     // Load configuration
