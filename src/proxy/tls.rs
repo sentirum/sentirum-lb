@@ -1335,7 +1335,7 @@ pub enum TlsError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rcgen::generate_simple_self_signed;
+    use rcgen::{CertificateParams, DistinguishedName, DnType, generate_simple_self_signed};
 
     fn self_signed_cert(names: &[&str]) -> rcgen::CertifiedKey {
         generate_simple_self_signed(
@@ -1350,6 +1350,15 @@ mod tests {
     fn self_signed_pem(names: &[&str]) -> (String, String) {
         let cert = self_signed_cert(names);
         (cert.cert.pem(), cert.key_pair.serialize_pem())
+    }
+
+    fn self_signed_cn_pem(common_name: &str) -> String {
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, common_name);
+        params.distinguished_name = dn;
+        params.self_signed(&key_pair).unwrap().pem()
     }
 
     #[test]
@@ -1502,8 +1511,8 @@ mod tests {
 
     #[test]
     fn test_should_treat_as_upgraded_ca_matches_configured_cn_on_ca_errors() {
-        let cert = self_signed_cert(&["ApiGateway"]);
-        let cert = X509::from_pem(cert.cert.pem().as_bytes()).unwrap();
+        let cert_pem = self_signed_cn_pem("ApiGateway");
+        let cert = X509::from_pem(cert_pem.as_bytes()).unwrap();
         assert!(should_treat_as_upgraded_ca(
             "ApiGateway",
             ssl_sys::X509_V_ERR_INVALID_CA,
