@@ -505,6 +505,31 @@ async fn proxy_tcp_streams(
         target: target.clone(),
     };
 
+    // SSRF check: block private/reserved IP upstreams unless explicitly bypassed.
+    // This mirrors the protection already applied in HTTP proxy handler's upstream_peer.
+    // We do this here (not in connect_upstream) so we can log with server_name context.
+    if !target.is_host_safe() && !target.ssrf_skip_verify() {
+        match server_name {
+            Some(server_name) => {
+                tracing::warn!(
+                    server_name = %server_name,
+                    target_url = %target.url,
+                    host = %target.upstream_host(),
+                    "TCP SNI upstream blocked by SSRF protection"
+                );
+            }
+            None => {
+                tracing::warn!(
+                    target_url = %target.url,
+                    host = %target.upstream_host(),
+                    "TCP upstream blocked by SSRF protection"
+                );
+            }
+        }
+        return Ok(());
+    }
+
+
     let mut upstream = match connect_upstream(&target, config.as_ref()).await {
         Ok(upstream) => upstream,
         Err(error) => {
@@ -756,6 +781,7 @@ mod tests {
                 service_whitelist: Vec::new(),
                 service_blacklist: Vec::new(),
                 graceful_shutdown: true,
+                include_warning: false,
             },
             proxy: ProxyConfig::default(),
             logging: LoggingConfig::default(),
@@ -925,5 +951,105 @@ mod tests {
         let header = String::from_utf8_lossy(&buf[..n]).to_string();
         assert!(header.starts_with("PROXY TCP4 127.0.0.1 127.0.0.1 "));
         assert!(header.ends_with("\r\n"));
+
+    #[test]
+    fn tcp_target_blocks_loopback_by_default() {
+        let table = Arc::new(ManagedRouteTable::new());
+        table.update_services(vec![tcp_def("localhost:4222", "tcp://127.0.0.1:4222")]);
+
+        // Route exists but targets loopback → blocked by SSRF in proxy_tcp_streams
+        // lookup_target itself still returns the target (SSRF check is at proxy time)
+        let target = lookup_target(&table, "round-robin", "127.0.0.1:4222");
+        // SSRF is enforced in proxy_tcp_streams, not in lookup — we verify the
+        // target is selected (route matches) and the SSRF check in proxy will block it.
+        assert!(
+            target.is_some(),
+            "Route should be found; SSRF is enforced at proxy time"
+        );
+        let t = target.unwrap();
+        assert!(
+            !t.is_host_safe(),
+            "Loopback target should not be host-safe (SSRF enforced at proxy)"
+        );
+    }
+
+    #[test]
+    fn tcp_target_blocks_rfc1918_static_source() {
+        let table = Arc::new(ManagedRouteTable::new());
+        // Static source blocks RFC1918; ConsulService would allow it
+        let def = {
+            let mut opts = HashMap::new();
+            opts.insert("proto".to_string(), "tcp".to_string());
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "nats".to_string(),
+                src: "localhost:4222".to_string(),
+                dst: "tcp://10.0.0.1:4222".to_string(),
+                weight: 0.0,
+                tags: vec![],
+                opts,
+                source: RouteSource::Static,
+            }
+        };
+        table.update_services(vec![def]);
+
+        let target = lookup_target(&table, "round-robin", "127.0.0.1:4222");
+        assert!(target.is_some(), "Route lookup succeeds");
+        let t = target.unwrap();
+        assert!(
+            !t.is_host_safe(),
+            "Static source with RFC1918 target should not be host-safe"
+        );
+    }
+
+    #[test]
+    fn tcp_target_allows_rfc1918_consul_service_source() {
+        // ConsulService source allows RFC1918
+        let table = Arc::new(ManagedRouteTable::new());
+        table.update_services(vec![tcp_def("localhost:4222", "tcp://10.0.0.1:4222")]);
+
+        let target = lookup_target(&table, "round-robin", "127.0.0.1:4222");
+        assert!(target.is_some(), "Route should be found");
+        let t = target.unwrap();
+        assert!(
+            t.is_host_safe(),
+            "ConsulService source should allow RFC1918 targets"
+        );
+    }
+
+    #[test]
+    fn tcp_target_ssrf_skip_verify_bypasses_check() {
+        let table = Arc::new(ManagedRouteTable::new());
+        let def = {
+            let mut opts = HashMap::new();
+            opts.insert("proto".to_string(), "tcp".to_string());
+            opts.insert("ssrfskipverify".to_string(), "true".to_string());
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "nats".to_string(),
+                src: "localhost:4222".to_string(),
+                dst: "tcp://10.0.0.1:4222".to_string(),
+                weight: 0.0,
+                tags: vec![],
+                opts,
+                source: RouteSource::Static,
+            }
+        };
+        table.update_services(vec![def]);
+
+        let target = lookup_target(&table, "round-robin", "127.0.0.1:4222");
+        assert!(target.is_some(), "Route should be found");
+        let t = target.unwrap();
+        assert!(
+            t.ssrf_skip_verify(),
+            "Target should have ssrfskipverify enabled"
+        );
+        // With ssrfskipverify, SSRF check in proxy_tcp_streams passes
+        assert!(
+            !t.is_host_safe() && t.ssrf_skip_verify(),
+            "Loopback blocked by SSRF but ssrfskipverify=true should bypass proxy check"
+        );
+    }
+
     }
 }

@@ -42,7 +42,7 @@
             letter-spacing: -0.02em;
         }
         .login-card .subtitle {
-            color: #666;
+            color: #999;
             margin-bottom: 2rem;
             font-size: 0.9rem;
         }
@@ -81,6 +81,19 @@
             display: none;
         }
         
+        /* Error banner */
+        .error-banner {
+            display: none;
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            margin-bottom: 1.5rem;
+            color: #ef4444;
+            font-size: 0.85rem;
+        }
+        .error-banner.visible { display: flex; align-items: center; gap: 0.5rem; }
+        
         /* App Layout */
         .app { display: none; }
         .app.active { display: grid; }
@@ -115,7 +128,7 @@
             align-items: center;
             gap: 0.75rem;
             padding: 0.6rem 0.75rem;
-            color: #666;
+            color: #999;
             text-decoration: none;
             font-size: 0.85rem;
             border-radius: 6px;
@@ -158,7 +171,7 @@
             background: transparent;
             border: 1px solid #333;
             border-radius: 6px;
-            color: #666;
+            color: #999;
             font-size: 0.8rem;
             cursor: pointer;
             transition: all 0.15s;
@@ -226,7 +239,7 @@
         .stat label {
             display: block;
             font-size: 0.7rem;
-            color: #555;
+            color: #888;
             text-transform: uppercase;
             letter-spacing: 0.1em;
             margin-bottom: 0.5rem;
@@ -238,7 +251,7 @@
         }
         .stat .sub {
             font-size: 0.75rem;
-            color: #444;
+            color: #666;
             margin-top: 0.3rem;
         }
         .stat .val.ok { color: #22c55e; }
@@ -259,7 +272,7 @@
         }
         .chart-card h3 {
             font-size: 0.85rem;
-            color: #666;
+            color: #999;
             margin-bottom: 1rem;
             font-weight: 500;
         }
@@ -277,7 +290,7 @@
         }
         th {
             font-size: 0.7rem;
-            color: #555;
+            color: #888;
             text-transform: uppercase;
             letter-spacing: 0.1em;
             font-weight: 500;
@@ -331,7 +344,7 @@
         }
         .node-icon { font-size: 1.5rem; margin-bottom: 0.5rem; }
         .node-label { font-weight: 500; color: #e0e0e0; margin-bottom: 0.25rem; }
-        .node-stats { font-size: 0.75rem; color: #666; margin-top: 0.5rem; }
+        .node-stats { font-size: 0.75rem; color: #999; margin-top: 0.5rem; }
         .node-status { 
             display: inline-block;
             width: 10px;
@@ -375,7 +388,7 @@
             display: flex;
             gap: 1rem;
         }
-        .log .ts { color: #444; flex-shrink: 0; }
+        .log .ts { color: #666; flex-shrink: 0; }
         .log .lvl { 
             width: 50px;
             flex-shrink: 0;
@@ -384,7 +397,7 @@
         .log .lvl.I { color: #22c55e; }
         .log .lvl.W { color: #eab308; }
         .log .lvl.E { color: #ef4444; }
-        .log .lvl.D { color: #666; }
+        .log .lvl.D { color: #999; }
         .log .msg { color: #888; }
         
         /* Refresh button */
@@ -405,10 +418,10 @@
         tr.warn { background: rgba(234, 179, 8, 0.05); }
         
         /* No data */
-        .no-data { color: #444; text-align: center; padding: 2rem; }
+        .no-data { color: #666; text-align: center; padding: 2rem; }
         
         /* Loading */
-        .loading { color: #666; }
+        .loading { color: #999; }
         .loading::after {
             content: '';
             animation: dots 1.5s infinite;
@@ -418,17 +431,57 @@
             40% { content: '..'; }
             60%, 100% { content: '...'; }
         }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .layout { grid-template-columns: 1fr; }
+            nav {
+                position: relative;
+                width: 100%;
+                height: auto;
+                padding: 0.75rem;
+                flex-direction: row;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 0.5rem;
+            }
+            .logo { margin-bottom: 0; margin-right: 0.5rem; }
+            .nav-links {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.25rem;
+                flex: 1;
+            }
+            .nav a { padding: 0.4rem 0.5rem; font-size: 0.75rem; }
+            .nav-icon { display: none; }
+            .user-section {
+                border-top: none;
+                padding-top: 0;
+                border-left: 1px solid #1a1a1a;
+                padding-left: 0.75rem;
+                margin-left: 0.25rem;
+            }
+            .user-info { display: none; }
+            main {
+                margin-left: 0;
+                padding: 1rem;
+            }
+            .charts { grid-template-columns: 1fr; }
+            .stats { grid-template-columns: repeat(2, 1fr); }
+            .login-card { min-width: 0; margin: 1rem; }
+            #login-screen { padding: 1rem; }
+        }
     </style>
 </head>
 <body>
     <!-- Login Screen -->
     <div id="login-screen">
         <div class="login-card">
-            <h1>⚖️ Sentirum LB</h1>
+            <h1>&#x2696;&#xFE0E; Sentirum LB</h1>
             <p class="subtitle">Admin Dashboard</p>
             <input type="text" id="username-input" placeholder="Username" autocomplete="off" />
             <input type="password" id="password-input" placeholder="Password" />
-            <button onclick="doLogin()">Giriş Yap</button>
+            <button onclick="doLogin()">Login</button>
             <p class="login-error" id="login-error">Invalid credentials</p>
         </div>
     </div>
@@ -440,28 +493,28 @@
                 <div class="logo"><span>sentirum</span> lb</div>
                 <div class="nav-links">
                     <a href="#" data-page="overview" class="active" onclick="showPage('overview')">
-                        <span class="nav-icon">📊</span> Overview
+                        <span class="nav-icon">&#x1F4CA;</span> Overview
                     </a>
                     <a href="#" data-page="topology" onclick="showPage('topology')">
-                        <span class="nav-icon">🔗</span> Topology
+                        <span class="nav-icon">&#x1F517;</span> Topology
                     </a>
                     <a href="#" data-page="targets" onclick="showPage('targets')">
-                        <span class="nav-icon">🎯</span> Targets
+                        <span class="nav-icon">&#x1F3AF;</span> Targets
                     </a>
                     <a href="#" data-page="dns" onclick="showPage('dns')">
-                        <span class="nav-icon">🌐</span> DNS Cache
+                        <span class="nav-icon">&#x1F310;</span> DNS Cache
                     </a>
                     <a href="#" data-page="consul" onclick="showPage('consul')">
-                        <span class="nav-icon">☁️</span> Consul
+                        <span class="nav-icon">&#x2601;&#xFE0F;</span> Consul
                     </a>
                     <a href="#" data-page="routes" onclick="showPage('routes')">
-                        <span class="nav-icon">🛤️</span> Routes
+                        <span class="nav-icon">&#x1F6E4;&#xFE0F;</span> Routes
                     </a>
                     <a href="#" data-page="logs" onclick="showPage('logs')">
-                        <span class="nav-icon">📋</span> Logs
+                        <span class="nav-icon">&#x1F4CB;</span> Logs
                     </a>
                     <a href="#" data-page="config" onclick="showPage('config')">
-                        <span class="nav-icon">⚙️</span> Config
+                        <span class="nav-icon">&#x2699;&#xFE0F;</span> Config
                     </a>
                 </div>
                 <div class="user-section">
@@ -469,11 +522,16 @@
                         <div class="user-avatar" id="user-avatar">?</div>
                         <span class="user-name" id="user-name">Loading...</span>
                     </div>
-                    <button class="logout-btn" onclick="doLogout()">Çıkış</button>
+                    <button class="logout-btn" onclick="doLogout()">Logout</button>
                 </div>
             </nav>
             
             <main>
+                <!-- Connection error banner -->
+                <div class="error-banner" id="error-banner">
+                    <span>&#x26A0;&#xFE0F; Backend unreachable &mdash; showing cached data</span>
+                </div>
+                
                 <!-- Overview -->
                 <div id="page-overview" class="page active">
                     <div class="page-header">
@@ -588,6 +646,13 @@
         let username = localStorage.getItem('admin_user') || '';
         let sse = null;
         let charts = {};
+        let consecutiveErrors = 0;
+        
+        // HTML escape to prevent XSS
+        function escapeHtml(str) {
+            if (str == null) return '';
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
         
         // Auth
         async function doLogin() {
@@ -602,9 +667,8 @@
                 });
                 const d = await r.json();
                 
-                if (d.success) {
-                    // Use the admin_token from config for simplicity
-                    token = 'admin123';
+                if (d.success && d.token) {
+                    token = d.token;
                     username = d.user || user;
                     localStorage.setItem('admin_token', token);
                     localStorage.setItem('admin_user', username);
@@ -643,7 +707,7 @@
             return { 'Authorization': 'Bearer ' + token };
         }
         
-        // API call
+        // API call with error tracking
         async function api(path) {
             const r = await fetch(API + path, { headers: headers() });
             if (r.status === 401) {
@@ -657,7 +721,7 @@
         // Page navigation
         function showPage(page) {
             document.querySelectorAll('.nav a').forEach(a => a.classList.remove('active'));
-            document.querySelector(`[data-page="${page}"]`).classList.add('active');
+            document.querySelector('[data-page="' + page + '"]').classList.add('active');
             document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
             document.getElementById('page-' + page).classList.add('active');
         }
@@ -676,30 +740,57 @@
                 type: 'bar',
                 data: { labels: [], datasets: [{ data: [], backgroundColor: '#333' }] },
                 options: { responsive: true, plugins: { legend: { display: false } },
-                    scales: { y: { ticks: { color: '#666' }, grid: { color: '#1a1a1a' } },
-                              x: { ticks: { color: '#666' }, grid: { display: false } } } }
+                    scales: { y: { ticks: { color: '#999' }, grid: { color: '#1a1a1a' } },
+                              x: { ticks: { color: '#999' }, grid: { display: false } } } }
             });
             charts.status = new Chart(document.getElementById('status-chart'), {
                 type: 'doughnut',
                 data: { labels: ['2xx','3xx','4xx','5xx'], 
                        datasets: [{ data: [0,0,0,0], backgroundColor: ['#22c55e','#eab308','#f97316','#ef4444'] }] },
-                options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { color: '#888' } } } }
+                options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { color: '#999' } } } }
             });
+        }
+        
+        // Show/hide error banner
+        function setErrorState(hasError) {
+            const banner = document.getElementById('error-banner');
+            const liveIndicator = document.getElementById('live-indicator');
+            const liveText = document.getElementById('live-text');
+            if (hasError) {
+                banner.classList.add('visible');
+                liveIndicator.style.background = '#ef4444';
+                if (liveText) liveText.textContent = 'DISCONNECTED';
+            } else {
+                banner.classList.remove('visible');
+                liveIndicator.style.background = '#22c55e';
+                if (liveText) liveText.textContent = 'LIVE';
+            }
         }
         
         // Refresh all data
         async function refreshAll() {
             if (!token) return;
             
+            let hadError = false;
+            const safeFetch = (promise, fallback) => promise.catch(e => { hadError = true; return fallback; });
+            
             const [h, r, targets, dns, consul, config, logs] = await Promise.all([
-                api('/health').catch(() => ({})),
-                api('/routes').catch(() => ({ route_count: 0, target_count: 0 })),
-                api('/targets').catch(() => ({ targets: [] })),
-                api('/dns-cache').catch(() => ({ stats: {}, entries: [] })),
-                api('/consul-status').catch(() => ({})),
-                api('/config').catch(() => ({})),
-                api('/logs?limit=100').catch(() => [])
+                safeFetch(api('/health'), {}),
+                safeFetch(api('/routes'), { route_count: 0, target_count: 0 }),
+                safeFetch(api('/targets'), { targets: [] }),
+                safeFetch(api('/dns-cache'), { stats: {}, entries: [] }),
+                safeFetch(api('/consul-status'), {}),
+                safeFetch(api('/config'), {}),
+                safeFetch(api('/logs?limit=100'), [])
             ]);
+            
+            if (hadError) {
+                consecutiveErrors++;
+                setErrorState(true);
+            } else {
+                consecutiveErrors = 0;
+                setErrorState(false);
+            }
             
             // Overview
             document.getElementById('stat-routes').textContent = r.route_count || 0;
@@ -749,71 +840,70 @@
             // Targets
             if (targets.targets) {
                 document.getElementById('targets-table').innerHTML = targets.targets.map(t => {
-                    const errClass = (t.stats?.error_rate_pct || 0) > 1 ? 'err' : '';
-                    const lat = t.stats?.avg_latency_us ? (t.stats.avg_latency_us / 1000).toFixed(1) + 'ms' : '-';
-                    return `<tr class="${errClass}">
-                        <td>${t.service}</td>
-                        <td class="mono">${t.url}</td>
-                        <td><span class="badge">${t.protocol}</span>${t.tls ? '<span class="badge tls">TLS</span>' : ''}</td>
-                        <td>${fmt(t.stats?.requests || 0)}</td>
-                        <td>${fmt(t.stats?.errors || 0)}</td>
-                        <td>${t.stats?.error_rate_pct || 0}%</td>
-                        <td>${lat}</td>
-                        <td>${t.active_connections || 0}</td>
-                        <td><span class="cb-badge cb-${t.circuit_breaker}">${t.circuit_breaker}</span></td>
-                    </tr>`;
+                    const errClass = (t.stats && t.stats.error_rate_pct || 0) > 1 ? 'err' : '';
+                    const lat = t.stats && t.stats.avg_latency_us ? (t.stats.avg_latency_us / 1000).toFixed(1) + 'ms' : '-';
+                    return '<tr class="' + errClass + '">' +
+                        '<td>' + escapeHtml(t.service) + '</td>' +
+                        '<td class="mono">' + escapeHtml(t.url) + '</td>' +
+                        '<td><span class="badge">' + escapeHtml(t.protocol) + '</span>' + (t.tls ? '<span class="badge tls">TLS</span>' : '') + '</td>' +
+                        '<td>' + fmt(t.stats && t.stats.requests || 0) + '</td>' +
+                        '<td>' + fmt(t.stats && t.stats.errors || 0) + '</td>' +
+                        '<td>' + (t.stats && t.stats.error_rate_pct || 0) + '%</td>' +
+                        '<td>' + lat + '</td>' +
+                        '<td>' + (t.active_connections || 0) + '</td>' +
+                        '<td><span class="cb-badge cb-' + escapeHtml(t.circuit_breaker) + '">' + escapeHtml(t.circuit_breaker) + '</span></td>' +
+                    '</tr>';
                 }).join('');
             }
             
             // Topology
             api('/topology').then(d => {
-                let html = `<div class="node-card lb"><div class="node-icon">⚖️</div><div class="node-label">Load Balancer</div><div class="node-stats">${fmt(d.nodes?.[0]?.stats?.requests || 0)} req</div></div>`;
+                let html = '<div class="node-card lb"><div class="node-icon">&#x2696;&#xFE0E;</div><div class="node-label">Load Balancer</div><div class="node-stats">' + fmt(d.nodes && d.nodes[0] && d.nodes[0].stats && d.nodes[0].stats.requests || 0) + ' req</div></div>';
                 (d.nodes || []).filter(n => n.type === 'target').forEach(n => {
                     const status = n.cb_state === 'open' ? 'err' : n.cb_state === 'halfopen' ? 'warn' : 'ok';
-                    html += `<div class="node-card"><div class="node-icon">🎯</div><div class="node-label">${n.label}<span class="node-status ${status}"></span></div><div class="node-stats">${fmt(n.stats?.requests || 0)} req</div></div>`;
+                    html += '<div class="node-card"><div class="node-icon">&#x1F3AF;</div><div class="node-label">' + escapeHtml(n.label) + '<span class="node-status ' + status + '"></span></div><div class="node-stats">' + fmt(n.stats && n.stats.requests || 0) + ' req</div></div>';
                 });
                 document.getElementById('topology-grid').innerHTML = html;
             });
             
             // DNS
-            document.getElementById('dns-stats').innerHTML = `
-                <div class="stat"><label>Entries</label><div class="val">${dns.stats?.total_entries || 0}</div></div>
-                <div class="stat"><label>Hits</label><div class="val ok">${dns.stats?.hits || 0}</div></div>
-                <div class="stat"><label>Misses</label><div class="val">${dns.stats?.misses || 0}</div></div>
-                <div class="stat"><label>Hit Rate</label><div class="val ${(dns.stats?.hit_rate || 0) > 80 ? 'ok' : 'warn'}">${dns.stats?.hit_rate || 0}%</div></div>
-            `;
-            document.getElementById('dns-entries').innerHTML = (dns.entries || []).map(e => `
-                <div class="card" style="margin-top: 0.5rem;">
-                    <strong>${e.host}</strong> → ${e.addrs.join(', ')}
-                    <span style="color:#666;font-size:0.8rem;margin-left:1rem;">TTL: ${e.ttl_remaining_secs}s${e.is_negative ? ' (NXDOMAIN)' : ''}</span>
-                </div>
-            `).join('') || '<p class="no-data">No cached entries</p>';
+            document.getElementById('dns-stats').innerHTML =
+                '<div class="stat"><label>Entries</label><div class="val">' + (dns.stats && dns.stats.total_entries || 0) + '</div></div>' +
+                '<div class="stat"><label>Hits</label><div class="val ok">' + (dns.stats && dns.stats.hits || 0) + '</div></div>' +
+                '<div class="stat"><label>Misses</label><div class="val">' + (dns.stats && dns.stats.misses || 0) + '</div></div>' +
+                '<div class="stat"><label>Hit Rate</label><div class="val ' + ((dns.stats && dns.stats.hit_rate || 0) > 80 ? 'ok' : 'warn') + '">' + (dns.stats && dns.stats.hit_rate || 0) + '%</div></div>';
+            document.getElementById('dns-entries').innerHTML = (dns.entries || []).map(e =>
+                '<div class="card" style="margin-top: 0.5rem;">' +
+                    '<strong>' + escapeHtml(e.host) + '</strong> &#x2192; ' + escapeHtml(e.addrs.join(', ')) +
+                    ' <span style="color:#999;font-size:0.8rem;margin-left:1rem;">TTL: ' + e.ttl_remaining_secs + 's' + (e.is_negative ? ' (NXDOMAIN)' : '') + '</span>' +
+                '</div>'
+            ).join('') || '<p class="no-data">No cached entries</p>';
             
             // Consul
             const watchers = ['services', 'kv', 'tls', 'client_ca'];
             document.getElementById('consul-watchers').innerHTML = watchers.map(w => {
                 const d = consul[w] || {};
-                return `<div class="node-card">
-                    <div class="node-icon">☁️</div>
-                    <div class="node-label">${w.toUpperCase()}</div>
-                    <div class="node-stats">Index: ${d.last_index || 0}<br>Backoff: ${d.backoff_secs || 0}s<br>Errors: ${d.errors || 0}</div>
-                </div>`;
+                return '<div class="node-card">' +
+                    '<div class="node-icon">&#x2601;&#xFE0F;</div>' +
+                    '<div class="node-label">' + w.toUpperCase() + '</div>' +
+                    '<div class="node-stats">Index: ' + (d.last_index || 0) + '<br>Backoff: ' + (d.backoff_secs || 0) + 's<br>Errors: ' + (d.errors || 0) + '</div>' +
+                '</div>';
             }).join('');
             
             // Config
             if (typeof config === 'object' && config !== null) {
-                document.getElementById('config-list').innerHTML = '<pre style="background:#1a1a1a;padding:1rem;border-radius:8px;overflow:auto;font-size:0.8rem;">' + JSON.stringify(config, null, 2) + '</pre>';
+                document.getElementById('config-list').innerHTML = '<pre style="background:#1a1a1a;padding:1rem;border-radius:8px;overflow:auto;font-size:0.8rem;">' + escapeHtml(JSON.stringify(config, null, 2)) + '</pre>';
             }
             
             // Logs
             if (Array.isArray(logs)) {
-                document.getElementById('logs-container').innerHTML = logs.map(l => `
-                    <div class="log">
-                        <span class="ts">${new Date(l.timestamp * 1000).toISOString().slice(11,19)}</span>
-                        <span class="lvl ${l.level[0]}">${l.level}</span>
-                        <span class="msg">${l.message}</span>
-                    </div>
-                `).join('');
+                document.getElementById('logs-container').innerHTML = logs.map(l =>
+                    '<div class="log">' +
+                        '<span class="ts">' + new Date(l.timestamp * 1000).toISOString().slice(11,19) + '</span>' +
+                        '<span class="lvl ' + escapeHtml(l.level && l.level[0] || '') + '">' + escapeHtml(l.level) + '</span>' +
+                        '<span class="msg">' + escapeHtml(l.message) + '</span>' +
+                    '</div>'
+                ).join('');
             }
         }
         
@@ -833,16 +923,22 @@
                 btn.textContent = 'Stream: OFF';
                 btn.style.background = '#1a1a1a';
             } else {
-                sse = new EventSource(API + '/logs/stream', { headers: headers() });
+                // EventSource doesn't support custom headers; pass token as query param
+                sse = new EventSource(API + '/logs/stream?token=' + encodeURIComponent(token));
                 sse.onmessage = e => {
                     try {
                         const l = JSON.parse(e.data);
                         const container = document.getElementById('logs-container');
-                        container.innerHTML += `<div class="log"><span class="ts">${new Date(l.timestamp * 1000).toISOString().slice(11,19)}</span><span class="lvl ${l.level[0]}">${l.level}</span><span class="msg">${l.message}</span></div>`;
+                        const div = document.createElement('div');
+                        div.className = 'log';
+                        div.innerHTML = '<span class="ts">' + new Date(l.timestamp * 1000).toISOString().slice(11,19) + '</span>' +
+                            '<span class="lvl ' + escapeHtml(l.level && l.level[0] || '') + '">' + escapeHtml(l.level) + '</span>' +
+                            '<span class="msg">' + escapeHtml(l.message) + '</span>';
+                        container.appendChild(div);
                         container.scrollTop = container.scrollHeight;
                     } catch(e) {}
                 };
-                sse.onerror = () => { sse.close(); sse = null; btn.textContent = 'Stream: OFF'; };
+                sse.onerror = () => { sse.close(); sse = null; btn.textContent = 'Stream: OFF'; btn.style.background = '#1a1a1a'; };
                 btn.textContent = 'Stream: ON';
                 btn.style.background = '#22c55e';
             }

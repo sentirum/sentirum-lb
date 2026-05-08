@@ -795,6 +795,7 @@ impl Target {
         let cache = global_dns_cache();
         if let Some(addrs) = cache.lookup(&cache_key)
             && let Some(addr) = addrs.first()
+        {
             tracing::trace!(host, port, "DNS cache hit");
             if !self.ssrf_skip_verify()
                 && (is_ip_always_blocked(&addr.ip())
@@ -846,9 +847,25 @@ impl Target {
             ));
         }
 
-        // Cache ALL addresses including the one we resolved to
+
+        // Cache ALL addresses, filtering out any that fail SSRF checks.
+        // This prevents a blocked IP from hiding in the multi-A-record tail
+        // and being served on a subsequent cache hit.
         let mut addr_list = vec![resolved];
-        addr_list.extend(addrs);
+        for addr in addrs {
+            if !self.ssrf_skip_verify()
+                && (is_ip_always_blocked(&addr.ip())
+                    || (!self.source_allows_private_upstreams() && is_ip_rfc1918(&addr.ip())))
+            {
+                tracing::debug!(
+                    host,
+                    addr = %addr,
+                    "Filtered blocked IP from DNS multi-record response"
+                );
+                continue;
+            }
+            addr_list.push(addr);
+        }
         cache.store(cache_key, addr_list);
 
         Ok(resolved)
@@ -1330,9 +1347,9 @@ mod tests {
         let cache = DnsCache::with_ttl(300, 10);
         // Fill beyond DNS_CACHE_MAX_ENTRIES
         for i in 0..(DNS_CACHE_MAX_ENTRIES + 50) {
-            let addr: SocketAddr = format!("10.0.{}.{}", i / 256, i % 256)
-                .parse()
-                .unwrap();
+            let hi = (i / 256) % 256;
+            let lo = i % 256;
+            let addr: SocketAddr = format!("10.0.{hi}.{lo}:80").parse().unwrap();
             cache.store(format!("host-{i}"), vec![addr]);
         }
         assert!(

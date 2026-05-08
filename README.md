@@ -356,11 +356,23 @@ Fabio-compatible semantics:
 
 ### Admin API
 
-- `GET /admin/health`
-- `GET /admin/routes`
-- `GET /admin/metrics`
-- `GET /admin/config`
-- `GET /admin/certs`
+- `GET /admin/health` — health check
+- `GET /admin/routes` — route table inspection
+- `GET /admin/metrics` — Prometheus text metrics
+- `GET /admin/config` — runtime config (JSON)
+- `GET /admin/certs` — TLS certificate status
+- `GET /admin/logs` — recent log entries (JSON, `?limit=N&level=LEVEL`)
+- `GET /admin/logs/stream` — live log stream (SSE, auth via `?token=`)
+- `GET /admin/metrics/stream` — live metrics stream (SSE, auth via `?token=`)
+- `GET /admin/targets` — per-target health and circuit breaker status
+- `GET /admin/targets-metrics` — per-target Prometheus metrics
+- `GET /admin/dns-cache` — DNS cache stats and entries
+- `GET /admin/consul-status` — Consul watcher state per subsystem
+- `GET /admin/topology` — route topology graph data
+- `GET /admin/me` — current session info
+- `POST /admin/login` — authenticate and receive session token
+- `POST /admin/logout` — invalidate session
+- `GET /admin/` — embedded dashboard SPA
 
 Default admin bind address: `127.0.0.1:9998`
 

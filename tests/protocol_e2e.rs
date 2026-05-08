@@ -351,8 +351,8 @@ listen = "127.0.0.1:{tls_port}"
         .arg(&config_path)
         .arg("--routes")
         .arg(&routes_path)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
 

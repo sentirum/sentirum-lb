@@ -19,6 +19,7 @@ pub trait Picker: Send + Sync {
 /// Round-robin picker — cycles through targets in order
 pub struct RoundRobinPicker;
 
+
 impl Picker for RoundRobinPicker {
     fn pick(
         &self,
@@ -29,9 +30,10 @@ impl Picker for RoundRobinPicker {
         if w_targets.is_empty() || targets.is_empty() {
             return None;
         }
-        // Use SeqCst to ensure the increment is visible to all threads before
-        // any thread reads the updated counter value for indexing.
-        let counter_val = counter.fetch_add(1, Ordering::SeqCst);
+        // Relaxed is sufficient: fetch_add guarantees a unique value per thread
+        // without requiring a global memory fence. The counter only produces an
+        // index — no other memory location needs to be synchronized with this read.
+        let counter_val = counter.fetch_add(1, Ordering::Relaxed);
         let idx = counter_val as usize % w_targets.len();
 
         // DEBUG: Log the pick decision
@@ -84,8 +86,22 @@ impl Picker for RandomPicker {
     }
 }
 
-/// Least-connections picker — selects target with fewest active connections.
-/// Uses atomic counters per-target to track active connections.
+
+
+
+/// Least-connections picker — selects target with the lowest effective load,
+/// where effective load = active_connections / weight.
+///
+/// This respects configured weights: a target with weight 0.7 can hold
+/// proportionally more connections than one with weight 0.3 before being
+/// deprioritized. Targets with weight == 0 are excluded from selection
+/// (they receive no traffic). When all targets have weight 0, falls back
+/// to simple min-by-connection-count.
+///
+/// Memory ordering: Acquire on load pairs with Release in
+/// `Target::try_acquire_connection_slot`, forming a proper inter-thread
+/// ordering boundary without requiring full SeqCst serialization.
+
 pub struct LeastConnectionsPicker;
 
 impl Picker for LeastConnectionsPicker {
@@ -99,12 +115,30 @@ impl Picker for LeastConnectionsPicker {
             return None;
         }
 
-        // Find target with minimum active connections
-        // Each Target has an `active_connections` AtomicU64 (default 0)
-        targets
-            .iter()
-            .min_by_key(|t| t.active_connections.load(Ordering::Relaxed))
-            .map(Arc::clone)
+        // Acquire ordering: pairs with Release in try_acquire_connection_slot.
+        let has_weight = targets.iter().any(|t| t.weight > 0.0);
+
+        if has_weight {
+            // Weight-aware: pick the target with the lowest connections/weight ratio.
+            // Use OrderedFloat for deterministic comparison of f64 in min_by_key.
+            targets
+                .iter()
+                .filter(|t| t.weight > 0.0)
+                .min_by_key(|t| {
+                    let conns = t.active_connections.load(Ordering::Acquire) as f64;
+                    // Scale by 1e6 to preserve sub-integer precision in integer comparison.
+                    // weight ranges [0.001, 1.0], conns ranges [0, u64::MAX].
+                    // conns / weight gives effective load — lower is preferred.
+                    (conns / t.weight * 1e6) as u64
+                })
+                .map(Arc::clone)
+        } else {
+            // No weights configured — simple min-connections (Fabio-compatible).
+            targets
+                .iter()
+                .min_by_key(|t| t.active_connections.load(Ordering::Acquire))
+                .map(Arc::clone)
+        }
     }
 }
 
@@ -120,6 +154,7 @@ pub fn create_picker(strategy: &str) -> Box<dyn Picker> {
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -231,5 +266,112 @@ mod tests {
         }
 
         assert_eq!(counts.len(), 3, "Should use all three targets");
+
+    }
+
+    #[test]
+    fn least_connections_prefers_fewer_connections() {
+        let t1 = Target::new("svc-1".into(), "http://10.0.0.1:80/".into());
+        let t2 = Target::new("svc-2".into(), "http://10.0.0.2:80/".into());
+        let targets: Vec<Arc<Target>> = vec![Arc::new(t1), Arc::new(t2)];
+
+        // Set different connection counts
+        targets[0].active_connections.store(5, Ordering::Release);
+        targets[1].active_connections.store(2, Ordering::Release);
+
+        let picker = LeastConnectionsPicker;
+        let counter = AtomicU64::new(0);
+        let picked = picker.pick(&targets, &[], &counter).unwrap();
+        assert_eq!(picked.url, "http://10.0.0.2:80/");
+    }
+
+    #[test]
+    fn least_connections_weight_aware_respects_ratio() {
+        use crate::route::table::Route;
+
+        // Two targets: heavy (weight=0.7) and light (weight=0.3)
+        // With 7 conns on heavy and 3 conns on light:
+        //   heavy effective load = 7/0.7 = 10.0
+        //   light effective load = 3/0.3 = 10.0
+        // Both equal → pick first (heavy by iteration order)
+        //
+        // With 8 conns on heavy and 3 conns on light:
+        //   heavy effective load = 8/0.7 ≈ 11.4
+        //   light effective load = 3/0.3 = 10.0
+        // Pick light (lower effective load)
+        let mut route = Route::new("host.com".to_string(), "/".to_string());
+        let mut heavy = Target::new("heavy".into(), "http://10.0.0.1:80/".into());
+        heavy.fixed_weight = 0.7;
+        let mut light = Target::new("light".into(), "http://10.0.0.2:80/".into());
+        light.fixed_weight = 0.3;
+        route.add_target(heavy);
+        route.add_target(light);
+        route.compute_weights();
+
+        // Simulate: heavy has 8 connections, light has 3
+        route.targets[0].active_connections.store(8, Ordering::Release);
+        route.targets[1].active_connections.store(3, Ordering::Release);
+
+        let picker = LeastConnectionsPicker;
+        let counter = AtomicU64::new(0);
+        let picked = picker.pick(&route.targets, &route.w_targets, &counter).unwrap();
+        // light has lower effective load (10.0 vs 11.4)
+        assert_eq!(picked.url, "http://10.0.0.2:80/", "Should pick light (lower effective load)");
+
+        // Now equalize: heavy 7, light 3
+        route.targets[0].active_connections.store(7, Ordering::Release);
+        let picked2 = picker.pick(&route.targets, &route.w_targets, &counter).unwrap();
+        // Both have effective load = 10.0, pick first (heavy)
+        assert_eq!(picked2.url, "http://10.0.0.1:80/", "Should pick heavy (equal load, first wins)");
+
+        // Verify heavy can hold more: heavy 6, light 3
+        route.targets[0].active_connections.store(6, Ordering::Release);
+        let picked3 = picker.pick(&route.targets, &route.w_targets, &counter).unwrap();
+        // heavy: 6/0.7 ≈ 8.57, light: 3/0.3 = 10.0 → pick heavy
+        assert_eq!(picked3.url, "http://10.0.0.1:80/", "Heavy should still be preferred at proportional load");
+    }
+
+    #[test]
+    fn least_connections_weight_zero_target_excluded() {
+        use crate::route::table::Route;
+
+        // 3 targets: one with weight 0 (draining), two with equal weight
+        let mut route = Route::new("host.com".to_string(), "/".to_string());
+        let mut draining = Target::new("drain".into(), "http://10.0.0.1:80/".into());
+        draining.fixed_weight = 0.0;
+        let mut active1 = Target::new("active1".into(), "http://10.0.0.2:80/".into());
+        active1.fixed_weight = 0.5;
+        let mut active2 = Target::new("active2".into(), "http://10.0.0.3:80/".into());
+        active2.fixed_weight = 0.5;
+        route.add_target(draining);
+        route.add_target(active1);
+        route.add_target(active2);
+        route.compute_weights();
+
+        // All have 0 connections
+        let picker = LeastConnectionsPicker;
+        let counter = AtomicU64::new(0);
+
+        for _ in 0..100 {
+            let picked = picker.pick(&route.targets, &route.w_targets, &counter).unwrap();
+            assert_ne!(picked.url, "http://10.0.0.1:80/", "Draining target should never be picked");
+        }
+    }
+
+    #[test]
+    fn least_connections_no_weights_falls_back_to_simple() {
+        // All weights 0 → simple min-connections (Fabio-compatible)
+        let t1 = Target::new("svc-1".into(), "http://10.0.0.1:80/".into());
+        let t2 = Target::new("svc-2".into(), "http://10.0.0.2:80/".into());
+        let targets: Vec<Arc<Target>> = vec![Arc::new(t1), Arc::new(t2)];
+        // weights default to 0.0
+
+        targets[0].active_connections.store(10, Ordering::Release);
+        targets[1].active_connections.store(3, Ordering::Release);
+
+        let picker = LeastConnectionsPicker;
+        let counter = AtomicU64::new(0);
+        let picked = picker.pick(&targets, &[], &counter).unwrap();
+        assert_eq!(picked.url, "http://10.0.0.2:80/");
     }
 }

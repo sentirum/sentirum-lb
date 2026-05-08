@@ -289,8 +289,8 @@ client_ca_upgrade_cn = "{client_ca_upgrade_cn}"
         .arg(&config_path)
         .arg("--routes")
         .arg(&routes_path)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
 

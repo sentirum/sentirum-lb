@@ -110,11 +110,26 @@ impl Route {
                 })
                 .sum();
 
+
             let dynamic_count = self
                 .targets
                 .iter()
                 .filter(|t| t.fixed_weight <= 0.0)
                 .count() as f64;
+
+            if total_fixed > 1.0 {
+                tracing::warn!(
+                    total_fixed,
+                    "Fixed weights sum exceeds 1.0; dynamic targets will receive no traffic. \
+                     Reduce fixed weights or remove weight specifications."
+                );
+            } else if total_fixed == 1.0 && dynamic_count > 0.0 {
+                tracing::debug!(
+                    dynamic_count,
+                    "Fixed weights sum to exactly 1.0; {} dynamic targets will receive no traffic",
+                    dynamic_count as usize
+                );
+            }
 
             // Remaining weight for dynamic targets
             let remaining = (1.0 - total_fixed).max(0.0);

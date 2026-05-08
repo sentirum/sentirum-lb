@@ -11,7 +11,7 @@
 //! - `GET /admin/logs/stream` — Live log stream (SSE)
 
 use crate::config::Config;
-use crate::route::target::{CircuitState, UpstreamProtocol};
+use crate::route::target::CircuitState;
 use crate::proxy::tls::{DynamicCertStore, DynamicClientCaStore};
 use crate::route::registry::ManagedRouteTable;
 use axum::Router;
@@ -34,8 +34,8 @@ use tokio::sync::RwLock;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use rand::Rng;
-use bcrypt::{hash, verify, DEFAULT_COST};
-use async_stream::stream;
+use bcrypt::verify;
+use std::time::Duration;
 
 /// Maximum session lifetime in seconds (24 hours).
 const SESSION_TTL_SECS: u64 = 24 * 60 * 60;
@@ -48,7 +48,7 @@ const LOGIN_WINDOW_SECS: u64 = 60;
 
 
 /// Session entry with creation timestamp for TTL eviction.
-pub(crate) struct SessionEntry {
+pub struct SessionEntry {
     pub user: String,
     pub created_at: std::time::Instant,
 }
@@ -357,11 +357,6 @@ async fn metrics_stream_handler(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-/// Generate a random session token
-/// Hash a password using bcrypt
-fn hash_password(password: &str) -> String {
-    bcrypt::hash(password, DEFAULT_COST).unwrap_or_default()
-}
 
 /// Verify password against hash
 fn verify_password(password: &str, hash: &str) -> bool {
@@ -692,22 +687,33 @@ async fn targets_metrics_handler(State(state): State<AdminState>) -> impl axum::
                     output.push_str("# HELP sentirum_lb_target_requests_total Requests per target\n");
                     output.push_str("# TYPE sentirum_lb_target_requests_total counter\n");
                     output.push_str(&format!(
-                        "sentirum_lb_target_requests_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {req}\n\n"
+                        "sentirum_lb_target_requests_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {requests}\n\n"
                     ));
                     output.push_str("# HELP sentirum_lb_target_errors_total Errors per target\n");
                     output.push_str("# TYPE sentirum_lb_target_errors_total counter\n");
                     output.push_str(&format!(
-                        "sentirum_lb_target_errors_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {err}\n\n"
+                        "sentirum_lb_target_errors_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {errors}\n\n"
                     ));
                     output.push_str("# HELP sentirum_lb_target_latency_us_total Total latency per target\n");
                     output.push_str("# TYPE sentirum_lb_target_latency_us_total counter\n");
                     output.push_str(&format!(
-                        "sentirum_lb_target_latency_us_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {lat}\n\n"
+                        "sentirum_lb_target_latency_us_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {latency_sum}\n\n"
                     ));
                     output.push_str("# HELP sentirum_lb_target_bytes_total Bytes per target\n");
                     output.push_str("# TYPE sentirum_lb_target_bytes_total counter\n");
                     output.push_str(&format!(
                         "sentirum_lb_target_bytes_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {bytes}\n\n"
+                    ));
+
+                    let cb_value = match cb_state {
+                        CircuitState::Closed => 0,
+                        CircuitState::Open => 2,
+                        CircuitState::HalfOpen => 1,
+                    };
+                    output.push_str("# HELP sentirum_lb_target_circuit_breaker_state Circuit breaker state (0=closed, 1=half-open, 2=open)\n");
+                    output.push_str("# TYPE sentirum_lb_target_circuit_breaker_state gauge\n");
+                    output.push_str(&format!(
+                        "sentirum_lb_target_circuit_breaker_state{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {cb_value}\n\n"
                     ));
                 }
             }
@@ -810,6 +816,52 @@ async fn logs_stream_handler(
 // Server bootstrap
 // ---------------------------------------------------------------------------
 
+
+
+
+
+
+
+// ---------------------------------------------------------------------------
+// Session cleanup background service
+// ---------------------------------------------------------------------------
+
+/// Background service that periodically cleans up expired sessions.
+/// This prevents the session map from growing unbounded without incurring
+/// O(n) eviction costs on every request's hot path.
+struct SessionCleanupBackground {
+    sessions: Arc<RwLock<HashMap<String, SessionEntry>>>,
+}
+
+impl SessionCleanupBackground {
+    fn new(sessions: Arc<RwLock<HashMap<String, SessionEntry>>>) -> Self {
+        Self { sessions }
+    }
+
+    async fn run(&self) {
+        const CLEANUP_INTERVAL_SECS: u64 = 60;
+        let mut interval = tokio::time::interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
+
+        loop {
+            interval.tick().await;
+            let now = std::time::Instant::now();
+
+
+            let Ok(mut sessions) = self.sessions.try_write() else {
+                continue;
+            };
+            let before = sessions.len();
+            sessions.retain(|_, entry| {
+                now.duration_since(entry.created_at).as_secs() < SESSION_TTL_SECS
+            });
+            let evicted = before.saturating_sub(sessions.len());
+            if evicted > 0 {
+                tracing::debug!(evicted, remaining = sessions.len(), "Expired sessions evicted");
+            }
+        }
+    }
+}
+
 /// Run the admin API server using axum
 pub async fn run_admin_server(
     config: Arc<Config>,
@@ -836,6 +888,15 @@ pub async fn run_admin_server(
         sessions: Arc::new(RwLock::new(HashMap::new())),
         login_attempts: Arc::new(dashmap::DashMap::new()),
     };
+
+    // Spawn background session cleanup service (non-blocking, fire-and-forget).
+    // This runs independently from the axum server and prevents the session
+    // map from growing unbounded without O(n) cost on every auth request.
+    let cleanup_sessions = state.sessions.clone();
+    tokio::spawn(async move {
+        SessionCleanupBackground::new(cleanup_sessions).run().await;
+    });
+
     let app = build_router(state);
 
     tracing::info!(addr = %addr, auth_enabled, "Admin API server starting (axum)");
@@ -895,15 +956,18 @@ async fn admin_auth_middleware(
         false
     };
 
+
     // Path B: session-based auth — Bearer token lookup in session store.
+    // No eviction here: hot path should be fast. Background task + login-time
+    // eviction handles cleanup. This avoids O(n) retain() on every request.
     let session_auth = if !token_auth {
         if let Some(bearer) = headers
             .get(AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
         {
-            let mut sessions = state.sessions.write().await;
-            evict_expired_sessions(&mut sessions);
+
+            let sessions = state.sessions.read().await;
             sessions.get(bearer).is_some()
         } else {
             false
@@ -927,16 +991,16 @@ async fn admin_auth_middleware(
                 if matches_admin {
                     return true;
                 }
+
                 // Check against session store.
-                // Use try_write to avoid blocking; fall through to false if contested.
-                if let Ok(mut sessions) = state.sessions.try_write() {
-                    evict_expired_sessions(&mut sessions);
+                // Use try_read to avoid blocking; fall through to false if contested.
+                if let Ok(sessions) = state.sessions.try_read() {
                     sessions.get(&token).is_some()
                 } else {
                     false
                 }
             })
-            .unwrap_or(false)
+        .unwrap_or(false)
     } else {
         false
     };
@@ -1028,6 +1092,7 @@ mod tests {
                 service_whitelist: Vec::new(),
                 service_blacklist: Vec::new(),
                 graceful_shutdown: true,
+                include_warning: false,
             },
             proxy: ProxyConfig::default(),
             logging: LoggingConfig::default(),
@@ -1070,6 +1135,7 @@ mod tests {
                     service_whitelist: Vec::new(),
                     service_blacklist: Vec::new(),
                     graceful_shutdown: true,
+                    include_warning: false,
                 },
                 proxy: ProxyConfig::default(),
                 logging: LoggingConfig::default(),

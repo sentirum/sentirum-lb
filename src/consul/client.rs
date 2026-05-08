@@ -33,6 +33,10 @@ pub struct ConsulConfig {
     pub service_blacklist: Vec<String>,
     /// Enable graceful shutdown
     pub graceful_shutdown: bool,
+
+    /// Include services with "warning" health status in route discovery
+    pub include_warning: bool,
+
 }
 
 impl std::fmt::Debug for ConsulConfig {
@@ -75,6 +79,7 @@ impl From<&AppConsulConfig> for ConsulConfig {
             service_whitelist: cfg.service_whitelist.clone(),
             service_blacklist: cfg.service_blacklist.clone(),
             graceful_shutdown: cfg.graceful_shutdown,
+            include_warning: cfg.include_warning,
         }
     }
 }
@@ -93,6 +98,7 @@ impl Default for ConsulConfig {
             service_whitelist: Vec::new(),
             service_blacklist: Vec::new(),
             graceful_shutdown: true,
+            include_warning: false,
         }
     }
 }
@@ -590,6 +596,7 @@ mod tests {
             service_whitelist: Vec::new(),
             service_blacklist: Vec::new(),
             graceful_shutdown: true,
+            include_warning: false,
             address: "127.0.0.1:8500".to_string(),
             scheme: "http".to_string(),
             token: String::new(),

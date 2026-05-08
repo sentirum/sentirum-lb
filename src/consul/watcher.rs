@@ -247,15 +247,27 @@ impl ServiceMonitor {
                 continue;
             }
 
+
             let total = svc_checks.len();
             let passing = svc_checks
                 .iter()
                 .filter(|check| check.status == HEALTH_STATUS_PASSING)
                 .count();
+            let warning = svc_checks
+                .iter()
+                .filter(|check| check.status == crate::consul::client::HEALTH_STATUS_WARNING)
+                .count();
 
-            if passing == 0 || total != passing {
+            let healthy = if self.config.include_warning {
+                passing + warning
+            } else {
+                passing
+            };
+
+            if healthy == 0 || total != healthy {
                 continue;
             }
+
 
             result
                 .entry(service_name)

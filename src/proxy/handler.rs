@@ -991,6 +991,7 @@ mod tests {
                 service_whitelist: Vec::new(),
                 service_blacklist: Vec::new(),
                 graceful_shutdown: true,
+                include_warning: false,
             },
             proxy: crate::config::ProxyConfig {
                 upstream_h2_max_streams: 64,
@@ -1038,6 +1039,7 @@ mod tests {
                 service_whitelist: Vec::new(),
                 service_blacklist: Vec::new(),
                 graceful_shutdown: true,
+                include_warning: false,
             },
             proxy: crate::config::ProxyConfig::default(),
             logging: crate::config::LoggingConfig::default(),
@@ -1080,6 +1082,7 @@ mod tests {
                 service_whitelist: Vec::new(),
                 service_blacklist: Vec::new(),
                 graceful_shutdown: true,
+                include_warning: false,
             },
             proxy: crate::config::ProxyConfig::default(),
             logging: crate::config::LoggingConfig::default(),

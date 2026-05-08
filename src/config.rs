@@ -90,6 +90,13 @@ pub struct ConsulConfig {
     #[serde(default = "default_true")]
     pub graceful_shutdown: bool,
 
+    /// Include services with "warning" health status in route discovery.
+    /// When false (default), only fully "passing" services are included.
+    /// When true, services with "warning" checks are also considered healthy.
+    #[serde(default)]
+    pub include_warning: bool,
+
+
 }
 
 fn default_consul_address() -> String {

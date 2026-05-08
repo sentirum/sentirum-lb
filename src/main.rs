@@ -354,6 +354,7 @@ fn main() {
             service_whitelist: Vec::new(),
             service_blacklist: Vec::new(),
             graceful_shutdown: true,
+            include_warning: false,
         };
         Config {
             server,
