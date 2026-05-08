@@ -527,18 +527,35 @@ struct PemBlock<'a> {
 }
 
 fn pem_blocks(input: &str) -> Vec<PemBlock<'_>> {
-    let re = Regex::new(r"(?s)-----BEGIN ([A-Z0-9 ]+)-----.*?-----END \1-----")
-        .expect("valid PEM regex");
-    re.captures_iter(input)
-        .filter_map(|capture| {
-            let pem = capture.get(0)?;
-            let kind = capture.get(1)?;
-            Some(PemBlock {
-                kind: kind.as_str(),
-                pem: pem.as_str(),
-            })
-        })
-        .collect()
+    let begin_re = Regex::new(r"-----BEGIN ([A-Z0-9 ]+)-----").expect("valid PEM regex");
+    let mut blocks = Vec::new();
+    let mut offset = 0;
+
+    while let Some(capture) = begin_re.captures(&input[offset..]) {
+        let whole = match capture.get(0) {
+            Some(m) => m,
+            None => break,
+        };
+        let kind = match capture.get(1) {
+            Some(m) => m.as_str(),
+            None => break,
+        };
+
+        let start = offset + whole.start();
+        let end_marker = format!("-----END {kind}-----");
+        let search_from = offset + whole.end();
+        let Some(relative_end) = input[search_from..].find(&end_marker) else {
+            break;
+        };
+        let end = search_from + relative_end + end_marker.len();
+        blocks.push(PemBlock {
+            kind,
+            pem: &input[start..end],
+        });
+        offset = end;
+    }
+
+    blocks
 }
 
 fn now_unix() -> u64 {
