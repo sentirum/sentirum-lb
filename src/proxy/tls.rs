@@ -402,6 +402,188 @@ impl DynamicCertStore {
     }
 }
 
+#[derive(Default)]
+struct ClientCaSnapshot {
+    store: Option<X509Store>,
+    entry_names: Vec<String>,
+    certificates: Vec<DynamicClientCaCertificateStatus>,
+}
+
+pub struct DynamicClientCaStore {
+    snapshot: ArcSwap<ClientCaSnapshot>,
+    status: RwLock<DynamicClientCaStatus>,
+    ca_upgrade_cn: String,
+}
+
+impl DynamicClientCaStore {
+    pub fn new(ca_upgrade_cn: String) -> Self {
+        Self {
+            snapshot: ArcSwap::from_pointee(ClientCaSnapshot::default()),
+            status: RwLock::new(DynamicClientCaStatus::default()),
+            ca_upgrade_cn,
+        }
+    }
+
+    pub fn status(&self) -> DynamicClientCaStatus {
+        self.status
+            .read()
+            .expect("client ca status poisoned")
+            .clone()
+    }
+
+    pub async fn refresh_from_consul(
+        &self,
+        client: &ConsulClient,
+        cert_prefix: &str,
+        index: u64,
+    ) -> Result<u64, TlsError> {
+        let (entries, new_index) = client
+            .watch_kv_basenames(cert_prefix, index)
+            .await
+            .map_err(|e| TlsError::ConfigError(e.to_string()))?;
+        self.apply_consul_snapshot(entries, new_index);
+        Ok(new_index)
+    }
+
+    pub fn load_from_path(&self, path: &str) -> Result<(), TlsError> {
+        let entries = load_pem_entries_from_path(path)?;
+        self.apply_snapshot(entries, 0);
+        let status = self.status();
+        if status.loaded_entries.is_empty() {
+            return Err(TlsError::ConfigError(
+                status.last_error.unwrap_or_else(|| {
+                    "no valid client CA certificates loaded from path".to_string()
+                }),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn apply_consul_snapshot(&self, entries: BTreeMap<String, Vec<u8>>, consul_index: u64) {
+        self.apply_snapshot(entries, consul_index);
+    }
+
+    fn apply_snapshot(&self, entries: BTreeMap<String, Vec<u8>>, consul_index: u64) {
+        if entries.is_empty() {
+            let mut status = self.status.write().expect("client ca status poisoned");
+            status.last_consul_index = consul_index;
+            status.last_error = Some(
+                "received empty client CA snapshot; keeping last known good store".to_string(),
+            );
+            tracing::warn!(consul_index, "Received empty client CA snapshot; keeping last known good store");
+            return;
+        }
+
+        match ClientCaSnapshot::from_entries(&entries, &self.ca_upgrade_cn) {
+            Ok((next_snapshot, warnings)) => {
+                if next_snapshot.store.is_none() {
+                    let mut status = self.status.write().expect("client ca status poisoned");
+                    status.last_consul_index = consul_index;
+                    status.last_error = Some(
+                        warnings.first().cloned().unwrap_or_else(|| {
+                            "no valid client CA certificates remain after reload; keeping last known good store".to_string()
+                        }),
+                    );
+                    tracing::error!(consul_index, "No valid client CA certificates remain after reload; keeping last known good store");
+                    return;
+                }
+
+                let loaded_entries = next_snapshot.entry_names.clone();
+                let certificates = next_snapshot.certificates.clone();
+                self.snapshot.store(Arc::new(next_snapshot));
+
+                let mut status = self.status.write().expect("client ca status poisoned");
+                status.loaded_entries = loaded_entries.clone();
+                status.certificates = certificates;
+                status.last_consul_index = consul_index;
+                status.last_reload_unix = Some(now_unix());
+                status.last_error = if warnings.is_empty() {
+                    None
+                } else {
+                    Some(warnings.join(" | "))
+                };
+
+                tracing::info!(
+                    consul_index,
+                    client_ca_count = loaded_entries.len(),
+                    client_ca_entries = ?loaded_entries,
+                    "Applied client CA snapshot"
+                );
+                for warning in warnings {
+                    tracing::warn!(consul_index, warning = %warning, "Applied client CA snapshot with warnings");
+                }
+            }
+            Err(error) => {
+                let mut status = self.status.write().expect("client ca status poisoned");
+                status.last_consul_index = consul_index;
+                status.last_error = Some(error.to_string());
+                tracing::error!(consul_index, error = %error, "Failed to apply client CA snapshot; keeping last known good store");
+            }
+        }
+    }
+
+    fn current_store(&self) -> Option<Arc<ClientCaSnapshot>> {
+        let snapshot = self.snapshot.load_full();
+        snapshot.store.as_ref()?;
+        Some(snapshot)
+    }
+}
+
+impl ClientCaSnapshot {
+    fn from_entries(
+        entries: &BTreeMap<String, Vec<u8>>,
+        ca_upgrade_cn: &str,
+    ) -> Result<(Self, Vec<String>), TlsError> {
+        let mut builder = pingora::tls::x509::store::X509StoreBuilder::new()
+            .map_err(|e| TlsError::ConfigError(format!("failed to create client CA store: {e}")))?;
+        let mut warnings = Vec::new();
+        let mut entry_names = Vec::new();
+        let mut certificates = Vec::new();
+
+        for (entry_name, pem_bytes) in entries {
+            if let Err(warning) = validate_entry_size(entry_name, pem_bytes.len()) {
+                warnings.push(warning);
+                continue;
+            }
+            match parse_client_ca_certificates(entry_name, pem_bytes, ca_upgrade_cn) {
+                Ok(certs) => {
+                    if certs.is_empty() {
+                        warnings.push(format!(
+                            "client CA entry '{entry_name}' contains no valid CERTIFICATE blocks"
+                        ));
+                        continue;
+                    }
+                    entry_names.push(entry_name.clone());
+                    for cert in certs {
+                        certificates.push(client_ca_certificate_status(entry_name, &cert));
+                        builder.add_cert(cert).map_err(|e| {
+                            TlsError::ConfigError(format!(
+                                "failed to add client CA cert from '{entry_name}' to store: {e}"
+                            ))
+                        })?;
+                    }
+                }
+                Err(error) => warnings.push(error.to_string()),
+            }
+        }
+
+        let store = if entry_names.is_empty() {
+            None
+        } else {
+            Some(builder.build())
+        };
+
+        Ok((
+            Self {
+                store,
+                entry_names,
+                certificates,
+            },
+            warnings,
+        ))
+    }
+}
+
 struct LoadedCertificate {
     entry_name: String,
     leaf: X509,
@@ -741,6 +923,122 @@ fn parse_private_key(input: &[u8]) -> Result<PKey<Private>, TlsError> {
     ))
 }
 
+fn parse_client_ca_certificates(
+    entry_name: &str,
+    input: &[u8],
+    ca_upgrade_cn: &str,
+) -> Result<Vec<X509>, TlsError> {
+    let text = std::str::from_utf8(input).map_err(|e| {
+        TlsError::ConfigError(format!(
+            "client CA entry '{entry_name}' is not valid UTF-8 PEM: {e}"
+        ))
+    })?;
+
+    let mut certs = Vec::new();
+    for block in pem_blocks(text) {
+        if block.kind == "CERTIFICATE" {
+            let cert = X509::from_pem(block.pem.as_bytes()).map_err(|e| {
+                TlsError::ConfigError(format!(
+                    "invalid client CA CERTIFICATE block in '{entry_name}': {e}"
+                ))
+            })?;
+            maybe_upgrade_ca_certificate(&cert, ca_upgrade_cn);
+            certs.push(cert);
+        }
+    }
+    Ok(certs)
+}
+
+fn load_pem_entries_from_path(path: &str) -> Result<BTreeMap<String, Vec<u8>>, TlsError> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| TlsError::ConfigError(format!("failed to stat client CA path '{path}': {e}")))?;
+
+    let mut entries = BTreeMap::new();
+    if metadata.is_dir() {
+        let mut dir_entries = std::fs::read_dir(path).map_err(|e| {
+            TlsError::ConfigError(format!("failed to read client CA directory '{path}': {e}"))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| TlsError::ConfigError(format!("failed to enumerate client CA directory '{path}': {e}")))?;
+        dir_entries.sort_by_key(|entry| entry.file_name());
+
+        for entry in dir_entries {
+            let file_type = entry.file_type().map_err(|e| {
+                TlsError::ConfigError(format!(
+                    "failed to inspect client CA directory entry '{}': {e}",
+                    entry.path().display()
+                ))
+            })?;
+            if !file_type.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let bytes = std::fs::read(entry.path()).map_err(|e| {
+                TlsError::ConfigError(format!(
+                    "failed to read client CA file '{}': {e}",
+                    entry.path().display()
+                ))
+            })?;
+            entries.insert(name, bytes);
+        }
+    } else {
+        let name = Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("client-ca.pem")
+            .to_string();
+        let bytes = std::fs::read(path).map_err(|e| {
+            TlsError::ConfigError(format!("failed to read client CA file '{path}': {e}"))
+        })?;
+        entries.insert(name, bytes);
+    }
+
+    Ok(entries)
+}
+
+fn client_ca_certificate_status(
+    entry_name: &str,
+    cert: &X509,
+) -> DynamicClientCaCertificateStatus {
+    DynamicClientCaCertificateStatus {
+        entry_name: entry_name.to_string(),
+        subject: certificate_subject_string(cert),
+        common_name: first_subject_value(cert, Nid::COMMONNAME),
+        organization: first_subject_value(cert, Nid::ORGANIZATIONNAME),
+        organizational_unit: first_subject_value(cert, Nid::ORGANIZATIONALUNITNAME),
+    }
+}
+
+fn first_subject_value(cert: &X509, nid: Nid) -> Option<String> {
+    cert.subject_name()
+        .entries_by_nid(nid)
+        .find_map(|entry| entry.data().as_utf8().ok().map(|value| value.to_string()))
+}
+
+fn certificate_subject_string(cert: &X509) -> String {
+    let mut parts = Vec::new();
+    if let Some(cn) = first_subject_value(cert, Nid::COMMONNAME) {
+        parts.push(format!("CN={cn}"));
+    }
+    if let Some(org) = first_subject_value(cert, Nid::ORGANIZATIONNAME) {
+        parts.push(format!("O={org}"));
+    }
+    if let Some(ou) = first_subject_value(cert, Nid::ORGANIZATIONALUNITNAME) {
+        parts.push(format!("OU={ou}"));
+    }
+    if parts.is_empty() {
+        "<unknown-subject>".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+fn maybe_upgrade_ca_certificate(_cert: &X509, _ca_upgrade_cn: &str) {
+    // OpenSSL/X509 objects exposed through Pingora do not currently offer safe mutable
+    // CA-flag rewriting like Fabio's Go path. Keep the config surface for parity and
+    // future extension, but treat the loaded certificate as-is for now.
+}
+
 struct PemBlock<'a> {
     kind: &'a str,
     pem: &'a str,
@@ -829,15 +1127,65 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
-struct ConsulCertSelector {
-    store: Arc<DynamicCertStore>,
+enum ServerCertificateSource {
+    Static(Arc<LoadedCertificate>),
+    Dynamic(Arc<DynamicCertStore>),
+}
+
+impl ServerCertificateSource {
+    fn select(&self, server_name: Option<&str>) -> Option<Arc<LoadedCertificate>> {
+        match self {
+            Self::Static(cert) => Some(cert.clone()),
+            Self::Dynamic(store) => store.select_for_server_name(server_name),
+        }
+    }
+}
+
+struct ClientAuthState {
+    mode: ClientAuthMode,
+    store: Arc<DynamicClientCaStore>,
+}
+
+impl ClientAuthState {
+    fn configure_ssl(&self, ssl: &mut pingora::tls::ssl::SslRef) -> Result<(), TlsError> {
+        let Some(verify_mode) = self.mode.verify_mode() else {
+            return Ok(());
+        };
+
+        let Some(snapshot) = self.store.current_store() else {
+            ssl.set_verify(ssl::SslVerifyMode::NONE);
+            return Ok(());
+        };
+
+        let verify_store = snapshot.store.as_ref().ok_or_else(|| {
+            TlsError::ConfigError("client CA snapshot missing verify store".to_string())
+        })?;
+
+        ext::ssl_set_verify_cert_store(ssl, verify_store).map_err(|e| {
+            TlsError::ConfigError(format!("failed to attach client CA verify store: {e}"))
+        })?;
+        ssl.set_verify(verify_mode);
+        Ok(())
+    }
+}
+
+struct TlsSelector {
+    server_certs: ServerCertificateSource,
+    client_auth: Option<ClientAuthState>,
 }
 
 #[async_trait]
-impl pingora::listeners::TlsAccept for ConsulCertSelector {
+impl pingora::listeners::TlsAccept for TlsSelector {
     async fn certificate_callback(&self, ssl: &mut pingora::tls::ssl::SslRef) {
+        if let Some(client_auth) = &self.client_auth
+            && let Err(error) = client_auth.configure_ssl(ssl)
+        {
+            tracing::error!(%error, "Failed to configure client certificate verification during handshake");
+            return;
+        }
+
         let server_name = ssl.servername(ssl::NameType::HOST_NAME);
-        let Some(cert) = self.store.select_for_server_name(server_name) else {
+        let Some(cert) = self.server_certs.select(server_name) else {
             tracing::debug!(server_name = ?server_name, "No TLS certificate matched requested SNI");
             return;
         };
@@ -861,8 +1209,40 @@ impl pingora::listeners::TlsAccept for ConsulCertSelector {
     }
 }
 
-pub fn build_dynamic_tls_settings(store: Arc<DynamicCertStore>) -> Result<TlsSettings, TlsError> {
-    let callbacks = Box::new(ConsulCertSelector { store });
+pub fn load_static_certificate(config: &TlsCertConfig) -> Result<Arc<LoadedCertificate>, TlsError> {
+    let cert_pem = std::fs::read(&config.cert_path)
+        .map_err(|e| TlsError::CertReadError(config.cert_path.clone(), e.to_string()))?;
+    let key_pem = std::fs::read(&config.key_path)
+        .map_err(|e| TlsError::KeyReadError(config.key_path.clone(), e.to_string()))?;
+    Ok(Arc::new(LoadedCertificate::from_pem_pair(
+        "static-file",
+        &cert_pem,
+        &key_pem,
+    )?))
+}
+
+pub fn build_tls_settings(
+    server_certs: Arc<DynamicCertStore>,
+    client_auth: Option<(ClientAuthMode, Arc<DynamicClientCaStore>)>,
+) -> Result<TlsSettings, TlsError> {
+    build_tls_settings_from_source(ServerCertificateSource::Dynamic(server_certs), client_auth)
+}
+
+pub fn build_static_tls_settings(
+    cert: Arc<LoadedCertificate>,
+    client_auth: Option<(ClientAuthMode, Arc<DynamicClientCaStore>)>,
+) -> Result<TlsSettings, TlsError> {
+    build_tls_settings_from_source(ServerCertificateSource::Static(cert), client_auth)
+}
+
+fn build_tls_settings_from_source(
+    server_certs: ServerCertificateSource,
+    client_auth: Option<(ClientAuthMode, Arc<DynamicClientCaStore>)>,
+) -> Result<TlsSettings, TlsError> {
+    let callbacks = Box::new(TlsSelector {
+        server_certs,
+        client_auth: client_auth.map(|(mode, store)| ClientAuthState { mode, store }),
+    });
     TlsSettings::with_callbacks(callbacks).map_err(|e| TlsError::ConfigError(e.to_string()))
 }
 
