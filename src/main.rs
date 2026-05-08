@@ -470,6 +470,12 @@ fn main() {
         server.add_service(consul_service);
     }
 
+    if let Some(tls_service_cfg) = tls_background_service {
+        let mut tls_service = background_service("tls cert watcher", tls_service_cfg);
+        tls_service.threads = Some(1);
+        server.add_service(tls_service);
+    }
+
     let mut admin_service = background_service(
         "admin api",
         AdminBackgroundService {

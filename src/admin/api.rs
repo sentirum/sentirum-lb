@@ -111,6 +111,13 @@ async fn metrics_handler() -> impl axum::response::IntoResponse {
 }
 
 async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_json::Value> {
+    let tls_source = match crate::proxy::tls::TlsMode::resolve(&state.config.tls) {
+        Ok(Some(crate::proxy::tls::TlsMode::File(_))) => "file",
+        Ok(Some(crate::proxy::tls::TlsMode::ConsulKv(_))) => "consul_kv",
+        Ok(None) => "disabled",
+        Err(_) => "invalid",
+    };
+
     axum::Json(serde_json::json!({
         "server": {
             "listen": state.config.server.listen,
@@ -135,6 +142,14 @@ async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
             "upstream_h2_ping_interval": state.config.proxy.upstream_h2_ping_interval,
             "pool_size": state.config.proxy.pool_size,
             "max_connections": state.config.proxy.max_connections,
+        },
+        "tls": {
+            "source": tls_source,
+            "listen": state.config.tls.listen,
+            "strict_sni": state.config.tls.strict_sni,
+            "cert_path": state.config.tls.cert_path,
+            "key_path": state.config.tls.key_path,
+            "consul_cert_prefix": state.config.tls.consul_cert_prefix,
         },
     }))
 }
