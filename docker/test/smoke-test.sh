@@ -96,7 +96,7 @@ for r in json.load(sys.stdin)['routes']:
 # ─── Metrics ────────────────────────────────────────────────────────
 header "Prometheus Metrics"
 METRICS=$(q -H "Authorization: Bearer ${TOKEN}" "${ADMIN}/admin/metrics")
-for metric in sentirum_requests_total sentirum_active_connections sentirum_route_count; do
+for metric in sentirum_lb_requests_total sentirum_lb_active_connections sentirum_lb_route_count; do
   if echo "$METRICS" | grep -q "$metric"; then
     echo "  ✅ $metric present"; PASS=$((PASS + 1))
   else
