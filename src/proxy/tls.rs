@@ -617,7 +617,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         )
         .expect("cert should build");
-        (cert.cert.pem(), cert.signing_key.serialize_pem())
+        (cert.cert.pem(), cert.key_pair.serialize_pem())
     }
 
     #[test]
