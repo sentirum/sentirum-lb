@@ -866,4 +866,29 @@ mod tests {
         assert_eq!(read_server_name(&client_hello).as_deref(), Some("google.com"));
         assert!(read_server_name(b"not a client hello").is_none());
     }
+
+    #[tokio::test]
+    async fn write_proxy_header_formats_v1_line() {
+        let downstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let downstream_addr = downstream_listener.local_addr().unwrap();
+        let downstream_accept = tokio::spawn(async move { downstream_listener.accept().await.unwrap().0 });
+        let _downstream_client = TcpStream::connect(downstream_addr).await.unwrap();
+        let downstream_server = downstream_accept.await.unwrap();
+
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_accept = tokio::spawn(async move { upstream_listener.accept().await.unwrap().0 });
+        let mut upstream_client = TcpStream::connect(upstream_addr).await.unwrap();
+        let mut upstream_server = upstream_accept.await.unwrap();
+
+        write_proxy_header(&mut upstream_client, &downstream_server)
+            .await
+            .unwrap();
+
+        let mut buf = [0_u8; 128];
+        let n = upstream_server.read(&mut buf).await.unwrap();
+        let header = String::from_utf8_lossy(&buf[..n]).to_string();
+        assert!(header.starts_with("PROXY TCP4 127.0.0.1 127.0.0.1 "));
+        assert!(header.ends_with("\r\n"));
+    }
 }
