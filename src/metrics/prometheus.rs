@@ -679,6 +679,20 @@ mod tests {
         let metrics = Metrics::new();
         metrics.record_protocol_request(true, true, true);
         metrics.record_request(200, 5000);
+        metrics.record_cert_reload_success();
+        metrics.record_cert_reload_error();
+        metrics.record_cert_reload_skipped("oversize");
+        metrics.record_cert_reload_skipped("invalid");
+        metrics.record_cert_reload_skipped("empty");
+        metrics.record_route_reload("service");
+        metrics.set_consul_watcher_backoff_seconds("tls", 8);
+        metrics.set_consul_watcher_last_index("tls", 42);
+        metrics.record_consul_watcher_error("tls");
+        metrics.set_cert_expiry_entries(vec![CertificateExpiryMetric {
+            entry: "example.com.pem".to_string(),
+            cn: "example.com".to_string(),
+            not_after_unix: 1_700_000_000,
+        }]);
         let output = metrics.render();
         assert!(output.contains("sentirum_lb_requests_total 1"));
         assert!(output.contains("sentirum_lb_request_duration_seconds_bucket"));
@@ -702,6 +716,15 @@ mod tests {
         assert!(output.contains("sentirum_lb_websocket_requests_total 1"));
         assert!(output.contains("sentirum_lb_process_resident_memory_bytes"));
         assert!(output.contains("sentirum_lb_process_open_fds"));
+        assert!(output.contains("sentirum_lb_cert_reload_total 1"));
+        assert!(output.contains("sentirum_lb_cert_reload_errors_total 1"));
+        assert!(output.contains("sentirum_lb_cert_reload_skipped_total{reason=\"oversize\"} 1"));
+        assert!(output.contains("sentirum_lb_route_reload_total{source=\"service\"} 1"));
+        assert!(output.contains("sentirum_lb_consul_watcher_backoff_seconds{watcher=\"tls\"} 8"));
+        assert!(output.contains("sentirum_lb_consul_watcher_last_index{watcher=\"tls\"} 42"));
+        assert!(output.contains("sentirum_lb_consul_watcher_errors_total{watcher=\"tls\"} 1"));
+        assert!(output.contains("sentirum_lb_cert_min_expiry_unix_seconds 1700000000"));
+        assert!(output.contains("sentirum_lb_cert_expiry_unix_seconds{entry=\"example.com.pem\",cn=\"example.com\"} 1700000000"));
     }
 
     #[test]
@@ -712,6 +735,33 @@ mod tests {
         assert_eq!(metrics.grpc_requests_total.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.grpc_web_requests_total.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.websocket_requests_total.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_cert_expiry_entries_updates_min_expiry() {
+        let metrics = Metrics::new();
+        metrics.set_cert_expiry_entries(vec![
+            CertificateExpiryMetric {
+                entry: "b.pem".to_string(),
+                cn: "b.example.com".to_string(),
+                not_after_unix: 200,
+            },
+            CertificateExpiryMetric {
+                entry: "a.pem".to_string(),
+                cn: "a.example.com".to_string(),
+                not_after_unix: 100,
+            },
+        ]);
+
+        assert_eq!(metrics.cert_min_expiry_unix_seconds.load(Ordering::Relaxed), 100);
+        assert_eq!(
+            metrics
+                .cert_expiry_entries
+                .read()
+                .expect("cert expiry entries poisoned")
+                .len(),
+            2
+        );
     }
 
     #[test]

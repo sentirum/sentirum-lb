@@ -80,7 +80,7 @@ impl ManagedRouteTable {
         });
         let mut registry = (**self.registry.load()).clone();
         registry.set_static(mark_sources(defs.to_vec(), RouteSource::Static));
-        self.rebuild_and_swap(&registry);
+        self.rebuild_and_swap(&registry, "static");
     }
 
     /// Update KV routes
@@ -91,7 +91,7 @@ impl ManagedRouteTable {
         });
         let mut registry = (**self.registry.load()).clone();
         registry.update_kv(mark_sources(defs, RouteSource::ConsulKv));
-        self.rebuild_and_swap(&registry);
+        self.rebuild_and_swap(&registry, "kv");
     }
 
     /// Update service routes
@@ -102,20 +102,22 @@ impl ManagedRouteTable {
         });
         let mut registry = (**self.registry.load()).clone();
         registry.update_services(mark_sources(defs, RouteSource::ConsulService));
-        self.rebuild_and_swap(&registry);
+        self.rebuild_and_swap(&registry, "service");
     }
 
     /// Rebuild table from registry and atomically swap
-    fn rebuild_and_swap(&self, registry: &RouteRegistry) {
+    fn rebuild_and_swap(&self, registry: &RouteRegistry, source: &str) {
         let all_defs = registry.get_all();
         let table = Table::from_definitions_with_stats(&all_defs, self.inner.stats_registry());
         let route_count = table.route_count();
         let target_count = table.target_count();
         self.registry.store(Arc::new(registry.clone()));
         self.inner.swap(table);
+        crate::metrics::prometheus::global().record_route_reload(source);
         tracing::info!(
             route_count,
             target_count,
+            source,
             is_empty = registry.is_empty(),
             "Route table updated"
         );

@@ -35,11 +35,16 @@ impl ServiceMonitor {
         let mut last_index: u64 = 0;
         let tag_prefix = self.config.tag_prefix.clone();
         let mut backoff_secs: u64 = 1;
+        let metrics = crate::metrics::prometheus::global();
+        metrics.set_consul_watcher_backoff_seconds("services", 0);
+        metrics.set_consul_watcher_last_index("services", 0);
 
         loop {
             match self.client.get_health_checks(last_index).await {
                 Ok((checks, new_index)) => {
                     backoff_secs = 1;
+                    metrics.set_consul_watcher_backoff_seconds("services", 0);
+                    metrics.set_consul_watcher_last_index("services", new_index);
                     if new_index != last_index || !checks.is_empty() {
                         last_index = new_index;
                         let route_defs = self.process_checks(&checks, &tag_prefix).await;
@@ -54,6 +59,8 @@ impl ServiceMonitor {
                     }
                 }
                 Err(e) => {
+                    metrics.record_consul_watcher_error("services");
+                    metrics.set_consul_watcher_backoff_seconds("services", backoff_secs);
                     tracing::warn!(backoff_secs, error = %e, "Consul health check error; retrying");
                     let _ = updates.send(RouteUpdate::Error(e.to_string())).await;
                     tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
@@ -306,11 +313,16 @@ impl KVWatcher {
         let mut last_index: u64 = 0;
         let kv_path = self.config.kv_prefix.clone();
         let mut backoff_secs: u64 = 1;
+        let metrics = crate::metrics::prometheus::global();
+        metrics.set_consul_watcher_backoff_seconds("kv", 0);
+        metrics.set_consul_watcher_last_index("kv", 0);
 
         loop {
             match self.client.watch_kv(&kv_path, last_index).await {
                 Ok((value, new_index)) => {
                     backoff_secs = 1;
+                    metrics.set_consul_watcher_backoff_seconds("kv", 0);
+                    metrics.set_consul_watcher_last_index("kv", new_index);
                     if new_index != last_index {
                         last_index = new_index;
                         let update = RouteUpdate::Manual(value.unwrap_or_default());
@@ -322,6 +334,8 @@ impl KVWatcher {
                     }
                 }
                 Err(e) => {
+                    metrics.record_consul_watcher_error("kv");
+                    metrics.set_consul_watcher_backoff_seconds("kv", backoff_secs);
                     tracing::warn!(backoff_secs, error = %e, "Consul KV error; retrying");
                     let _ = updates.send(RouteUpdate::Error(e.to_string())).await;
                     tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
