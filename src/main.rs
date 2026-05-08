@@ -7,6 +7,7 @@ use pingora::services::background::{BackgroundService, background_service};
 use sentirum_lb::config::Config;
 use sentirum_lb::consul::{ConsulClient, ConsulConfig, ConsulWatcher, RouteUpdate};
 use sentirum_lb::proxy::handler::SentirumProxy;
+use sentirum_lb::proxy::tcp::TcpBackgroundService;
 use sentirum_lb::proxy::tls::{
     DynamicCertStore, TlsMode, build_dynamic_tls_settings, tls_listen_addr,
 };
@@ -268,6 +269,7 @@ fn main() {
             proxy: sentirum_lb::config::ProxyConfig::default(),
             logging: sentirum_lb::config::LoggingConfig::default(),
             tls: sentirum_lb::config::TlsConfig::default(),
+            tcp: sentirum_lb::config::TcpConfig::default(),
         }
     } else {
         match toml::from_str::<Config>(&config_content) {
@@ -515,6 +517,25 @@ fn main() {
         let mut tls_service = background_service("tls cert watcher", tls_service_cfg);
         tls_service.threads = Some(1);
         server.add_service(tls_service);
+    }
+
+    let tcp_mode = match sentirum_lb::proxy::tcp::resolve_tcp_mode(shared_config.as_ref()) {
+        Ok(mode) => mode,
+        Err(error) => {
+            tracing::error!(%error, "Invalid TCP configuration; TCP proxy disabled");
+            sentirum_lb::proxy::tcp::TcpMode::Disabled
+        }
+    };
+    if tcp_mode != sentirum_lb::proxy::tcp::TcpMode::Disabled {
+        let mut tcp_service = background_service(
+            "tcp proxy",
+            TcpBackgroundService {
+                route_table: managed_table.clone(),
+                config: shared_config.clone(),
+            },
+        );
+        tcp_service.threads = Some(1);
+        server.add_service(tcp_service);
     }
 
     let mut admin_service = background_service(

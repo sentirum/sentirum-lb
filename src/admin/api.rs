@@ -180,6 +180,11 @@ async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
             "key_path": state.config.tls.key_path,
             "consul_cert_prefix": state.config.tls.consul_cert_prefix,
         },
+        "tcp": {
+            "mode": state.config.tcp.mode,
+            "listen": state.config.tcp.listen,
+            "refresh": state.config.tcp.refresh,
+        },
     }))
 }
 
@@ -289,6 +294,7 @@ mod tests {
             proxy: ProxyConfig::default(),
             logging: LoggingConfig::default(),
             tls: TlsConfig::default(),
+            tcp: TcpConfig::default(),
         })
     }
 
