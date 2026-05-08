@@ -65,7 +65,7 @@ pub struct AdminState {
     pub sessions: Arc<RwLock<HashMap<String, SessionEntry>>>,
     /// Login rate limiter: username -> (attempt count, window start instant).
     pub login_attempts: Arc<dashmap::DashMap<String, (u32, std::time::Instant)>>,
-
+    }
 /// Health check response
 #[derive(serde::Serialize)]
 pub struct HealthResponse {
