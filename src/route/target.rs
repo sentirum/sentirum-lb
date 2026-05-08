@@ -1317,6 +1317,30 @@ mod tests {
         let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 18, 0, 1));
         assert!(is_ip_always_blocked(&ip));
     }
+
+    #[test]
+    fn test_ssrf_blocks_benchmark_range_upper() {
+        // 198.19.x.x is also in RFC 2544 benchmarking range
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 19, 255, 1));
+        assert!(is_ip_always_blocked(&ip));
+    }
+
+    #[test]
+    fn test_dns_cache_eviction_enforced() {
+        let cache = DnsCache::with_ttl(300, 10);
+        // Fill beyond DNS_CACHE_MAX_ENTRIES
+        for i in 0..(DNS_CACHE_MAX_ENTRIES + 50) {
+            let addr: SocketAddr = format!("10.0.{:{}}.{:{}}", i / 256, i % 256)
+                .parse()
+                .unwrap();
+            cache.store(format!("host-{i}"), vec![addr]);
+        }
+        assert!(
+            cache.inner.len() <= DNS_CACHE_MAX_ENTRIES,
+            "cache should be capped at DNS_CACHE_MAX_ENTRIES, got {}",
+            cache.inner.len()
+        );
+    }
 }
 
 // Per-target statistics for admin dashboard and Prometheus labels.
