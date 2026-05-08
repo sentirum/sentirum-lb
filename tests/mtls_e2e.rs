@@ -1,5 +1,4 @@
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{Json, Router, extract::State, routing::get};
@@ -15,7 +14,6 @@ use tokio::time::sleep;
 struct TestRuntime {
     _tempdir: TempDir,
     child: Child,
-    http_port: u16,
     tls_port: u16,
     proxy_cert_pem: String,
 }
@@ -255,7 +253,6 @@ client_ca_upgrade_cn = "{client_ca_upgrade_cn}"
     TestRuntime {
         _tempdir: tempdir,
         child,
-        http_port,
         tls_port,
         proxy_cert_pem,
     }
