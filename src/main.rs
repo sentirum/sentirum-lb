@@ -7,7 +7,7 @@ use pingora::services::background::{BackgroundService, background_service};
 use sentirum_lb::config::Config;
 use sentirum_lb::consul::{ConsulClient, ConsulConfig, ConsulWatcher, RouteUpdate};
 use sentirum_lb::proxy::handler::SentirumProxy;
-use sentirum_lb::proxy::tcp::TcpBackgroundService;
+use sentirum_lb::proxy::tcp::{TcpBackgroundService, TcpMode};
 use sentirum_lb::proxy::tls::{
     DynamicCertStore, TlsMode, build_dynamic_tls_settings, tls_listen_addr,
 };
@@ -62,6 +62,12 @@ fn load_static_routes(path: &str) -> Result<String, Box<dyn std::error::Error>> 
     tracing::info!(path, "Loading static routes file");
     let content = std::fs::read_to_string(path)?;
     Ok(content)
+}
+
+fn allocate_loopback_listen_addr() -> Result<String, std::io::Error> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    Ok(addr.to_string())
 }
 
 /// Handle route updates from Consul watcher
@@ -319,6 +325,25 @@ fn main() {
         }
     }
 
+    let mut tcp_mode = match sentirum_lb::proxy::tcp::resolve_tcp_mode(&config) {
+        Ok(mode) => mode,
+        Err(error) => {
+            tracing::error!(%error, "Invalid TCP configuration; TCP proxy disabled");
+            TcpMode::Disabled
+        }
+    };
+    let public_tls_listen = tls_listen_addr(&config.server.listen, &config.tls.listen);
+    let mut tcp_https_fallback_addr = None;
+    if tcp_mode == TcpMode::HttpsTcpSni {
+        match allocate_loopback_listen_addr() {
+            Ok(addr) => tcp_https_fallback_addr = Some(addr),
+            Err(error) => {
+                tracing::error!(%error, "Failed to allocate internal HTTPS fallback listener; disabling https+tcp+sni mode");
+                tcp_mode = TcpMode::Disabled;
+            }
+        }
+    }
+
     // Build Pingora server
     let mut server =
         pingora::server::Server::new(Some(pingora::server::configuration::Opt::default()))
@@ -359,6 +384,7 @@ fn main() {
     // Add TLS listener if configured
     let mut tls_background_service: Option<ConsulTlsBackgroundService> = None;
     let mut tls_store_for_admin: Option<Arc<DynamicCertStore>> = None;
+    let mut https_fallback_ready = false;
     match TlsMode::resolve(&config.tls) {
         Ok(Some(TlsMode::File(tls))) => match tls.validate() {
             Ok(()) => {
