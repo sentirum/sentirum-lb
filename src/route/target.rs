@@ -317,6 +317,14 @@ impl Target {
         self.parsed_protocol == UpstreamProtocol::Tcp
     }
 
+    /// Whether to prepend a PROXY protocol v1 header on upstream TCP connects.
+    pub fn proxy_proto(&self) -> bool {
+        self.opts
+            .get("pxyproto")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+    }
+
     /// Whether this is an HTTPS upstream target.
     pub fn is_https(&self) -> bool {
         self.parsed_protocol == UpstreamProtocol::Https
@@ -457,6 +465,14 @@ mod tests {
         t.opts
             .insert("ssrfskipverify".to_string(), "true".to_string());
         assert!(t.ssrf_skip_verify());
+    }
+
+    #[test]
+    fn test_proxy_proto_opt() {
+        let mut t = Target::new("svc".into(), "tcp://10.0.0.1:4222".into());
+        assert!(!t.proxy_proto());
+        t.opts.insert("pxyproto".to_string(), "true".to_string());
+        assert!(t.proxy_proto());
     }
 
     #[test]
