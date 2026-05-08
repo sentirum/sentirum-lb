@@ -9,13 +9,13 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use pingora::listeners::tls::TlsSettings;
 use pingora::tls::{
-    asn1::Asn1Time,
     ext,
     nid::Nid,
     pkey::{PKey, Private},
     ssl,
     x509::X509,
 };
+use time::{Date, Month, PrimitiveDateTime, Time};
 use regex::Regex;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -567,15 +567,6 @@ fn extract_certificate_names(cert: &X509) -> Vec<String> {
     let mut names = Vec::new();
     let mut seen = HashSet::new();
 
-    for entry in cert.subject_name().entries_by_nid(Nid::COMMONNAME) {
-        if let Ok(value) = entry.data().as_utf8() {
-            let normalized = normalize_dns_name(value.as_ref());
-            if !normalized.is_empty() && seen.insert(normalized.clone()) {
-                names.push(normalized);
-            }
-        }
-    }
-
     if let Some(sans) = cert.subject_alt_names() {
         for san in sans {
             if let Some(dns) = san.dnsname() {
@@ -583,6 +574,15 @@ fn extract_certificate_names(cert: &X509) -> Vec<String> {
                 if !normalized.is_empty() && seen.insert(normalized.clone()) {
                     names.push(normalized);
                 }
+            }
+        }
+    }
+
+    for entry in cert.subject_name().entries_by_nid(Nid::COMMONNAME) {
+        if let Ok(value) = entry.data().as_utf8() {
+            let normalized = normalize_dns_name(value.as_ref());
+            if !normalized.is_empty() && seen.insert(normalized.clone()) {
+                names.push(normalized);
             }
         }
     }
@@ -668,11 +668,48 @@ fn pem_blocks(input: &str) -> Vec<PemBlock<'_>> {
     blocks
 }
 
-fn asn1_time_to_unix_seconds(time: &pingora::tls::asn1::Asn1TimeRef) -> Option<u64> {
-    let epoch = Asn1Time::from_unix(0).ok()?;
-    let diff = epoch.diff(time).ok()?;
-    let total = i64::from(diff.days) * 86_400 + i64::from(diff.secs);
-    u64::try_from(total).ok()
+fn asn1_time_to_unix_seconds(time: &impl std::fmt::Display) -> Option<u64> {
+    let display = time.to_string();
+    let mut parts = display.split_whitespace();
+    let month = parse_month(parts.next()?)?;
+    let day = parts.next()?.parse::<u8>().ok()?;
+    let hms = parts.next()?;
+    let year = parts.next()?.parse::<i32>().ok()?;
+    let _gmt = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    let mut hms_parts = hms.split(':');
+    let hour = hms_parts.next()?.parse::<u8>().ok()?;
+    let minute = hms_parts.next()?.parse::<u8>().ok()?;
+    let second = hms_parts.next()?.parse::<u8>().ok()?;
+    if hms_parts.next().is_some() {
+        return None;
+    }
+
+    let date = Date::from_calendar_date(year, month, day).ok()?;
+    let time = Time::from_hms(hour, minute, second).ok()?;
+    let unix = PrimitiveDateTime::new(date, time).assume_utc().unix_timestamp();
+    u64::try_from(unix).ok()
+}
+
+fn parse_month(value: &str) -> Option<Month> {
+    match value {
+        "Jan" => Some(Month::January),
+        "Feb" => Some(Month::February),
+        "Mar" => Some(Month::March),
+        "Apr" => Some(Month::April),
+        "May" => Some(Month::May),
+        "Jun" => Some(Month::June),
+        "Jul" => Some(Month::July),
+        "Aug" => Some(Month::August),
+        "Sep" => Some(Month::September),
+        "Oct" => Some(Month::October),
+        "Nov" => Some(Month::November),
+        "Dec" => Some(Month::December),
+        _ => None,
+    }
 }
 
 fn now_unix() -> u64 {
