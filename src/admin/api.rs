@@ -8,7 +8,7 @@
 //! - `GET /admin/certs` — Runtime TLS certificate status
 
 use crate::config::Config;
-use crate::proxy::tls::DynamicCertStore;
+use crate::proxy::tls::{DynamicCertStore, DynamicClientCaStore};
 use crate::route::registry::ManagedRouteTable;
 use axum::Router;
 use axum::extract::State;
@@ -24,6 +24,7 @@ pub struct AdminState {
     pub config: Arc<Config>,
     pub route_table: Arc<ManagedRouteTable>,
     pub tls_store: Option<Arc<DynamicCertStore>>,
+    pub client_ca_store: Option<Arc<DynamicClientCaStore>>,
 }
 
 /// Health check response
@@ -123,6 +124,7 @@ async fn certs_handler(State(state): State<AdminState>) -> axum::Json<serde_json
     };
 
     let runtime = state.tls_store.as_ref().map(|store| store.status());
+    let client_ca_runtime = state.client_ca_store.as_ref().map(|store| store.status());
 
     axum::Json(serde_json::json!({
         "source": tls_source,
@@ -130,14 +132,7 @@ async fn certs_handler(State(state): State<AdminState>) -> axum::Json<serde_json
         "require_initial_snapshot": state.config.tls.require_initial_snapshot,
         "consul_cert_prefix": state.config.tls.consul_cert_prefix,
         "loaded_certificates": runtime.as_ref().map(|s| s.loaded_certificates.clone()).unwrap_or_default(),
-        "certificates": runtime.as_ref().map(|s| s.certificates.clone()).unwrap_or_default(),
-        "default_certificate": runtime.as_ref().and_then(|s| s.default_certificate.clone()),
-        "last_consul_index": runtime.as_ref().map(|s| s.last_consul_index).unwrap_or_default(),
-        "last_reload_unix": runtime.as_ref().and_then(|s| s.last_reload_unix),
-        "last_error": runtime.as_ref().and_then(|s| s.last_error.clone()),
-    }))
-}
-
+        "certificates": runtime.as_ref().map(|s
 async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_json::Value> {
     let tls_source = match crate::proxy::tls::TlsMode::resolve(&state.config.tls) {
         Ok(Some(crate::proxy::tls::TlsMode::File(_))) => "file",
