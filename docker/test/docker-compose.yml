@@ -16,40 +16,35 @@ services:
       retries: 10
 
   # ============================================================
-  # Upstream mock services
-  # Each responds with its name, the request path, and upstream info.
+  # Upstream mock services (simple HTTP echo servers)
+  # Each returns a JSON identifying which backend handled the request.
   # ============================================================
   upstream-web-blue:
     image: hashicorp/http-echo:0.2.3
-    args: ["-text", "{\"service\":\"web-blue\",\"port\":8080}", "-listen", ":8080"]
-    ports: []
+    entrypoint: ["/http-echo"]
+    command: ["-text", "{\"service\":\"web-blue\",\"port\":8080}", "-listen", ":8080"]
 
   upstream-web-green:
     image: hashicorp/http-echo:0.2.3
-    args: ["-text", "{\"service\":\"web-green\",\"port\":8081}", "-listen", ":8081"]
-    ports: []
+    entrypoint: ["/http-echo"]
+    command: ["-text", "{\"service\":\"web-green\",\"port\":8081}", "-listen", ":8081"]
 
   upstream-api:
     image: hashicorp/http-echo:0.2.3
-    args: ["-text", "{\"service\":\"api\",\"port\":9090}", "-listen", ":9090"]
-    ports: []
+    entrypoint: ["/http-echo"]
+    command: ["-text", "{\"service\":\"api\",\"port\":9090}", "-listen", ":9090"]
 
   upstream-static:
     image: hashicorp/http-echo:0.2.3
-    args: ["-text", "{\"service\":\"static\",\"port\":3000}", "-listen", ":3000"]
-    ports: []
-
-  upstream-grpc:
-    image: hashicorp/http-echo:0.2.3
-    args: ["-text", "{\"service\":\"grpc-backend\",\"port\":50051}", "-listen", ":50051"]
-    ports: []
+    entrypoint: ["/http-echo"]
+    command: ["-text", "{\"service\":\"static\",\"port\":3000}", "-listen", ":3000"]
 
   # ============================================================
   # Sentirum LB
   # ============================================================
   sentirum-lb:
     build:
-      context: ..
+      context: ../..
       dockerfile: Dockerfile
     command: >
       --config /app/config.toml
