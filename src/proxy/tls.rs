@@ -1226,7 +1226,7 @@ impl ClientAuthState {
                 if preverify_ok {
                     return true;
                 }
-                tracing::warn!(
+                tracing::debug!(
                     ca_upgrade_cn,
                     error_code = store_ctx.error().as_raw(),
                     error = %store_ctx.error(),
@@ -1234,7 +1234,7 @@ impl ClientAuthState {
                     "client certificate verification failed before CA-upgrade override"
                 );
                 if should_accept_ca_upgrade_error(&ca_upgrade_cn, store_ctx) {
-                    tracing::warn!(
+                    tracing::info!(
                         ca_upgrade_cn,
                         error_code = store_ctx.error().as_raw(),
                         error = %store_ctx.error(),
