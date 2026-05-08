@@ -13,13 +13,13 @@ use pingora::tls::{
     nid::Nid,
     pkey::{PKey, Private},
     ssl,
-    x509::X509,
+    x509::{X509, store::X509Store},
 };
-use time::{Date, Month, PrimitiveDateTime, Time};
 use regex::Regex;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
+use time::{Date, Month, PrimitiveDateTime, Time};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// File-based TLS certificate and key configuration.
@@ -127,6 +127,98 @@ impl From<&TlsConfig> for Option<TlsCertConfig> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientAuthMode {
+    Off,
+    Optional,
+    Required,
+}
+
+impl ClientAuthMode {
+    pub fn resolve(config: &TlsConfig) -> Result<Self, TlsError> {
+        match config.client_auth.trim().to_ascii_lowercase().as_str() {
+            "" | "off" | "disabled" | "none" => Ok(Self::Off),
+            "optional" | "request" => Ok(Self::Optional),
+            "required" | "require" | "verify" => Ok(Self::Required),
+            other => Err(TlsError::ConfigError(format!(
+                "unknown tls.client_auth '{other}', expected 'optional' or 'required'"
+            ))),
+        }
+    }
+
+    fn verify_mode(self) -> Option<ssl::SslVerifyMode> {
+        match self {
+            Self::Off => None,
+            Self::Optional => Some(ssl::SslVerifyMode::PEER),
+            Self::Required => Some(
+                ssl::SslVerifyMode::PEER | ssl::SslVerifyMode::FAIL_IF_NO_PEER_CERT,
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ClientCaSource {
+    File { path: String },
+    ConsulKv { prefix: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct ClientAuthConfig {
+    pub mode: ClientAuthMode,
+    pub source: ClientCaSource,
+    pub ca_upgrade_cn: String,
+}
+
+impl ClientAuthConfig {
+    pub fn resolve(config: &TlsConfig) -> Result<Option<Self>, TlsError> {
+        let mode = ClientAuthMode::resolve(config)?;
+        if mode == ClientAuthMode::Off {
+            return Ok(None);
+        }
+
+        let source = match config.client_ca_source.trim().to_ascii_lowercase().as_str() {
+            "file" => {
+                let path = config.client_ca_path.trim().to_string();
+                if path.is_empty() {
+                    return Err(TlsError::ConfigError(
+                        "tls.client_ca_path cannot be empty when tls.client_ca_source=file"
+                            .to_string(),
+                    ));
+                }
+                ClientCaSource::File { path }
+            }
+            "consul" | "consul_kv" | "fabio_consul" => {
+                let prefix = config.client_ca_consul_prefix.trim().to_string();
+                if prefix.is_empty() {
+                    return Err(TlsError::ConfigError(
+                        "tls.client_ca_consul_prefix cannot be empty when tls.client_ca_source=consul_kv"
+                            .to_string(),
+                    ));
+                }
+                ClientCaSource::ConsulKv { prefix }
+            }
+            "" => {
+                return Err(TlsError::ConfigError(
+                    "tls.client_ca_source is required when tls.client_auth is enabled"
+                        .to_string(),
+                ));
+            }
+            other => {
+                return Err(TlsError::ConfigError(format!(
+                    "unknown tls.client_ca_source '{other}', expected 'file' or 'consul_kv'"
+                )));
+            }
+        };
+
+        Ok(Some(Self {
+            mode,
+            source,
+            ca_upgrade_cn: config.client_ca_upgrade_cn.trim().to_string(),
+        }))
+    }
+}
+
 /// Derive the TLS listen address from config.
 pub fn tls_listen_addr(http_listen: &str, tls_listen: &str) -> String {
     if !tls_listen.trim().is_empty() {
@@ -155,6 +247,24 @@ pub struct DynamicTlsStatus {
     pub loaded_certificates: Vec<String>,
     pub certificates: Vec<DynamicTlsCertificateStatus>,
     pub default_certificate: Option<String>,
+    pub last_consul_index: u64,
+    pub last_reload_unix: Option<u64>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DynamicClientCaCertificateStatus {
+    pub entry_name: String,
+    pub subject: String,
+    pub common_name: Option<String>,
+    pub organization: Option<String>,
+    pub organizational_unit: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DynamicClientCaStatus {
+    pub loaded_entries: Vec<String>,
+    pub certificates: Vec<DynamicClientCaCertificateStatus>,
     pub last_consul_index: u64,
     pub last_reload_unix: Option<u64>,
     pub last_error: Option<String>,
