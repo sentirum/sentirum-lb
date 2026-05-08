@@ -115,10 +115,16 @@ curl -s -H "X-Admin-Token: <token>" http://127.0.0.1:9998/admin/config | jq
 Look for:
 - `tls.source == "consul_kv"`
 - `tls.consul_cert_prefix == "/fabio/cert"`
+- `tls.require_initial_snapshot == true`
 
 ### Cert runtime state
 ```bash
 curl -s -H "X-Admin-Token: <token>" http://127.0.0.1:9998/admin/certs | jq
+```
+
+### Memory / FD baseline
+```bash
+curl -s -H "X-Admin-Token: <token>" http://127.0.0.1:9998/admin/metrics | rg 'sentirum_lb_process_(resident_memory_bytes|virtual_memory_bytes|open_fds|metrics_available)'
 ```
 
 Look for:
