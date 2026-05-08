@@ -7,7 +7,9 @@ use pingora::services::background::{BackgroundService, background_service};
 use sentirum_lb::config::Config;
 use sentirum_lb::consul::{ConsulClient, ConsulConfig, ConsulWatcher, RouteUpdate};
 use sentirum_lb::proxy::handler::SentirumProxy;
-use sentirum_lb::proxy::tls::{DynamicCertStore, TlsMode, build_dynamic_tls_settings, tls_listen_addr};
+use sentirum_lb::proxy::tls::{
+    DynamicCertStore, TlsMode, build_dynamic_tls_settings, tls_listen_addr,
+};
 use sentirum_lb::route::parser::parse_route_commands;
 use sentirum_lb::route::registry::ManagedRouteTable;
 

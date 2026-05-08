@@ -190,7 +190,10 @@ impl DynamicCertStore {
                 "received empty certificate snapshot from Consul; keeping last known good store"
                     .to_string(),
             );
-            tracing::warn!(consul_index, "Received empty TLS certificate snapshot; keeping last known good store");
+            tracing::warn!(
+                consul_index,
+                "Received empty TLS certificate snapshot; keeping last known good store"
+            );
             return;
         }
 
@@ -206,7 +209,10 @@ impl DynamicCertStore {
                         .to_string()
                 }),
             );
-            tracing::error!(consul_index, "No valid TLS certificates remain after reload; keeping last known good store");
+            tracing::error!(
+                consul_index,
+                "No valid TLS certificates remain after reload; keeping last known good store"
+            );
             return;
         }
 
@@ -263,9 +269,9 @@ impl LoadedCertificate {
         }
 
         let mut iter = certificates.into_iter();
-        let leaf = iter
-            .next()
-            .ok_or_else(|| TlsError::ConfigError(format!("certificate bundle '{entry_name}' is empty")))?;
+        let leaf = iter.next().ok_or_else(|| {
+            TlsError::ConfigError(format!("certificate bundle '{entry_name}' is empty"))
+        })?;
         let chain: Vec<X509> = iter.collect();
         let key = parse_private_key(key_pem)?;
         let names = extract_certificate_names(&leaf);
@@ -377,7 +383,11 @@ impl CertSnapshot {
             .collect()
     }
 
-    fn select(&self, server_name: Option<&str>, strict_sni: bool) -> Option<Arc<LoadedCertificate>> {
+    fn select(
+        &self,
+        server_name: Option<&str>,
+        strict_sni: bool,
+    ) -> Option<Arc<LoadedCertificate>> {
         if self.ordered.is_empty() {
             return None;
         }
@@ -473,7 +483,9 @@ fn extract_certificate_names(cert: &X509) -> Vec<String> {
 }
 
 fn normalize_server_name(server_name: Option<&str>) -> Option<String> {
-    server_name.map(normalize_dns_name).filter(|name| !name.is_empty())
+    server_name
+        .map(normalize_dns_name)
+        .filter(|name| !name.is_empty())
 }
 
 fn normalize_dns_name(name: &str) -> String {
@@ -486,8 +498,9 @@ fn parse_certificate_chain(input: &[u8]) -> Result<Vec<X509>, TlsError> {
     let mut certs = Vec::new();
     for block in pem_blocks(text) {
         if block.kind == "CERTIFICATE" {
-            let cert = X509::from_pem(block.pem.as_bytes())
-                .map_err(|e| TlsError::ConfigError(format!("invalid CERTIFICATE PEM block: {e}")))?;
+            let cert = X509::from_pem(block.pem.as_bytes()).map_err(|e| {
+                TlsError::ConfigError(format!("invalid CERTIFICATE PEM block: {e}"))
+            })?;
             certs.push(cert);
         }
     }
@@ -654,7 +667,10 @@ mod tests {
             consul_cert_prefix: "/fabio/cert".to_string(),
             strict_sni: false,
         };
-        assert!(matches!(TlsMode::resolve(&config).unwrap(), Some(TlsMode::File(_))));
+        assert!(matches!(
+            TlsMode::resolve(&config).unwrap(),
+            Some(TlsMode::File(_))
+        ));
     }
 
     #[test]
@@ -723,11 +739,21 @@ mod tests {
 
         let status = store.status();
         assert_eq!(status.last_consul_index, 42);
-        assert_eq!(status.loaded_certificates, vec!["example.com.pem".to_string()]);
-        assert_eq!(status.default_certificate, Some("example.com.pem".to_string()));
+        assert_eq!(
+            status.loaded_certificates,
+            vec!["example.com.pem".to_string()]
+        );
+        assert_eq!(
+            status.default_certificate,
+            Some("example.com.pem".to_string())
+        );
         assert!(status.last_error.is_none());
         assert!(store.select_for_server_name(Some("example.com")).is_some());
-        assert!(store.select_for_server_name(Some("api.example.com")).is_some());
+        assert!(
+            store
+                .select_for_server_name(Some("api.example.com"))
+                .is_some()
+        );
     }
 
     #[test]
