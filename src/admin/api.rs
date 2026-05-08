@@ -37,11 +37,16 @@ use rand::Rng;
 use bcrypt::{hash, verify, DEFAULT_COST};
 use async_stream::stream;
 
-/// Session info for authenticated users
+/// Maximum session lifetime in seconds (24 hours).
+const SESSION_TTL_SECS: u64 = 24 * 60 * 60;
+/// Maximum number of concurrent sessions before oldest is evicted.
+const SESSION_MAX_CAPACITY: usize = 10_000;
+
+/// Session entry with creation timestamp for TTL eviction.
 #[derive(Clone)]
-pub struct Session {
-    pub user: String,
-    pub token: String,
+struct SessionEntry {
+    user: String,
+    created_at: std::time::Instant,
 }
 
 /// Shared state for admin API handlers
@@ -52,8 +57,8 @@ pub struct AdminState {
     pub tls_store: Option<Arc<DynamicCertStore>>,
     pub client_ca_store: Option<Arc<DynamicClientCaStore>>,
     pub log_buffer: Option<Arc<crate::admin::logs::LogBuffer>>,
-    /// Active sessions (token -> username)
-    pub sessions: Arc<RwLock<HashMap<String, String>>>,
+    /// Active sessions (token -> SessionEntry)
+    pub sessions: Arc<RwLock<HashMap<String, SessionEntry>>>,
 }
 
 /// Health check response
@@ -77,6 +82,7 @@ pub struct LoginResponse {
     pub success: bool,
     pub message: String,
     pub user: Option<String>,
+    pub token: Option<String>,
 }
 
 /// SSE metrics data
@@ -164,9 +170,9 @@ async fn login_handler(
     let valid = state.config.server.admin_users.iter()
         .any(|u| u.username == req.username && verify_password(&req.password, &u.password));
     
-    // Also check legacy admin_token for backwards compat
-    let legacy_valid = !state.config.server.admin_token.is_empty() && 
-        req.password == state.config.server.admin_token;
+    // Also check legacy admin_token for backwards compat (constant-time)
+    let legacy_valid = !state.config.server.admin_token.is_empty() &&
+        constant_time_eq(&req.password, &state.config.server.admin_token);
     
     if valid || legacy_valid {
         let user = if valid {
@@ -178,22 +184,28 @@ async fn login_handler(
             "admin".to_string()
         };
         
-        // Generate session token
+        // Generate session token and store with creation timestamp
         let token = generate_token();
         let mut sessions = state.sessions.write().await;
-        sessions.insert(token.clone(), user.clone());
+        evict_expired_sessions(&mut sessions);
+        sessions.insert(token.clone(), SessionEntry {
+            user: user.clone(),
+            created_at: std::time::Instant::now(),
+        });
         drop(sessions);
         
         axum::Json(LoginResponse {
             success: true,
             message: "Login successful".to_string(),
             user: Some(user),
+            token: Some(token),
         })
     } else {
         axum::Json(LoginResponse {
             success: false,
             message: "Invalid credentials".to_string(),
             user: None,
+            token: None,
         })
     }
 }
@@ -205,10 +217,9 @@ async fn logout_handler(
 ) -> axum::Json<serde_json::Value> {
     if let Some(auth) = headers.get(AUTHORIZATION) {
         if let Ok(token) = auth.to_str() {
-            if token.starts_with("Bearer ") {
-                let token = token[7..].to_string();
+            if let Some(bearer) = token.strip_prefix("Bearer ") {
                 let mut sessions = state.sessions.write().await;
-                sessions.remove(&token);
+                sessions.remove(bearer);
             }
         }
     }
@@ -222,13 +233,12 @@ async fn me_handler(
 ) -> axum::Json<serde_json::Value> {
     if let Some(auth) = headers.get(AUTHORIZATION) {
         if let Ok(token) = auth.to_str() {
-            if token.starts_with("Bearer ") {
-                let token = token[7..].to_string();
+            if let Some(bearer) = token.strip_prefix("Bearer ") {
                 let sessions = state.sessions.read().await;
-                if let Some(user) = sessions.get(&token) {
+                if let Some(entry) = sessions.get(bearer) {
                     return axum::Json(serde_json::json!({
                         "authenticated": true,
-                        "user": user
+                        "user": entry.user
                     }));
                 }
             }
@@ -748,12 +758,13 @@ pub async fn run_admin_server(
 ) {
     let addr = config.server.admin_listen.clone();
 
-    if config.server.admin_token.is_empty() && !is_loopback_bind(&addr) {
-        tracing::error!(addr = %addr, "Refusing to expose admin API without admin_token on non-loopback address");
+    let has_any_auth = !config.server.admin_token.is_empty() || !config.server.admin_users.is_empty();
+    if !has_any_auth && !is_loopback_bind(&addr) {
+        tracing::error!(addr = %addr, "Refusing to expose admin API without admin_token or admin_users on non-loopback address");
         return;
     }
 
-    let auth_enabled = !config.server.admin_token.is_empty();
+    let auth_enabled = !config.server.admin_token.is_empty() || !config.server.admin_users.is_empty();
     let state = AdminState {
         config,
         route_table,
@@ -802,20 +813,43 @@ async fn admin_auth_middleware(
     request: axum::extract::Request,
     next: Next,
 ) -> Result<Response, (StatusCode, axum::Json<serde_json::Value>)> {
+    // Path A: static admin_token via Bearer or X-Admin-Token header.
+    // Only valid when admin_token is actually configured (non-empty).
     let expected = state.config.server.admin_token.as_str();
-    let authorized = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(|value| constant_time_eq(value, expected))
-        .unwrap_or(false)
+    let token_auth = if !expected.is_empty() {
+        headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .map(|value| constant_time_eq(value, expected))
+            .unwrap_or(false)
         || headers
             .get("x-admin-token")
             .and_then(|value| value.to_str().ok())
             .map(|value| constant_time_eq(value, expected))
-            .unwrap_or(false);
+            .unwrap_or(false)
+    } else {
+        false
+    };
 
-    if authorized {
+    // Path B: session-based auth — Bearer token lookup in session store.
+    let session_auth = if !token_auth {
+        if let Some(bearer) = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+        {
+            let mut sessions = state.sessions.write().await;
+            evict_expired_sessions(&mut sessions);
+            sessions.get(bearer).is_some()
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if token_auth || session_auth {
         Ok(next.run(request).await)
     } else {
         Err((
@@ -825,6 +859,42 @@ async fn admin_auth_middleware(
             ),
         ))
     }
+}
+
+/// Evict sessions that have exceeded SESSION_TTL_SECS or when the map
+/// exceeds SESSION_MAX_CAPACITY. Called on insert (login) and on auth
+/// lookups so stale entries are cleaned up lazily.
+fn evict_expired_sessions(sessions: &mut HashMap<String, SessionEntry>) {
+    let now = std::time::Instant::now();
+    sessions.retain(|_, entry| now.duration_since(entry.created_at).as_secs() < SESSION_TTL_SECS);
+    // If still over capacity, drop oldest entries
+    if sessions.len() > SESSION_MAX_CAPACITY {
+        let mut entries: Vec<(String, std::time::Instant)> = sessions
+            .iter()
+            .map(|(k, v)| (k.clone(), v.created_at))
+            .collect();
+        entries.sort_by_key(|(_, t)| *t);
+        let to_remove = sessions.len() - SESSION_MAX_CAPACITY;
+        for (key, _) in entries.into_iter().take(to_remove) {
+            sessions.remove(&key);
+        }
+    }
+}
+
+/// Escape a string value for safe inclusion in Prometheus label values.
+/// Per the text exposition format, backslash, double-quote, and newline
+/// must be escaped.
+fn escape_prometheus_label(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn is_loopback_bind(addr: &str) -> bool {
