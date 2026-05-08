@@ -328,7 +328,7 @@ async fn run_tcp_listener_with_watch(
 }
 
 async fn handle_tcp_connection(
-    mut downstream: TcpStream,
+    downstream: TcpStream,
     route_table: Arc<ManagedRouteTable>,
     config: Arc<Config>,
 ) -> Result<(), std::io::Error> {
