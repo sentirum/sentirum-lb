@@ -148,7 +148,6 @@ pub struct DynamicTlsStatus {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug)]
 pub struct DynamicCertStore {
     snapshot: ArcSwap<CertSnapshot>,
     status: RwLock<DynamicTlsStatus>,
@@ -250,7 +249,6 @@ impl DynamicCertStore {
     }
 }
 
-#[derive(Debug)]
 struct LoadedCertificate {
     entry_name: String,
     leaf: X509,
@@ -286,7 +284,7 @@ impl LoadedCertificate {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct CertSnapshot {
     ordered: Vec<Arc<LoadedCertificate>>,
     by_name: HashMap<String, usize>,
