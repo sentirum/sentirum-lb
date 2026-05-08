@@ -37,13 +37,15 @@ impl RouteRegistry {
         self.service_routes = routes;
     }
 
-    /// Get all routes merged (priority: static > kv > service)
-    pub fn get_all(&self) -> Vec<RouteDef> {
-        let mut all = Vec::new();
-        all.extend(self.static_routes.clone());
-        all.extend(self.kv_routes.clone());
-        all.extend(self.service_routes.clone());
-        all
+    /// Get all routes merged (priority: static > kv > service).
+    /// Returns slices to avoid cloning individual `RouteDef` structs.
+    fn get_all_slices(&self) -> (&[RouteDef], &[RouteDef], &[RouteDef]) {
+        (&self.static_routes, &self.kv_routes, &self.service_routes)
+    }
+
+    /// Total route count across all sources.
+    fn total_len(&self) -> usize {
+        self.static_routes.len() + self.kv_routes.len() + self.service_routes.len()
     }
 
     /// Check if any routes exist
