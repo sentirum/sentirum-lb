@@ -342,6 +342,9 @@ pub struct DnsCache {
     negatives: std::sync::atomic::AtomicU64,
 }
 
+/// Maximum number of entries in the DNS cache before eviction kicks in.
+const DNS_CACHE_MAX_ENTRIES: usize = 10_000;
+
 impl DnsCache {
     pub fn new() -> Self {
         Self {
@@ -415,6 +418,7 @@ impl DnsCache {
         };
 
         self.inner.insert(host, entry);
+        self.evict_if_over_capacity(now_ms);
     }
 
     /// Store a negative DNS lookup result (NXDOMAIN)
@@ -431,6 +435,44 @@ impl DnsCache {
         };
 
         self.inner.insert(host, entry);
+        self.evict_if_over_capacity(now_ms);
+    }
+
+    /// Evict entries when the cache exceeds DNS_CACHE_MAX_ENTRIES.
+    /// First removes expired entries (lazy TTL cleanup). If still over capacity,
+    /// removes the oldest entries by expiration time.
+    fn evict_if_over_capacity(&self, now_ms: u64) {
+        if self.inner.len() <= DNS_CACHE_MAX_ENTRIES {
+            return;
+        }
+
+        // Phase 1: Remove expired entries
+        let expired_keys: Vec<String> = self
+            .inner
+            .iter()
+            .filter(|e| now_ms >= e.expires_at_ms)
+            .map(|e| e.key().clone())
+            .collect();
+        for key in expired_keys {
+            self.inner.remove(&key);
+        }
+
+        if self.inner.len() <= DNS_CACHE_MAX_ENTRIES {
+            return;
+        }
+
+        // Phase 2: Remove oldest entries by expires_at_ms until under capacity
+        let mut entries: Vec<(String, u64)> = self
+            .inner
+            .iter()
+            .map(|e| (e.key().clone(), e.expires_at_ms))
+            .collect();
+        entries.sort_by_key(|(_, exp)| *exp);
+
+        let to_remove = self.inner.len() - DNS_CACHE_MAX_ENTRIES;
+        for (key, _) in entries.into_iter().take(to_remove) {
+            self.inner.remove(&key);
+        }
     }
 
     /// Clear all cached entries
@@ -753,9 +795,17 @@ impl Target {
         let cache = global_dns_cache();
         if let Some(addrs) = cache.lookup(&cache_key)
             && let Some(addr) = addrs.first()
-        {
             tracing::trace!(host, port, "DNS cache hit");
-            return Ok(*addr);
+            if !self.ssrf_skip_verify()
+                && (is_ip_always_blocked(&addr.ip())
+                    || (!self.source_allows_private_upstreams() && is_ip_rfc1918(&addr.ip())))
+            {
+                // Stale cached address fails SSRF check — evict and re-resolve
+                cache.inner.remove(&cache_key);
+                tracing::warn!(host, port, addr = %addr, "DNS cache hit failed SSRF check, re-resolving");
+            } else {
+                return Ok(*addr);
+            }
         }
 
         let addr_str = if host.contains(':') {
@@ -917,10 +967,21 @@ pub fn is_ip_rfc1918(ip: &std::net::IpAddr) -> bool {
 pub fn is_ip_always_blocked(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_link_local() || v4.is_broadcast() || v4.is_unspecified()
+            if v4.is_loopback() || v4.is_link_local() || v4.is_broadcast() || v4.is_unspecified() || v4.is_multicast() {
+                return true;
+            }
+            let octets = v4.octets();
+            // CGNAT / Shared address space (100.64.0.0/10, RFC 6598)
+            let is_cgnat = octets[0] == 100 && (octets[1] & 0xC0) == 0x40;
+            // Documentation / benchmark ranges (RFC 5737 / RFC 2544)
+            let is_documentation = (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+                || (octets[0] == 198 && octets[1] == 18 && octets[2] == 0); // RFC 2544 benchmarking
+            is_cgnat || is_documentation
         }
         std::net::IpAddr::V6(v6) => {
-            v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local()
+            v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local() || v6.is_multicast()
         }
     }
 }

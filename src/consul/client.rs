@@ -213,7 +213,9 @@ impl ConsulClient {
         }
 
         let response = request.send().await?;
-        let agent_self: AgentSelf = response.json().await?;
+        let agent_self: AgentSelf = response.json().await.map_err(|e| ConsulError::ParseError(
+            format!("failed to parse response from /v1/agent/self: {e}")
+        ))?;
 
         let dc = agent_self
             .Config
@@ -254,7 +256,9 @@ impl ConsulClient {
             Value: Option<String>,
         }
 
-        let kv_pairs: Vec<KVPair> = response.json().await?;
+        let kv_pairs: Vec<KVPair> = response.json().await.map_err(|e| ConsulError::ParseError(
+            format!("failed to parse response from KV watch for path '{path}': {e}")
+        ))?;
         let mut decoded_pairs = Vec::with_capacity(kv_pairs.len());
 
         for kv in kv_pairs {
@@ -361,7 +365,9 @@ impl ConsulClient {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
 
-        let checks: Vec<HealthCheck> = response.json().await?;
+        let checks: Vec<HealthCheck> = response.json().await.map_err(|e| ConsulError::ParseError(
+            format!("failed to parse response from health checks: {e}")
+        ))?;
 
         Ok((checks, new_index))
     }
@@ -399,7 +405,9 @@ impl ConsulClient {
         }
 
         let response = request.send().await?;
-        let services: Vec<CatalogService> = response.json().await?;
+        let services: Vec<CatalogService> = response.json().await.map_err(|e| ConsulError::ParseError(
+            format!("failed to parse response from catalog service '{service_name}': {e}")
+        ))?;
 
         Ok(services)
     }
@@ -436,7 +444,9 @@ impl ConsulClient {
         }
 
         let response = request.send().await?;
-        let keys: Vec<String> = response.json().await?;
+        let keys: Vec<String> = response.json().await.map_err(|e| ConsulError::ParseError(
+            format!("failed to parse response from KV list for path '{path}': {e}")
+        ))?;
 
         Ok(keys)
     }

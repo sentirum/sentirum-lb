@@ -41,6 +41,11 @@ use async_stream::stream;
 const SESSION_TTL_SECS: u64 = 24 * 60 * 60;
 /// Maximum number of concurrent sessions before oldest is evicted.
 const SESSION_MAX_CAPACITY: usize = 10_000;
+/// Maximum login attempts per username before rate-limiting.
+const LOGIN_MAX_ATTEMPTS: u32 = 5;
+/// Login rate-limit window in seconds.
+const LOGIN_WINDOW_SECS: u64 = 60;
+
 
 /// Session entry with creation timestamp for TTL eviction.
 pub(crate) struct SessionEntry {
@@ -58,7 +63,8 @@ pub struct AdminState {
     pub log_buffer: Option<Arc<crate::admin::logs::LogBuffer>>,
     /// Active sessions (token -> SessionEntry)
     pub sessions: Arc<RwLock<HashMap<String, SessionEntry>>>,
-}
+    /// Login rate limiter: username -> (attempt count, window start instant).
+    pub login_attempts: Arc<dashmap::DashMap<String, (u32, std::time::Instant)>>,
 
 /// Health check response
 #[derive(serde::Serialize)]
@@ -165,6 +171,30 @@ async fn login_handler(
     State(state): State<AdminState>,
     Json(req): Json<LoginRequest>,
 ) -> axum::Json<LoginResponse> {
+    // Input length check — reject oversized credentials without hashing.
+    if req.username.len() > 256 || req.password.len() > 256 {
+        return axum::Json(LoginResponse {
+            success: false,
+            message: "Invalid credentials".to_string(),
+            user: None,
+            token: None,
+        });
+    }
+
+    // Rate-limit check: max LOGIN_MAX_ATTEMPTS per username within LOGIN_WINDOW_SECS.
+    let now = std::time::Instant::now();
+    if let Some(pair) = state.login_attempts.get(&req.username) {
+        let (count, window_start) = pair.value();
+        if now.duration_since(*window_start).as_secs() < LOGIN_WINDOW_SECS && *count >= LOGIN_MAX_ATTEMPTS {
+            return axum::Json(LoginResponse {
+                success: false,
+                message: "Too many login attempts".to_string(),
+                user: None,
+                token: None,
+            });
+        }
+    }
+
     // Check against configured users (with bcrypt verification)
     let valid = state.config.server.admin_users.iter()
         .any(|u| u.username == req.username && verify_password(&req.password, &u.password));
@@ -193,6 +223,9 @@ async fn login_handler(
         });
         drop(sessions);
         
+        // Clear rate-limit on successful login.
+        state.login_attempts.remove(&req.username);
+        
         axum::Json(LoginResponse {
             success: true,
             message: "Login successful".to_string(),
@@ -200,6 +233,21 @@ async fn login_handler(
             token: Some(token),
         })
     } else {
+        // Increment rate-limit on failed login.
+        let now = std::time::Instant::now();
+        state.login_attempts
+            .entry(req.username.clone())
+            .and_modify(|(count, window_start)| {
+                if now.duration_since(*window_start).as_secs() >= LOGIN_WINDOW_SECS {
+                    // Window expired — reset counter.
+                    *count = 1;
+                    *window_start = now;
+                } else {
+                    *count += 1;
+                }
+            })
+            .or_insert((1, now));
+        
         axum::Json(LoginResponse {
             success: false,
             message: "Invalid credentials".to_string(),
