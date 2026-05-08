@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio::io::copy_bidirectional;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
@@ -433,6 +433,128 @@ async fn connect_upstream(target: &Target, config: &Config) -> Result<TcpStream,
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "TCP connect timed out"))?
 }
 
+async fn read_client_hello(stream: &mut TcpStream) -> Result<Vec<u8>, std::io::Error> {
+    let mut headers = [0_u8; 9];
+    stream.read_exact(&mut headers).await?;
+    let buffer_size = client_hello_buffer_size(&headers)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let mut data = vec![0_u8; buffer_size];
+    data[..9].copy_from_slice(&headers);
+    stream.read_exact(&mut data[9..]).await?;
+    Ok(data)
+}
+
+fn client_hello_buffer_size(data: &[u8]) -> Result<usize, &'static str> {
+    if data.len() < 9 {
+        return Err("at least 9 bytes required to determine client hello length");
+    }
+    if data[0] != 0x16 {
+        return Err("not a TLS handshake");
+    }
+
+    let record_length = usize::from(data[3]) << 8 | usize::from(data[4]);
+    if record_length == 0 || record_length > 16_384 {
+        return Err("invalid TLS record length");
+    }
+    if data[5] != 0x01 {
+        return Err("not a client hello");
+    }
+
+    let handshake_length = usize::from(data[6]) << 16 | usize::from(data[7]) << 8 | usize::from(data[8]);
+    if handshake_length == 0 || handshake_length > record_length.saturating_sub(4) {
+        return Err("invalid client hello length (fragmentation not implemented)");
+    }
+
+    Ok(handshake_length + 9)
+}
+
+fn read_server_name(client_hello_handshake_msg: &[u8]) -> Option<String> {
+    if client_hello_handshake_msg.len() < 42 {
+        return None;
+    }
+
+    let mut data = client_hello_handshake_msg;
+    let session_id_len = usize::from(data[38]);
+    if session_id_len > 32 || data.len() < 39 + session_id_len {
+        return None;
+    }
+    data = &data[39 + session_id_len..];
+
+    if data.len() < 2 {
+        return None;
+    }
+    let cipher_suite_len = usize::from(data[0]) << 8 | usize::from(data[1]);
+    if cipher_suite_len % 2 == 1 || data.len() < 2 + cipher_suite_len {
+        return None;
+    }
+    data = &data[2 + cipher_suite_len..];
+
+    if data.is_empty() {
+        return None;
+    }
+    let compression_methods_len = usize::from(data[0]);
+    if data.len() < 1 + compression_methods_len {
+        return None;
+    }
+    data = &data[1 + compression_methods_len..];
+
+    if data.is_empty() {
+        return Some(String::new());
+    }
+    if data.len() < 2 {
+        return None;
+    }
+    let extensions_length = usize::from(data[0]) << 8 | usize::from(data[1]);
+    data = &data[2..];
+    if extensions_length != data.len() {
+        return None;
+    }
+
+    while !data.is_empty() {
+        if data.len() < 4 {
+            return None;
+        }
+        let extension = u16::from(data[0]) << 8 | u16::from(data[1]);
+        let length = usize::from(data[2]) << 8 | usize::from(data[3]);
+        data = &data[4..];
+        if data.len() < length {
+            return None;
+        }
+
+        if extension == 0 {
+            let mut names = &data[..length];
+            if names.len() < 2 {
+                return None;
+            }
+            let names_len = usize::from(names[0]) << 8 | usize::from(names[1]);
+            names = &names[2..];
+            if names_len != names.len() {
+                return None;
+            }
+            while !names.is_empty() {
+                if names.len() < 3 {
+                    return None;
+                }
+                let name_type = names[0];
+                let name_len = usize::from(names[1]) << 8 | usize::from(names[2]);
+                names = &names[3..];
+                if names.len() < name_len {
+                    return None;
+                }
+                if name_type == 0 {
+                    return Some(String::from_utf8_lossy(&names[..name_len]).to_ascii_lowercase());
+                }
+                names = &names[name_len..];
+            }
+            return Some(String::new());
+        }
+
+        data = &data[length..];
+    }
+
+    Some(String::new())
+}
+
 struct TcpConnectionGuard {
     target: Arc<Target>,
 }
@@ -478,6 +600,8 @@ mod tests {
     use crate::route::definition::{RouteCmd, RouteDef, RouteSource};
     use std::collections::HashMap;
 
+    const CLIENT_HELLO_WITH_SNI_HEX: &str = "0100014803032657cacce41598fa82e5b75061050bc31c5affdba106b8e743185224af0fa1aa000098cc14cc13cc15c030c02cc028c024c014c00a00a3009f006b006a00390038ff8500c400c3008800870081c032c02ec02ac026c00fc005009d003d003500c00084c02fc02bc027c023c013c00900a2009e006700400033003200be00bd00450044c031c02dc029c025c00ec004009c003c002f00ba0041c011c007c00cc00200050004c012c00800160013c00dc003000a00150012000900ff010000870000000f000d00000a676f6f676c652e636f6d000b000403000102000a003a0038000e000d0019001c000b000c001b00180009000a001a00160017000800060007001400150004000500120013000100020003000f0010001100230000000d00260024060106020603efef050105020503040104020403eeeeeded030103020303020102020203";
+
     fn config() -> Arc<Config> {
         Arc::new(Config {
             server: ServerConfig {
@@ -503,6 +627,18 @@ mod tests {
         })
     }
 
+    fn decode_hex(input: &str) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(input.len() / 2);
+        let mut chars = input.as_bytes().chunks_exact(2);
+        for pair in &mut chars {
+            let high = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
+            let low = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
+            bytes.push((high << 4) | low);
+        }
+        assert!(chars.remainder().is_empty(), "hex input must have even length");
+        bytes
+    }
+
     fn tcp_def(src: &str, dst: &str) -> RouteDef {
         let mut opts = HashMap::new();
         opts.insert("proto".to_string(), "tcp".to_string());
@@ -524,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_tcp_mode_supports_fixed_and_dynamic_modes() {
+    fn resolve_tcp_mode_supports_fixed_sni_and_dynamic_modes() {
         let mut fixed = (*config()).clone();
         fixed.tcp.mode = "tcp".to_string();
         fixed.tcp.listen = ":4222".to_string();
@@ -532,6 +668,16 @@ mod tests {
             resolve_tcp_mode(&fixed).unwrap(),
             TcpMode::Tcp {
                 listen: ":4222".to_string()
+            }
+        );
+
+        let mut sni = (*config()).clone();
+        sni.tcp.mode = "tcp+sni".to_string();
+        sni.tcp.listen = ":443".to_string();
+        assert_eq!(
+            resolve_tcp_mode(&sni).unwrap(),
+            TcpMode::TcpSni {
+                listen: ":443".to_string()
             }
         );
 
@@ -573,5 +719,34 @@ mod tests {
 
         let ports = table.get().tcp_listener_ports();
         assert_eq!(ports, vec![4222, 4333]);
+    }
+
+    #[test]
+    fn lookup_sni_target_matches_host_routes() {
+        let table = Arc::new(ManagedRouteTable::new());
+        table.update_services(vec![
+            tcp_def("google.com", "tcp://10.0.0.20:443"),
+            tcp_def(":443", "tcp://10.0.0.10:443"),
+        ]);
+
+        let target = lookup_sni_target(&table, "round-robin", "google.com")
+            .expect("sni route should exist");
+        assert_eq!(target.url, "tcp://10.0.0.20:443");
+        assert!(lookup_sni_target(&table, "round-robin", "missing.example.com").is_none());
+    }
+
+    #[test]
+    fn client_hello_buffer_size_validates_tls_client_hello() {
+        let valid = [0x16, 0x03, 0x01, 0x40, 0x00, 0x01, 0x00, 0x3f, 0xfc];
+        assert_eq!(client_hello_buffer_size(&valid).unwrap(), 16_389);
+        assert!(client_hello_buffer_size(&valid[..8]).is_err());
+        assert!(client_hello_buffer_size(&[0x15, 0x03, 0x01, 0x01, 0xF4, 0x01, 0x00, 0x01, 0xeb]).is_err());
+    }
+
+    #[test]
+    fn read_server_name_extracts_sni_host() {
+        let client_hello = decode_hex(CLIENT_HELLO_WITH_SNI_HEX);
+        assert_eq!(read_server_name(&client_hello).as_deref(), Some("google.com"));
+        assert!(read_server_name(b"not a client hello").is_none());
     }
 }
