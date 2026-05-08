@@ -1001,6 +1001,7 @@ mod tests {
             client_ca_store: None,
             log_buffer: None,
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            login_attempts: Arc::new(dashmap::DashMap::new()),
         }
     }
 

@@ -477,26 +477,6 @@ impl Table {
         table
     }
 
-    /// Build a new table from multiple source slices, avoiding intermediate clones.
-    /// Routes are applied in order: static → kv → service.
-    pub fn from_multi_source_definitions(
-        static_defs: &[RouteDef],
-        kv_defs: &[RouteDef],
-        service_defs: &[RouteDef],
-        stats_registry: Arc<TargetStatsRegistry>,
-        cb_config: Option<crate::route::target::CircuitBreakerConfig>,
-    ) -> Self {
-        let mut table = Table {
-            routes: HashMap::new(),
-            stats_registry: Some(stats_registry),
-            cb_config,
-        };
-        for def in static_defs.iter().chain(kv_defs.iter()).chain(service_defs.iter()) {
-            table.apply(def);
-        }
-        table
-    }
-
     fn active_connections_for(&self, key: &str) -> Arc<std::sync::atomic::AtomicU64> {
         self.stats_registry
             .as_ref()

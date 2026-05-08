@@ -107,11 +107,9 @@ impl ManagedRouteTable {
 
     /// Rebuild table from registry and atomically swap
     fn rebuild_and_swap(&self, registry: &RouteRegistry, source: &str) {
-        let (statics, kvs, services) = registry.get_all_slices();
-        let table = Table::from_multi_source_definitions(
-            statics,
-            kvs,
-            services,
+        let all_defs = registry.get_all();
+        let table = Table::from_definitions_with_stats(
+            &all_defs,
             self.inner.stats_registry(),
             self.inner.cb_config(),
         );
@@ -124,7 +122,7 @@ impl ManagedRouteTable {
             route_count,
             target_count,
             source,
-            is_empty = registry.total_len() == 0,
+            is_empty = registry.is_empty(),
             "Route table updated"
         );
     }
