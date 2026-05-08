@@ -1154,8 +1154,15 @@ mod tests {
 
     #[test]
     fn test_remember_verified_client_certificate_caches_rich_identity() {
-        let cert = rcgen::generate_simple_self_signed(vec!["client.sentirum.test".into()]).unwrap();
-        let cert_pem = cert.cert.pem();
+        let mut params = rcgen::CertificateParams::new(vec!["client.sentirum.test".into()]).unwrap();
+        params.distinguished_name = {
+            let mut dn = rcgen::DistinguishedName::new();
+            dn.push(rcgen::DnType::CommonName, "client.sentirum.test");
+            dn
+        };
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        let cert_pem = cert.pem();
         let parsed = pingora::tls::x509::X509::from_pem(cert_pem.as_bytes()).unwrap();
 
         remember_verified_client_certificate(&parsed);
