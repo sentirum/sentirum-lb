@@ -3,6 +3,7 @@
 //! Tracks request latency histogram, request counter, active connections gauge,
 //! and route-level metrics for observability.
 
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 // keep for future use with per-route metrics
 use std::time::Instant;
@@ -13,6 +14,13 @@ static METRICS: std::sync::OnceLock<Metrics> = std::sync::OnceLock::new();
 /// Get the global metrics instance
 pub fn global() -> &'static Metrics {
     METRICS.get_or_init(Metrics::new)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateExpiryMetric {
+    pub entry: String,
+    pub cn: String,
+    pub not_after_unix: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -74,6 +82,26 @@ pub struct Metrics {
     pub grpc_web_requests_total: AtomicU64,
     /// Total WebSocket requests processed
     pub websocket_requests_total: AtomicU64,
+    /// Total successful TLS cert reloads
+    pub cert_reload_total: AtomicU64,
+    /// Total failed TLS cert reloads
+    pub cert_reload_errors_total: AtomicU64,
+    /// TLS reload skips due to oversize entries
+    pub cert_reload_skipped_oversize_total: AtomicU64,
+    /// TLS reload skips due to invalid entries
+    pub cert_reload_skipped_invalid_total: AtomicU64,
+    /// TLS reload skips due to empty snapshots
+    pub cert_reload_skipped_empty_total: AtomicU64,
+    /// Static route reloads
+    pub route_reload_total_static: AtomicU64,
+    /// KV route reloads
+    pub route_reload_total_kv: AtomicU64,
+    /// Service route reloads
+    pub route_reload_total_service: AtomicU64,
+    /// Consul watcher errors
+    pub consul_watcher_errors_total_services: AtomicU64,
+    pub consul_watcher_errors_total_kv: AtomicU64,
+    pub consul_watcher_errors_total_tls: AtomicU64,
 
     // --- Gauges ---
     /// Currently active connections
@@ -82,6 +110,18 @@ pub struct Metrics {
     pub route_count: AtomicI64,
     /// Number of target backends
     pub target_count: AtomicI64,
+    /// Current watcher backoff seconds
+    pub consul_watcher_backoff_seconds_services: AtomicU64,
+    pub consul_watcher_backoff_seconds_kv: AtomicU64,
+    pub consul_watcher_backoff_seconds_tls: AtomicU64,
+    /// Last seen Consul index per watcher
+    pub consul_watcher_last_index_services: AtomicU64,
+    pub consul_watcher_last_index_kv: AtomicU64,
+    pub consul_watcher_last_index_tls: AtomicU64,
+    /// Oldest loaded certificate expiry timestamp
+    pub cert_min_expiry_unix_seconds: AtomicU64,
+    /// Per-certificate expiry details
+    pub cert_expiry_entries: RwLock<Vec<CertificateExpiryMetric>>,
 
     // --- Histograms (simplified as buckets) ---
     /// Request latency tracking (microseconds)
@@ -117,9 +157,28 @@ impl Metrics {
             grpc_requests_total: AtomicU64::new(0),
             grpc_web_requests_total: AtomicU64::new(0),
             websocket_requests_total: AtomicU64::new(0),
+            cert_reload_total: AtomicU64::new(0),
+            cert_reload_errors_total: AtomicU64::new(0),
+            cert_reload_skipped_oversize_total: AtomicU64::new(0),
+            cert_reload_skipped_invalid_total: AtomicU64::new(0),
+            cert_reload_skipped_empty_total: AtomicU64::new(0),
+            route_reload_total_static: AtomicU64::new(0),
+            route_reload_total_kv: AtomicU64::new(0),
+            route_reload_total_service: AtomicU64::new(0),
+            consul_watcher_errors_total_services: AtomicU64::new(0),
+            consul_watcher_errors_total_kv: AtomicU64::new(0),
+            consul_watcher_errors_total_tls: AtomicU64::new(0),
             active_connections: AtomicI64::new(0),
             route_count: AtomicI64::new(0),
             target_count: AtomicI64::new(0),
+            consul_watcher_backoff_seconds_services: AtomicU64::new(0),
+            consul_watcher_backoff_seconds_kv: AtomicU64::new(0),
+            consul_watcher_backoff_seconds_tls: AtomicU64::new(0),
+            consul_watcher_last_index_services: AtomicU64::new(0),
+            consul_watcher_last_index_kv: AtomicU64::new(0),
+            consul_watcher_last_index_tls: AtomicU64::new(0),
+            cert_min_expiry_unix_seconds: AtomicU64::new(0),
+            cert_expiry_entries: RwLock::new(Vec::new()),
             latency_bucket_1ms: AtomicU64::new(0),
             latency_bucket_5ms: AtomicU64::new(0),
             latency_bucket_10ms: AtomicU64::new(0),
@@ -201,6 +260,109 @@ impl Metrics {
             self.websocket_requests_total
                 .fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    pub fn record_cert_reload_success(&self) {
+        self.cert_reload_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_cert_reload_error(&self) {
+        self.cert_reload_errors_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_cert_reload_skipped(&self, reason: &str) {
+        match reason {
+            "oversize" => {
+                self.cert_reload_skipped_oversize_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "empty" => {
+                self.cert_reload_skipped_empty_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                self.cert_reload_skipped_invalid_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn record_route_reload(&self, source: &str) {
+        match source {
+            "static" => {
+                self.route_reload_total_static
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "kv" => {
+                self.route_reload_total_kv.fetch_add(1, Ordering::Relaxed);
+            }
+            "service" => {
+                self.route_reload_total_service
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_consul_watcher_backoff_seconds(&self, watcher: &str, seconds: u64) {
+        match watcher {
+            "services" => {
+                self.consul_watcher_backoff_seconds_services
+                    .store(seconds, Ordering::Relaxed);
+            }
+            "kv" => {
+                self.consul_watcher_backoff_seconds_kv
+                    .store(seconds, Ordering::Relaxed);
+            }
+            "tls" => {
+                self.consul_watcher_backoff_seconds_tls
+                    .store(seconds, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_consul_watcher_last_index(&self, watcher: &str, index: u64) {
+        match watcher {
+            "services" => {
+                self.consul_watcher_last_index_services
+                    .store(index, Ordering::Relaxed);
+            }
+            "kv" => {
+                self.consul_watcher_last_index_kv
+                    .store(index, Ordering::Relaxed);
+            }
+            "tls" => {
+                self.consul_watcher_last_index_tls
+                    .store(index, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn record_consul_watcher_error(&self, watcher: &str) {
+        match watcher {
+            "services" => {
+                self.consul_watcher_errors_total_services
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "kv" => {
+                self.consul_watcher_errors_total_kv
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "tls" => {
+                self.consul_watcher_errors_total_tls
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_cert_expiry_entries(&self, entries: Vec<CertificateExpiryMetric>) {
+        let min_expiry = entries.iter().map(|entry| entry.not_after_unix).min().unwrap_or(0);
+        self.cert_min_expiry_unix_seconds
+            .store(min_expiry, Ordering::Relaxed);
+        *self.cert_expiry_entries.write().expect("cert expiry entries poisoned") = entries;
     }
 
     /// Increment active connections
