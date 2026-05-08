@@ -3,6 +3,7 @@
 //! Tracks request latency histogram, request counter, active connections gauge,
 //! and route-level metrics for observability.
 
+use std::fs;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 // keep for future use with per-route metrics
 use std::time::Instant;
@@ -13,6 +14,46 @@ static METRICS: std::sync::OnceLock<Metrics> = std::sync::OnceLock::new();
 /// Get the global metrics instance
 pub fn global() -> &'static Metrics {
     METRICS.get_or_init(Metrics::new)
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ProcessMetricsSnapshot {
+    available: bool,
+    resident_memory_bytes: u64,
+    virtual_memory_bytes: u64,
+    open_fds: u64,
+}
+
+fn parse_proc_status_value_bytes(status: &str, key: &str) -> Option<u64> {
+    status.lines().find_map(|line| {
+        let rest = line.strip_prefix(key)?.trim();
+        let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+        Some(kb * 1024)
+    })
+}
+
+fn collect_process_metrics() -> ProcessMetricsSnapshot {
+    #[cfg(target_os = "linux")]
+    {
+        let status = fs::read_to_string("/proc/self/status").ok();
+        let open_fds = fs::read_dir("/proc/self/fd")
+            .ok()
+            .map(|entries| entries.filter_map(Result::ok).count() as u64)
+            .unwrap_or(0);
+
+        if let Some(status) = status {
+            return ProcessMetricsSnapshot {
+                available: true,
+                resident_memory_bytes: parse_proc_status_value_bytes(&status, "VmRSS:")
+                    .unwrap_or(0),
+                virtual_memory_bytes: parse_proc_status_value_bytes(&status, "VmSize:")
+                    .unwrap_or(0),
+                open_fds,
+            };
+        }
+    }
+
+    ProcessMetricsSnapshot::default()
 }
 
 /// Core metrics for the load balancer
@@ -188,6 +229,8 @@ impl Metrics {
         let status_3xx = self.status_3xx.load(Ordering::Relaxed);
         let status_4xx = self.status_4xx.load(Ordering::Relaxed);
         let status_5xx = self.status_5xx.load(Ordering::Relaxed);
+        let process = collect_process_metrics();
+        let process_metrics_available = if process.available { 1 } else { 0 };
 
         let b_1ms = self.latency_bucket_1ms.load(Ordering::Relaxed);
         let b_5ms = b_1ms + self.latency_bucket_5ms.load(Ordering::Relaxed);
@@ -243,6 +286,22 @@ sentirum_lb_grpc_web_requests_total {grpc_web_requests_total}
 # TYPE sentirum_lb_websocket_requests_total counter
 sentirum_lb_websocket_requests_total {websocket_requests_total}
 
+# HELP sentirum_lb_process_metrics_available Process-level memory and FD metrics availability (Linux /proc based)
+# TYPE sentirum_lb_process_metrics_available gauge
+sentirum_lb_process_metrics_available {process_metrics_available}
+
+# HELP sentirum_lb_process_resident_memory_bytes Resident memory size in bytes
+# TYPE sentirum_lb_process_resident_memory_bytes gauge
+sentirum_lb_process_resident_memory_bytes {resident_memory_bytes}
+
+# HELP sentirum_lb_process_virtual_memory_bytes Virtual memory size in bytes
+# TYPE sentirum_lb_process_virtual_memory_bytes gauge
+sentirum_lb_process_virtual_memory_bytes {virtual_memory_bytes}
+
+# HELP sentirum_lb_process_open_fds Number of open file descriptors
+# TYPE sentirum_lb_process_open_fds gauge
+sentirum_lb_process_open_fds {open_fds}
+
 # HELP sentirum_lb_response_status_total Response status codes
 # TYPE sentirum_lb_response_status_total counter
 sentirum_lb_response_status_total{{code="2xx"}} {status_2xx}
@@ -271,6 +330,10 @@ sentirum_lb_request_duration_seconds_count {count}
             grpc_requests_total = grpc_requests_total,
             grpc_web_requests_total = grpc_web_requests_total,
             websocket_requests_total = websocket_requests_total,
+            process_metrics_available = process_metrics_available,
+            resident_memory_bytes = process.resident_memory_bytes,
+            virtual_memory_bytes = process.virtual_memory_bytes,
+            open_fds = process.open_fds,
         )
     }
 }
@@ -367,6 +430,8 @@ mod tests {
         assert!(output.contains("sentirum_lb_grpc_requests_total 1"));
         assert!(output.contains("sentirum_lb_grpc_web_requests_total 1"));
         assert!(output.contains("sentirum_lb_websocket_requests_total 1"));
+        assert!(output.contains("sentirum_lb_process_resident_memory_bytes"));
+        assert!(output.contains("sentirum_lb_process_open_fds"));
     }
 
     #[test]
@@ -396,5 +461,13 @@ mod tests {
         assert_eq!(metrics.latency_bucket_25ms.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.latency_bucket_100ms.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.latency_bucket_5s.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_parse_proc_status_value_bytes() {
+        let status = "Name:\tsentirum-lb\nVmSize:\t  2048 kB\nVmRSS:\t  1024 kB\n";
+        assert_eq!(parse_proc_status_value_bytes(status, "VmRSS:"), Some(1_048_576));
+        assert_eq!(parse_proc_status_value_bytes(status, "VmSize:"), Some(2_097_152));
+        assert_eq!(parse_proc_status_value_bytes(status, "VmData:"), None);
     }
 }

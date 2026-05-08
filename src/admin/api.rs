@@ -127,6 +127,7 @@ async fn certs_handler(State(state): State<AdminState>) -> axum::Json<serde_json
     axum::Json(serde_json::json!({
         "source": tls_source,
         "strict_sni": state.config.tls.strict_sni,
+        "require_initial_snapshot": state.config.tls.require_initial_snapshot,
         "consul_cert_prefix": state.config.tls.consul_cert_prefix,
         "loaded_certificates": runtime.as_ref().map(|s| s.loaded_certificates.clone()).unwrap_or_default(),
         "default_certificate": runtime.as_ref().and_then(|s| s.default_certificate.clone()),
@@ -173,6 +174,7 @@ async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
             "source": tls_source,
             "listen": state.config.tls.listen,
             "strict_sni": state.config.tls.strict_sni,
+            "require_initial_snapshot": state.config.tls.require_initial_snapshot,
             "cert_path": state.config.tls.cert_path,
             "key_path": state.config.tls.key_path,
             "consul_cert_prefix": state.config.tls.consul_cert_prefix,
