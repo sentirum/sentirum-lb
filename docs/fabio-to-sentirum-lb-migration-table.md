@@ -27,12 +27,12 @@ Important note:
 | Host/path routing | `urlprefix-` tags | `urlprefix-` tags | OK | Migrate |
 | Consul service discovery | Yes | Yes | OK | Migrate |
 | Consul KV routes | Yes (`/fabio/config`) in theory, but empty now | Yes (native KV route prefix) | Mostly irrelevant today | Optional mapping only |
-| Consul KV certificates | Yes | No | Gap | Replace with file sync/mount |
+| Consul KV certificates | Yes | Yes (`source = "consul_kv"`) | OK | Migrate with consul_kv or file mount |
 | Cloudflare real IP | Yes | Yes, via trusted proxies | Needs verification | Canary test |
 | WebSocket | Yes | Yes | Needs validation | Canary test |
 | gRPC/gRPC-Web | Fabio unclear / maybe limited by usage | Supported | Needs validation if used | Canary test |
 | Fabio UI | Yes | No | Gap | Replace with admin API + metrics |
-| Raw TCP / SNI | Fabio supports | sent irum-lb not production-ready | Gap | Phase 2 / future work |
+| Raw TCP / SNI | Fabio supports | Implemented (tcp, tcp+sni, https+tcp+sni, tcp-dynamic) | Needs production testing | Canary test before production |
 
 ---
 
@@ -95,22 +95,26 @@ Important note:
 - expects file paths:
   - `tls.cert_path`
   - `tls.key_path`
-- no native Consul-backed cert ingestion today
+- **or** Consul KV cert bundles via `source = "consul_kv"`:
+  - watches keys under `tls.consul_cert_prefix` (e.g. `/fabio/cert`)
+  - supports combined PEM bundles (leaf + chain + key)
+  - dynamic SNI-based certificate selection
+  - live reload without listener restart
 
 ### Recommended migration model
 | Current | Target |
 |---|---|
-| Consul KV cert bundles | Render/sync PEM files onto node/allocation |
-| Fabio loads from KV | sent irum-lb loads from mounted files |
-| dynamic KV-based rotation | rolling restart on cert update |
+| Consul KV cert bundles | Either `source = "consul_kv"` (direct) or mounted PEM files |
+| Fabio loads from KV | sent irum-lb loads from Consul KV or file |
+| dynamic KV-based rotation | Automatic with `consul_kv` source; rolling restart for file source |
 
 ### Recommended delivery options
-1. Nomad template rendering
-2. Vault/sidecar sync to files
-3. external sync job writing PEM files
+1. `source = "consul_kv"` — direct Fabio-compatible migration, zero operational change
+2. Nomad template rendering to PEM files
+3. Vault/sidecar sync to files
 
 ### Decision
-**For phase 1, do not build Consul-backed live cert reload unless required.**
+**Both modes are now supported.** `consul_kv` is the path of least change from Fabio.
 
 ---
 

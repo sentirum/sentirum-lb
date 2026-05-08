@@ -434,9 +434,9 @@ Implemented today:
 - Admin API
 - Metrics
 
-Not fully implemented yet:
+### Notes
 
-- Raw TCP proxy mode (`src/proxy/tcp.rs` is still a placeholder)
+- Raw TCP proxy modes (`tcp`, `tcp+sni`, `https+tcp+sni`, `tcp-dynamic`) are implemented but not yet production-tested — canary validation recommended before relying on them in production
 
 ## License
 
