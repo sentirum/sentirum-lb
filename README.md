@@ -101,6 +101,11 @@ listen = ""
 consul_cert_prefix = "/fabio/cert"
 strict_sni = false
 require_initial_snapshot = false
+client_auth = ""
+client_ca_source = ""
+client_ca_path = ""
+client_ca_consul_prefix = ""
+client_ca_upgrade_cn = ""
 
 [tcp]
 mode = ""
@@ -140,6 +145,40 @@ listen = ":443"
 consul_cert_prefix = "/fabio/cert"
 strict_sni = false
 require_initial_snapshot = true
+```
+
+### mTLS / client certificate auth
+
+Downstream client certificate auth is listener-wide, matching Fabio's model more closely than a per-route switch.
+Current implementation supports:
+
+- `client_auth = "optional"` — request and verify client certs when presented
+- `client_auth = "required"` — require a valid client cert for the TLS handshake
+- `client_ca_source = "consul_kv"` — dynamically load trusted client CA PEM bundles from Consul KV
+- `client_ca_source = "file"` — load trusted client CA PEMs from a file or directory on disk
+
+When mTLS is enabled, successful requests propagate verified client identity upstream with headers such as:
+
+- `X-Client-Cert-Verified`
+- `X-Client-Cert-Serial`
+- `X-Client-Cert-Organization`
+- `X-Client-Cert-Common-Name`
+- `X-Client-Cert-Organizational-Unit`
+- `X-Client-Cert-Subject`
+- `X-Client-Cert-SHA256`
+
+Consul-backed example:
+
+```toml
+[tls]
+source = "consul_kv"
+listen = ":443"
+consul_cert_prefix = "/fabio/cert"
+strict_sni = false
+require_initial_snapshot = true
+client_auth = "required"
+client_ca_source = "consul_kv"
+client_ca_consul_prefix = "/fabio/client-ca"
 ```
 
 Deployment examples:
@@ -211,6 +250,10 @@ Runtime semantics:
 - `tls.consul_cert_prefix`: Fabio-compatible certificate KV prefix, e.g. `/fabio/cert`.
 - `tls.strict_sni`: if true, fail TLS handshakes without an exact/wildcard SNI match.
 - `tls.require_initial_snapshot`: if true in `consul_kv` mode, refuse startup until the initial cert snapshot is valid.
+- `tls.client_auth`: downstream client cert mode: `optional` or `required`.
+- `tls.client_ca_source`: trusted client CA source: `file` or `consul_kv`.
+- `tls.client_ca_path`: file or directory containing trusted client CA PEMs.
+- `tls.client_ca_consul_prefix`: Consul KV prefix containing trusted client CA PEM bundles.
 - `tcp.mode`: choose `tcp`, `tcp+sni`, `https+tcp+sni`, or `tcp-dynamic`.
 - `tcp.listen`: fixed listen address for `tcp` / `tcp+sni`.
 - `tcp.refresh`: reconciliation interval for `tcp-dynamic`.
