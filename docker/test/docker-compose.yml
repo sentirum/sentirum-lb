@@ -53,6 +53,7 @@ services:
       dockerfile: Dockerfile
     command: >
       --config /app/config.toml
+      --routes /app/routes.txt
     ports:
       - "9999:9999"   # HTTP proxy
       - "9998:9998"   # Admin API
