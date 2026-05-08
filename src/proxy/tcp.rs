@@ -236,7 +236,7 @@ async fn reconcile_dynamic_listeners(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum TcpListenerMode {
     Plain,
     Sni,
@@ -370,7 +370,7 @@ async fn handle_tcp_sni_connection(
 }
 
 async fn handle_https_tcp_sni_connection(
-    mut downstream: TcpStream,
+    downstream: TcpStream,
     route_table: Arc<ManagedRouteTable>,
     config: Arc<Config>,
     https_fallback_addr: &str,
