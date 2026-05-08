@@ -223,6 +223,7 @@ Fabio-compatible semantics:
 - `GET /admin/routes`
 - `GET /admin/metrics`
 - `GET /admin/config`
+- `GET /admin/certs`
 
 Default admin bind address: `127.0.0.1:9998`
 

@@ -201,13 +201,18 @@ impl BackgroundService for ConsulTlsBackgroundService {
 struct AdminBackgroundService {
     config: Arc<Config>,
     route_table: Arc<ManagedRouteTable>,
+    tls_store: Option<Arc<DynamicCertStore>>,
 }
 
 #[async_trait]
 impl BackgroundService for AdminBackgroundService {
     async fn start(&self, mut shutdown: pingora::server::ShutdownWatch) {
         tokio::select! {
-            _ = sentirum_lb::admin::run_admin_server(self.config.clone(), self.route_table.clone()) => {}
+            _ = sentirum_lb::admin::run_admin_server(
+                self.config.clone(),
+                self.route_table.clone(),
+                self.tls_store.clone(),
+            ) => {}
             _ = shutdown.changed() => {
                 tracing::info!("Admin background service shutting down");
             }
@@ -344,6 +349,7 @@ fn main() {
 
     // Add TLS listener if configured
     let mut tls_background_service: Option<ConsulTlsBackgroundService> = None;
+    let mut tls_store_for_admin: Option<Arc<DynamicCertStore>> = None;
     match TlsMode::resolve(&config.tls) {
         Ok(Some(TlsMode::File(tls))) => match tls.validate() {
             Ok(()) => {
@@ -435,6 +441,7 @@ fn main() {
                         h2_enabled = true,
                         "Proxy listening (HTTPS/TLS)"
                     );
+                    tls_store_for_admin = Some(tls_store.clone());
                     tls_background_service = Some(ConsulTlsBackgroundService {
                         tls_store,
                         consul_config,
@@ -483,6 +490,7 @@ fn main() {
         AdminBackgroundService {
             config: shared_config,
             route_table: managed_table.clone(),
+            tls_store: tls_store_for_admin,
         },
     );
     admin_service.threads = Some(1);
