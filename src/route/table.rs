@@ -477,9 +477,7 @@ impl Table {
     pub fn lookup_tcp_route(&self, listen_port: u16) -> Option<&Arc<Route>> {
         let catch_all = format!(":{listen_port}");
         if let Some(routes) = self.routes.get(&catch_all)
-            && let Some(route) = routes.iter().find(|route| {
-                !route.targets.is_empty() && route.targets.iter().any(|target| target.is_tcp())
-            })
+            && let Some(route) = routes.iter().find(|route| route_is_tcp(route))
         {
             return Some(route);
         }
@@ -491,7 +489,7 @@ impl Table {
                 continue;
             }
             for route in routes {
-                if route.targets.is_empty() || !route.targets.iter().any(|target| target.is_tcp()) {
+                if !route_is_tcp(route) {
                     continue;
                 }
                 if matched.is_some() {
@@ -504,13 +502,20 @@ impl Table {
         matched
     }
 
+    pub fn lookup_tcp_route_for_local_addr(&self, local_addr: &str) -> Option<&Arc<Route>> {
+        if let Some(routes) = self.routes.get(local_addr)
+            && let Some(route) = routes.iter().find(|route| route_is_tcp(route))
+        {
+            return Some(route);
+        }
+
+        parse_listener_port(local_addr).and_then(|port| self.lookup_tcp_route(port))
+    }
+
     pub fn tcp_listener_ports(&self) -> Vec<u16> {
         let mut ports = BTreeSet::new();
         for (host, routes) in &self.routes {
-            if !routes
-                .iter()
-                .any(|route| route.targets.iter().any(|target| target.is_tcp()))
-            {
+            if !routes.iter().all(|route| route_is_tcp(route)) {
                 continue;
             }
 
@@ -582,6 +587,10 @@ impl RouteTable {
     pub fn stats_registry(&self) -> Arc<TargetStatsRegistry> {
         self.stats_registry.clone()
     }
+}
+
+fn route_is_tcp(route: &Arc<Route>) -> bool {
+    !route.targets.is_empty() && route.targets.iter().all(|target| target.is_tcp())
 }
 
 fn parse_listener_port(host: &str) -> Option<u16> {
