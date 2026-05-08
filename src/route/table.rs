@@ -1,5 +1,5 @@
 use crate::route::definition::{RouteCmd, RouteDef};
-use crate::route::target::Target;
+use crate::route::target::{Target, TargetStatsRegistry};
 use arc_swap::ArcSwap;
 use glob::Pattern;
 use std::collections::HashMap;
@@ -182,16 +182,31 @@ impl Route {
 
 /// The routing table: maps host -> list of routes.
 /// Routes are sorted by path in reverse order (most specific first).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Table {
     /// host -> sorted routes
     routes: HashMap<String, Vec<Arc<Route>>>,
+    stats_registry: Option<Arc<TargetStatsRegistry>>,
+}
+
+impl Default for Table {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Table {
     pub fn new() -> Self {
         Self {
             routes: HashMap::new(),
+            stats_registry: None,
+        }
+    }
+
+    pub fn with_stats_registry(stats_registry: Arc<TargetStatsRegistry>) -> Self {
+        Self {
+            routes: HashMap::new(),
+            stats_registry: Some(stats_registry),
         }
     }
 
