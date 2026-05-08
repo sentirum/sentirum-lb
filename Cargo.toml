@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 # Proxy framework (pingora umbrella crate re-exports everything)
-pingora = { version = "0.5", features = ["proxy", "lb", "boringssl"] }
+pingora = { version = "0.5", features = ["proxy", "lb", "openssl"] }
 pingora-http = "0.5"
 
 # Async runtime
