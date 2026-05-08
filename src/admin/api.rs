@@ -132,7 +132,26 @@ async fn certs_handler(State(state): State<AdminState>) -> axum::Json<serde_json
         "require_initial_snapshot": state.config.tls.require_initial_snapshot,
         "consul_cert_prefix": state.config.tls.consul_cert_prefix,
         "loaded_certificates": runtime.as_ref().map(|s| s.loaded_certificates.clone()).unwrap_or_default(),
-        "certificates": runtime.as_ref().map(|s
+        "certificates": runtime.as_ref().map(|s| s.certificates.clone()).unwrap_or_default(),
+        "default_certificate": runtime.as_ref().and_then(|s| s.default_certificate.clone()),
+        "last_consul_index": runtime.as_ref().map(|s| s.last_consul_index).unwrap_or_default(),
+        "last_reload_unix": runtime.as_ref().and_then(|s| s.last_reload_unix),
+        "last_error": runtime.as_ref().and_then(|s| s.last_error.clone()),
+        "client_auth": {
+            "mode": state.config.tls.client_auth,
+            "ca_source": state.config.tls.client_ca_source,
+            "ca_path": state.config.tls.client_ca_path,
+            "ca_consul_prefix": state.config.tls.client_ca_consul_prefix,
+            "ca_upgrade_cn": state.config.tls.client_ca_upgrade_cn,
+            "loaded_entries": client_ca_runtime.as_ref().map(|s| s.loaded_entries.clone()).unwrap_or_default(),
+            "certificates": client_ca_runtime.as_ref().map(|s| s.certificates.clone()).unwrap_or_default(),
+            "last_consul_index": client_ca_runtime.as_ref().map(|s| s.last_consul_index).unwrap_or_default(),
+            "last_reload_unix": client_ca_runtime.as_ref().and_then(|s| s.last_reload_unix),
+            "last_error": client_ca_runtime.as_ref().and_then(|s| s.last_error.clone()),
+        }
+    }))
+}
+
 async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_json::Value> {
     let tls_source = match crate::proxy::tls::TlsMode::resolve(&state.config.tls) {
         Ok(Some(crate::proxy::tls::TlsMode::File(_))) => "file",
@@ -174,6 +193,11 @@ async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
             "cert_path": state.config.tls.cert_path,
             "key_path": state.config.tls.key_path,
             "consul_cert_prefix": state.config.tls.consul_cert_prefix,
+            "client_auth": state.config.tls.client_auth,
+            "client_ca_source": state.config.tls.client_ca_source,
+            "client_ca_path": state.config.tls.client_ca_path,
+            "client_ca_consul_prefix": state.config.tls.client_ca_consul_prefix,
+            "client_ca_upgrade_cn": state.config.tls.client_ca_upgrade_cn,
         },
         "tcp": {
             "mode": state.config.tcp.mode,
@@ -188,6 +212,7 @@ pub async fn run_admin_server(
     config: Arc<Config>,
     route_table: Arc<ManagedRouteTable>,
     tls_store: Option<Arc<DynamicCertStore>>,
+    client_ca_store: Option<Arc<DynamicClientCaStore>>,
 ) {
     let addr = config.server.admin_listen.clone();
 
@@ -201,6 +226,7 @@ pub async fn run_admin_server(
         config,
         route_table,
         tls_store,
+        client_ca_store,
     };
     let app = build_router(state);
 
