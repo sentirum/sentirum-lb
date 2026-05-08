@@ -388,7 +388,9 @@ fn main() {
     match TlsMode::resolve(&config.tls) {
         Ok(Some(TlsMode::File(tls))) => match tls.validate() {
             Ok(()) => {
-                let tls_listen = tls_listen_addr(&config.server.listen, &config.tls.listen);
+                let tls_listen = tcp_https_fallback_addr
+                    .clone()
+                    .unwrap_or_else(|| public_tls_listen.clone());
                 match pingora::listeners::tls::TlsSettings::intermediate(
                     &tls.cert_path,
                     &tls.key_path,
@@ -398,10 +400,12 @@ fn main() {
                         lb_service.add_tls_with_settings(&tls_listen, None, settings);
                         tracing::info!(
                             addr = %tls_listen,
+                            public_addr = %public_tls_listen,
                             source = "file",
                             h2_enabled = true,
                             "Proxy listening (HTTPS/TLS)"
                         );
+                        https_fallback_ready = true;
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "Failed to configure file-based TLS listener");
@@ -413,7 +417,9 @@ fn main() {
             }
         },
         Ok(Some(TlsMode::ConsulKv(consul_tls))) => {
-            let tls_listen = tls_listen_addr(&config.server.listen, &config.tls.listen);
+            let tls_listen = tcp_https_fallback_addr
+                .clone()
+                .unwrap_or_else(|| public_tls_listen.clone());
             let tls_store = Arc::new(DynamicCertStore::new(consul_tls.strict_sni));
             let consul_config = ConsulConfig::for_tls_cert_watch(&config.consul);
             let mut initial_index = 0;
@@ -495,12 +501,14 @@ fn main() {
                     lb_service.add_tls_with_settings(&tls_listen, None, settings);
                     tracing::info!(
                         addr = %tls_listen,
+                        public_addr = %public_tls_listen,
                         source = "consul_kv",
                         prefix = %consul_tls.cert_prefix,
                         strict_sni = consul_tls.strict_sni,
                         h2_enabled = true,
                         "Proxy listening (HTTPS/TLS)"
                     );
+                    https_fallback_ready = true;
                     tls_store_for_admin = Some(tls_store.clone());
                     tls_background_service = Some(ConsulTlsBackgroundService {
                         tls_store,
@@ -545,19 +553,19 @@ fn main() {
         server.add_service(tls_service);
     }
 
-    let tcp_mode = match sentirum_lb::proxy::tcp::resolve_tcp_mode(shared_config.as_ref()) {
-        Ok(mode) => mode,
-        Err(error) => {
-            tracing::error!(%error, "Invalid TCP configuration; TCP proxy disabled");
-            sentirum_lb::proxy::tcp::TcpMode::Disabled
-        }
-    };
-    if tcp_mode != sentirum_lb::proxy::tcp::TcpMode::Disabled {
+    if tcp_mode == TcpMode::HttpsTcpSni && !https_fallback_ready {
+        tracing::error!("https+tcp+sni mode requested but HTTPS fallback listener was not configured; disabling TCP proxy mode");
+        tcp_mode = TcpMode::Disabled;
+    }
+
+    if tcp_mode != TcpMode::Disabled {
         let mut tcp_service = background_service(
             "tcp proxy",
             TcpBackgroundService {
                 route_table: managed_table.clone(),
                 config: shared_config.clone(),
+                mode: tcp_mode.clone(),
+                https_fallback_addr: tcp_https_fallback_addr.clone(),
             },
         );
         tcp_service.threads = Some(1);

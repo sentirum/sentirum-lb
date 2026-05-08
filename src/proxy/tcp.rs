@@ -771,6 +771,10 @@ mod tests {
             }
         );
 
+        let mut https_sni = (*config()).clone();
+        https_sni.tcp.mode = "https+tcp+sni".to_string();
+        assert_eq!(resolve_tcp_mode(&https_sni).unwrap(), TcpMode::HttpsTcpSni);
+
         let mut dynamic = (*config()).clone();
         dynamic.tcp.mode = "tcp-dynamic".to_string();
         dynamic.tcp.refresh = "7s".to_string();
