@@ -1017,14 +1017,18 @@ fn first_subject_value(cert: &X509, nid: Nid) -> Option<String> {
 }
 
 fn certificate_subject_string(cert: &X509) -> String {
+    certificate_subject_string_ref(cert)
+}
+
+fn certificate_subject_string_ref(cert: &pingora::tls::x509::X509Ref) -> String {
     let mut parts = Vec::new();
-    if let Some(cn) = first_subject_value(cert, Nid::COMMONNAME) {
+    if let Some(cn) = first_name_value(cert.subject_name(), Nid::COMMONNAME) {
         parts.push(format!("CN={cn}"));
     }
-    if let Some(org) = first_subject_value(cert, Nid::ORGANIZATIONNAME) {
+    if let Some(org) = first_name_value(cert.subject_name(), Nid::ORGANIZATIONNAME) {
         parts.push(format!("O={org}"));
     }
-    if let Some(ou) = first_subject_value(cert, Nid::ORGANIZATIONALUNITNAME) {
+    if let Some(ou) = first_name_value(cert.subject_name(), Nid::ORGANIZATIONALUNITNAME) {
         parts.push(format!("OU={ou}"));
     }
     if parts.is_empty() {
@@ -1221,7 +1225,21 @@ impl ClientAuthState {
                 if preverify_ok {
                     return true;
                 }
+                tracing::warn!(
+                    ca_upgrade_cn,
+                    error_code = store_ctx.error().as_raw(),
+                    error = %store_ctx.error(),
+                    subject = store_ctx.current_cert().map(certificate_subject_string_ref),
+                    "client certificate verification failed before CA-upgrade override"
+                );
                 if should_accept_ca_upgrade_error(&ca_upgrade_cn, store_ctx) {
+                    tracing::warn!(
+                        ca_upgrade_cn,
+                        error_code = store_ctx.error().as_raw(),
+                        error = %store_ctx.error(),
+                        subject = store_ctx.current_cert().map(certificate_subject_string_ref),
+                        "accepting client certificate verification failure via CA-upgrade override"
+                    );
                     store_ctx.set_error(X509VerifyResult::OK);
                     return true;
                 }
