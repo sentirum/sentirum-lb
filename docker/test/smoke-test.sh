@@ -7,7 +7,7 @@ ADMIN="http://localhost:9998"
 TOKEN="test-token"
 PASS=0
 FAIL=0
-C="curl --max-time 5 -s"
+C="curl --max-time 5 -s -H "Connection: close""
 
 header() {
   echo ""
