@@ -1034,10 +1034,56 @@ fn certificate_subject_string(cert: &X509) -> String {
     }
 }
 
-fn maybe_upgrade_ca_certificate(_cert: &X509, _ca_upgrade_cn: &str) {
-    // OpenSSL/X509 objects exposed through Pingora do not currently offer safe mutable
-    // CA-flag rewriting like Fabio's Go path. Keep the config surface for parity and
-    // future extension, but treat the loaded certificate as-is for now.
+fn maybe_upgrade_ca_certificate(cert: &X509, ca_upgrade_cn: &str) {
+    if should_treat_as_upgraded_ca(ca_upgrade_cn, ssl_sys::X509_V_ERR_INVALID_CA, cert) {
+        tracing::info!(
+            subject = %certificate_subject_string(cert),
+            ca_upgrade_cn,
+            "Loaded client CA certificate matches CA upgrade CN; enabling Fabio-compatible verify override"
+        );
+    }
+}
+
+fn should_accept_ca_upgrade_error(
+    ca_upgrade_cn: &str,
+    store_ctx: &mut pingora::tls::x509::X509StoreContextRef,
+) -> bool {
+    let Some(cert) = store_ctx.current_cert() else {
+        return false;
+    };
+    should_treat_as_upgraded_ca(ca_upgrade_cn, store_ctx.error().as_raw(), cert)
+}
+
+fn should_treat_as_upgraded_ca(
+    ca_upgrade_cn: &str,
+    error_code: i32,
+    cert: &pingora::tls::x509::X509Ref,
+) -> bool {
+    if ca_upgrade_cn.is_empty() {
+        return false;
+    }
+
+    let is_ca_flag_error = matches!(
+        error_code,
+        ssl_sys::X509_V_ERR_INVALID_CA
+            | ssl_sys::X509_V_ERR_KEYUSAGE_NO_CERTSIGN
+            | ssl_sys::X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT
+            | ssl_sys::X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN
+            | ssl_sys::X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY
+            | ssl_sys::X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE
+    );
+    if !is_ca_flag_error {
+        return false;
+    }
+
+    let issuer_cn = first_name_value(cert.issuer_name(), Nid::COMMONNAME);
+    let subject_cn = first_name_value(cert.subject_name(), Nid::COMMONNAME);
+    issuer_cn.as_deref() == Some(ca_upgrade_cn) || subject_cn.as_deref() == Some(ca_upgrade_cn)
+}
+
+fn first_name_value(name: &pingora::tls::x509::X509NameRef, nid: Nid) -> Option<String> {
+    name.entries_by_nid(nid)
+        .find_map(|entry| entry.data().as_utf8().ok().map(|value| value.to_string()))
 }
 
 struct PemBlock<'a> {
@@ -1452,6 +1498,32 @@ mod tests {
         assert_eq!(status.loaded_entries, vec!["client-ca.pem"]);
         assert_eq!(status.last_consul_index, 42);
         assert!(status.certificates.iter().any(|c| c.entry_name == "client-ca.pem"));
+    }
+
+    #[test]
+    fn test_should_treat_as_upgraded_ca_matches_configured_cn_on_ca_errors() {
+        let cert = self_signed_cert(&["ApiGateway"]);
+        let cert = X509::from_pem(cert.cert.pem().as_bytes()).unwrap();
+        assert!(should_treat_as_upgraded_ca(
+            "ApiGateway",
+            ssl_sys::X509_V_ERR_INVALID_CA,
+            &cert
+        ));
+        assert!(should_treat_as_upgraded_ca(
+            "ApiGateway",
+            ssl_sys::X509_V_ERR_KEYUSAGE_NO_CERTSIGN,
+            &cert
+        ));
+        assert!(!should_treat_as_upgraded_ca(
+            "OtherCN",
+            ssl_sys::X509_V_ERR_INVALID_CA,
+            &cert
+        ));
+        assert!(!should_treat_as_upgraded_ca(
+            "ApiGateway",
+            ssl_sys::X509_V_ERR_CERT_HAS_EXPIRED,
+            &cert
+        ));
     }
 
     #[test]
