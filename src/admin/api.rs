@@ -911,7 +911,36 @@ async fn admin_auth_middleware(
         false
     };
 
-    if token_auth || session_auth {
+    // Path C: query-param token auth for SSE endpoints (EventSource doesn't support headers).
+    let query_auth = if !token_auth && !session_auth {
+        request.uri().query()
+            .and_then(|qs| {
+                qs.split('&')
+                    .filter_map(|pair| pair.split_once('='))
+                    .find(|(k, _)| *k == "token")
+                    .map(|(_, v)| v.to_string())
+            })
+            .map(|token| {
+                // Check against admin_token (constant-time).
+                let matches_admin = !expected.is_empty() && constant_time_eq(&token, expected);
+                if matches_admin {
+                    return true;
+                }
+                // Check against session store.
+                // Use try_write to avoid blocking; fall through to false if contested.
+                if let Ok(mut sessions) = state.sessions.try_write() {
+                    evict_expired_sessions(&mut sessions);
+                    sessions.get(&token).is_some()
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    if token_auth || session_auth || query_auth {
         Ok(next.run(request).await)
     } else {
         Err((
