@@ -512,6 +512,13 @@ impl Table {
         parse_listener_port(local_addr).and_then(|port| self.lookup_tcp_route(port))
     }
 
+    pub fn lookup_tcp_sni_route(&self, host: &str) -> Option<&Arc<Route>> {
+        self.routes
+            .get(&host.to_ascii_lowercase())?
+            .iter()
+            .find(|route| route.path == "/" && route_is_tcp(route))
+    }
+
     pub fn tcp_listener_ports(&self) -> Vec<u16> {
         let mut ports = BTreeSet::new();
         for (host, routes) in &self.routes {
