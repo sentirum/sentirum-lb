@@ -367,4 +367,12 @@ mod tests {
     fn tls_config_defaults_require_initial_snapshot_to_false() {
         assert!(!TlsConfig::default().require_initial_snapshot);
     }
+
+    #[test]
+    fn tcp_config_defaults_to_disabled_with_fabio_refresh() {
+        let tcp = TcpConfig::default();
+        assert!(tcp.mode.is_empty());
+        assert!(tcp.listen.is_empty());
+        assert_eq!(tcp.refresh, "5s");
+    }
 }
