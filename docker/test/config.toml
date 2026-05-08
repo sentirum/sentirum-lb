@@ -1,6 +1,6 @@
 # Sentirum LB — local test configuration
 [server]
-listen = ":9999"
+listen = "0.0.0.0:9999"
 admin_listen = "0.0.0.0:9998"
 admin_token = "test-token"
 workers = 2
