@@ -120,6 +120,7 @@ Each KV value may be a single bundled PEM containing:
 - private key
 
 Certificates are selected dynamically per SNI and reloaded from Consul without listener restarts.
+Existing connections stay alive; only new TLS handshakes use the updated certificate snapshot.
 
 Example:
 
@@ -130,6 +131,11 @@ listen = ":443"
 consul_cert_prefix = "/fabio/cert"
 strict_sni = false
 ```
+
+Deployment examples:
+
+- Nomad job template: `docs/sentirum-lb.nomad.hcl`
+- Canary checklist: `docs/sentirum-lb-canary-checklist.md`
 
 ### Important knobs
 
