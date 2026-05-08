@@ -856,7 +856,6 @@ fn append_forwarded_headers(
     Ok(())
 }
 
-#[derive(Debug, Clone, Default)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ClientCertIdentity {
     verified: bool,
@@ -1011,7 +1010,7 @@ fn first_subject_value(cert: &pingora::tls::x509::X509Ref, nid: Nid) -> Option<S
         .find_map(|entry| entry.data().as_utf8().ok().map(|value| value.to_string()))
 }
 
-fn subject_string(cert: &pingora::tls::x509::X509) -> String {
+fn subject_string(cert: &pingora::tls::x509::X509Ref) -> String {
     let mut parts = Vec::new();
     if let Some(cn) = first_subject_value(cert, Nid::COMMONNAME) {
         parts.push(format!("CN={cn}"));
@@ -1164,7 +1163,7 @@ mod tests {
         let digest = parsed.digest(MessageDigest::sha256()).unwrap();
         let cached = cached_client_certificate_identity(digest.as_ref()).unwrap();
         assert_eq!(cached.common_name.as_deref(), Some("client.sentirum.test"));
-        assert_eq!(cached.sha256.as_deref(), Some(&hex_lower(digest.as_ref())));
+        assert_eq!(cached.sha256.as_deref(), Some(hex_lower(digest.as_ref()).as_str()));
         assert!(cached.subject.as_deref().is_some_and(|v| v.contains("CN=client.sentirum.test")));
     }
 
