@@ -9,6 +9,8 @@ use pingora::modules::http::{
     grpc_web::{GrpcWeb, GrpcWebBridge},
 };
 use pingora::prelude::*;
+use pingora::protocols::Ssl as _;
+use pingora::tls::{hash::MessageDigest, nid::Nid};
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 use std::borrow::Cow;
