@@ -2,7 +2,7 @@ use crate::route::definition::{RouteCmd, RouteDef};
 use crate::route::target::{Target, TargetStatsRegistry};
 use arc_swap::ArcSwap;
 use glob::Pattern;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// A route maps a host + path prefix to one or more target backends.
@@ -474,6 +474,53 @@ impl Table {
             .sum()
     }
 
+    pub fn lookup_tcp_route(&self, listen_port: u16) -> Option<&Arc<Route>> {
+        let catch_all = format!(":{listen_port}");
+        if let Some(routes) = self.routes.get(&catch_all)
+            && let Some(route) = routes.iter().find(|route| {
+                !route.targets.is_empty() && route.targets.iter().any(|target| target.is_tcp())
+            })
+        {
+            return Some(route);
+        }
+
+        let suffix = format!(":{listen_port}");
+        let mut matched: Option<&Arc<Route>> = None;
+        for (host, routes) in &self.routes {
+            if !host.ends_with(&suffix) {
+                continue;
+            }
+            for route in routes {
+                if route.targets.is_empty() || !route.targets.iter().any(|target| target.is_tcp()) {
+                    continue;
+                }
+                if matched.is_some() {
+                    return None;
+                }
+                matched = Some(route);
+            }
+        }
+
+        matched
+    }
+
+    pub fn tcp_listener_ports(&self) -> Vec<u16> {
+        let mut ports = BTreeSet::new();
+        for (host, routes) in &self.routes {
+            if !routes
+                .iter()
+                .any(|route| route.targets.iter().any(|target| target.is_tcp()))
+            {
+                continue;
+            }
+
+            if let Some(port) = parse_listener_port(host) {
+                ports.insert(port);
+            }
+        }
+        ports.into_iter().collect()
+    }
+
     /// Get all hosts in the table.
     pub fn hosts(&self) -> Vec<&str> {
         self.routes.keys().map(|s| s.as_str()).collect()
@@ -535,6 +582,10 @@ impl RouteTable {
     pub fn stats_registry(&self) -> Arc<TargetStatsRegistry> {
         self.stats_registry.clone()
     }
+}
+
+fn parse_listener_port(host: &str) -> Option<u16> {
+    host.rsplit(':').next()?.parse().ok()
 }
 
 fn starts_with_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
