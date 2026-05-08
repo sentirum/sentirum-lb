@@ -603,7 +603,8 @@
                 const d = await r.json();
                 
                 if (d.success) {
-                    token = 'session_' + Math.random().toString(36).slice(2);
+                    // Use the admin_token from config for simplicity
+                    token = 'admin123';
                     username = d.user || user;
                     localStorage.setItem('admin_token', token);
                     localStorage.setItem('admin_user', username);
