@@ -1137,11 +1137,15 @@ mod tests {
         assert!(cb.allow_request());
         assert_eq!(cb.current_state(), CircuitState::HalfOpen);
 
-        // Successful probes close the circuit
+        // First two successes: circuit stays half-open
         cb.record_success();
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen, "Should stay half-open after 1 success");
         cb.record_success();
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen, "Should stay half-open after 2 successes");
+
+        // Third success: circuit closes
         cb.record_success();
-        assert_eq!(cb.current_state(), CircuitState::Closed);
+        assert_eq!(cb.current_state(), CircuitState::Closed, "Should close after 3 successes");
     }
 
     #[test]
