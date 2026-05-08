@@ -254,6 +254,7 @@ Runtime semantics:
 - `tls.client_ca_source`: trusted client CA source: `file` or `consul_kv`.
 - `tls.client_ca_path`: file or directory containing trusted client CA PEMs.
 - `tls.client_ca_consul_prefix`: Consul KV prefix containing trusted client CA PEM bundles.
+- `tls.client_ca_upgrade_cn`: Fabio-style CA upgrade compatibility knob; when client-CA verification hits CA/key-usage validation errors for a cert whose issuer/subject CN matches this value, Sentirum LB tolerates that verification path.
 - `tcp.mode`: choose `tcp`, `tcp+sni`, `https+tcp+sni`, or `tcp-dynamic`.
 - `tcp.listen`: fixed listen address for `tcp` / `tcp+sni`.
 - `tcp.refresh`: reconciliation interval for `tcp-dynamic`.
