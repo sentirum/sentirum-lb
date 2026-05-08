@@ -1,157 +1,322 @@
 use crate::config::Config;
-use crate::route::picker::{Picker, create_picker};
+use crate::route::picker::create_picker;
 use crate::route::registry::ManagedRouteTable;
 use crate::route::table::Table;
 use crate::route::target::Target;
 use async_trait::async_trait;
-use pingora::apps::ServerApp;
-use pingora::connectors::TransportConnector;
-use pingora::protocols::Stream;
-use pingora::server::ShutdownWatch;
-use pingora::services::listening::Service as ListeningService;
-use pingora::upstreams::peer::BasicPeer;
+use pingora::services::background::BackgroundService;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::time::Duration;
+use tokio::io::copy_bidirectional;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 
-pub struct TcpProxyApp {
-    route_table: Arc<ManagedRouteTable>,
-    picker: Box<dyn Picker>,
-    config: Arc<Config>,
-    listen_port: u16,
-    client_connector: TransportConnector,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TcpMode {
+    Disabled,
+    Tcp { listen: String },
+    TcpDynamic { refresh: Duration },
 }
 
-impl TcpProxyApp {
-    pub fn new(route_table: Arc<ManagedRouteTable>, config: Arc<Config>, listen_port: u16) -> Self {
-        Self {
-            route_table,
-            picker: create_picker(&config.proxy.strategy),
-            config,
-            listen_port,
-            client_connector: TransportConnector::new(None),
+pub fn resolve_tcp_mode(config: &Config) -> Result<TcpMode, String> {
+    let mode = config.tcp.mode.trim().to_ascii_lowercase();
+    match mode.as_str() {
+        "" | "disabled" => Ok(TcpMode::Disabled),
+        "tcp" => {
+            let listen = config.tcp.listen.trim();
+            if listen.is_empty() {
+                return Err("tcp.listen cannot be empty when tcp.mode=tcp".to_string());
+            }
+            Ok(TcpMode::Tcp {
+                listen: listen.to_string(),
+            })
         }
+        "tcp-dynamic" => Ok(TcpMode::TcpDynamic {
+            refresh: crate::config::Config::parse_optional_duration(&config.tcp.refresh)
+                .unwrap_or_else(|| Duration::from_secs(5)),
+        }),
+        "tcp+sni" | "https+tcp+sni" => Err(format!(
+            "tcp.mode={mode} is not implemented yet; use tcp or tcp-dynamic for now"
+        )),
+        other => Err(format!(
+            "unknown tcp.mode '{other}', expected 'tcp' or 'tcp-dynamic'"
+        )),
     }
+}
 
-    fn lookup_target(&self) -> Option<Arc<Target>> {
-        let table = self.route_table.get();
-        let table: &Table = &table;
-        let route = table.lookup_tcp_route(self.listen_port)?;
-        self.picker
-            .pick(&route.targets, &route.w_targets, &route.rr_counter)
-    }
+pub struct TcpBackgroundService {
+    pub route_table: Arc<ManagedRouteTable>,
+    pub config: Arc<Config>,
+}
 
-    async fn connect_upstream(&self, target: &Target) -> Option<Stream> {
-        if !target.is_host_safe() && !target.ssrf_skip_verify() {
-            tracing::warn!(
-                listen_port = self.listen_port,
-                host = target.upstream_host(),
-                service = %target.service,
-                "Blocked TCP upstream target: private/reserved IP (SSRF protection)"
-            );
-            return None;
-        }
-
-        let host = target.upstream_host();
-        let port = target.upstream_port();
-        let addr_str = if host.contains(':') {
-            format!("[{host}]:{port}")
-        } else {
-            format!("{host}:{port}")
-        };
-
-        let mut addrs = match tokio::net::lookup_host(&addr_str).await {
-            Ok(addrs) => addrs,
+#[async_trait]
+impl BackgroundService for TcpBackgroundService {
+    async fn start(&self, mut shutdown: pingora::server::ShutdownWatch) {
+        match resolve_tcp_mode(&self.config) {
+            Ok(TcpMode::Disabled) => {
+                tracing::info!("TCP proxy mode disabled, skipping TCP background service");
+            }
+            Ok(TcpMode::Tcp { listen }) => {
+                let port = match parse_listener_port(&listen) {
+                    Some(port) => port,
+                    None => {
+                        tracing::error!(listen = %listen, "Invalid tcp.listen address");
+                        return;
+                    }
+                };
+                tracing::info!(addr = %listen, "TCP proxy listening (fixed)");
+                run_tcp_listener(
+                    listen,
+                    port,
+                    self.route_table.clone(),
+                    self.config.clone(),
+                    &mut shutdown,
+                )
+                .await;
+            }
+            Ok(TcpMode::TcpDynamic { refresh }) => {
+                tracing::info!(refresh_ms = refresh.as_millis(), "TCP proxy listening (dynamic)");
+                run_dynamic_tcp_manager(
+                    refresh,
+                    self.route_table.clone(),
+                    self.config.clone(),
+                    &mut shutdown,
+                )
+                .await;
+            }
             Err(error) => {
-                tracing::warn!(listen_port = self.listen_port, host, port, %error, "TCP DNS resolution failed");
-                return None;
+                tracing::error!(%error, "Invalid TCP configuration");
             }
-        };
-
-        let resolved = match addrs.next() {
-            Some(addr) => addr,
-            None => {
-                tracing::warn!(listen_port = self.listen_port, host, port, "No TCP upstream IP addresses found");
-                return None;
-            }
-        };
-
-        if !target.ssrf_skip_verify()
-            && (crate::route::target::is_ip_always_blocked(&resolved.ip())
-                || (!target.source_allows_private_upstreams()
-                    && crate::route::target::is_ip_rfc1918(&resolved.ip())))
-        {
-            tracing::warn!(
-                listen_port = self.listen_port,
-                host,
-                resolved_ip = %resolved.ip(),
-                service = %target.service,
-                source = ?target.source,
-                "Blocked TCP upstream target during resolution (SSRF protection)"
-            );
-            return None;
         }
+    }
+}
 
-        let peer = BasicPeer::new(&resolved.to_string());
-        match self.client_connector.new_stream(&peer).await {
-            Ok(stream) => Some(stream),
-            Err(error) => {
-                tracing::warn!(
-                    listen_port = self.listen_port,
-                    target_url = %target.url,
-                    %error,
-                    "Failed to open TCP upstream connection"
-                );
-                None
+async fn run_dynamic_tcp_manager(
+    refresh: Duration,
+    route_table: Arc<ManagedRouteTable>,
+    config: Arc<Config>,
+    shutdown: &mut pingora::server::ShutdownWatch,
+) {
+    let mut listeners: HashMap<u16, DynamicListenerHandle> = HashMap::new();
+    let mut interval = tokio::time::interval(refresh);
+
+    reconcile_dynamic_listeners(&mut listeners, route_table.clone(), config.clone()).await;
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                tracing::info!("TCP dynamic listener manager shutting down");
+                break;
+            }
+            _ = interval.tick() => {
+                reconcile_dynamic_listeners(&mut listeners, route_table.clone(), config.clone()).await;
             }
         }
     }
 
-    async fn duplex(&self, mut downstream: Stream, mut upstream: Stream) {
-        let mut downstream_buf = [0_u8; 16 * 1024];
-        let mut upstream_buf = [0_u8; 16 * 1024];
+    for (port, handle) in listeners {
+        let _ = handle.shutdown.send(true);
+        tracing::info!(listen_port = port, "Stopping dynamic TCP listener");
+        handle.task.abort();
+    }
+}
 
-        loop {
-            tokio::select! {
-                read = downstream.read(&mut downstream_buf) => {
-                    let read = match read {
-                        Ok(read) => read,
-                        Err(error) => {
-                            tracing::debug!(listen_port = self.listen_port, %error, "TCP downstream read failed");
-                            return;
-                        }
-                    };
-                    if read == 0 {
-                        return;
-                    }
-                    if upstream.write_all(&downstream_buf[..read]).await.is_err() {
-                        return;
-                    }
-                    if upstream.flush().await.is_err() {
-                        return;
-                    }
+struct DynamicListenerHandle {
+    shutdown: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+async fn reconcile_dynamic_listeners(
+    listeners: &mut HashMap<u16, DynamicListenerHandle>,
+    route_table: Arc<ManagedRouteTable>,
+    config: Arc<Config>,
+) {
+    let ports = route_table.get().tcp_listener_ports();
+
+    let existing_ports: Vec<u16> = listeners.keys().copied().collect();
+    for port in existing_ports {
+        if ports.contains(&port) {
+            continue;
+        }
+
+        if let Some(handle) = listeners.remove(&port) {
+            let _ = handle.shutdown.send(true);
+            tracing::info!(listen_port = port, "Stopping dynamic TCP listener");
+            handle.task.abort();
+        }
+    }
+
+    for port in ports {
+        if listeners.contains_key(&port) {
+            continue;
+        }
+
+        let listen = format!(":{port}");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let route_table = route_table.clone();
+        let config = config.clone();
+        let task = tokio::spawn(async move {
+            run_tcp_listener_with_watch(listen, port, route_table, config, shutdown_rx).await;
+        });
+        listeners.insert(
+            port,
+            DynamicListenerHandle {
+                shutdown: shutdown_tx,
+                task,
+            },
+        );
+    }
+}
+
+async fn run_tcp_listener(
+    listen: String,
+    listen_port: u16,
+    route_table: Arc<ManagedRouteTable>,
+    config: Arc<Config>,
+    shutdown: &mut pingora::server::ShutdownWatch,
+) {
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let listener_task = tokio::spawn(async move {
+        run_tcp_listener_with_watch(listen, listen_port, route_table, config, shutdown_rx).await;
+    });
+
+    let _ = shutdown.changed().await;
+    let _ = shutdown_tx.send(true);
+    tracing::info!(listen_port, "TCP listener shutting down");
+    listener_task.abort();
+}
+
+async fn run_tcp_listener_with_watch(
+    listen: String,
+    listen_port: u16,
+    route_table: Arc<ManagedRouteTable>,
+    config: Arc<Config>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let listener = match TcpListener::bind(&listen).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            tracing::error!(addr = %listen, %error, "Failed to bind TCP listener");
+            return;
+        }
+    };
+
+    tracing::info!(addr = %listen, listen_port, "TCP listener started");
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    break;
                 }
-                read = upstream.read(&mut upstream_buf) => {
-                    let read = match read {
-                        Ok(read) => read,
-                        Err(error) => {
-                            tracing::debug!(listen_port = self.listen_port, %error, "TCP upstream read failed");
-                            return;
-                        }
-                    };
-                    if read == 0 {
-                        return;
+            }
+            accepted = listener.accept() => {
+                let (downstream, peer_addr) = match accepted {
+                    Ok(conn) => conn,
+                    Err(error) => {
+                        tracing::warn!(addr = %listen, %error, "TCP accept failed");
+                        continue;
                     }
-                    if downstream.write_all(&upstream_buf[..read]).await.is_err() {
-                        return;
+                };
+
+                let route_table = route_table.clone();
+                let config = config.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = handle_tcp_connection(downstream, route_table, config).await {
+                        tracing::debug!(listen_port, client = %peer_addr, %error, "TCP proxy connection ended with error");
                     }
-                    if downstream.flush().await.is_err() {
-                        return;
-                    }
-                }
+                });
             }
         }
     }
+}
+
+async fn handle_tcp_connection(
+    mut downstream: TcpStream,
+    route_table: Arc<ManagedRouteTable>,
+    config: Arc<Config>,
+) -> Result<(), std::io::Error> {
+    let local_addr = downstream.local_addr()?;
+    let local_addr_str = local_addr.to_string();
+    let target = match lookup_target(&route_table, &config.proxy.strategy, &local_addr_str) {
+        Some(target) => target,
+        None => {
+            tracing::warn!(local_addr = %local_addr_str, "No TCP route found for local listener");
+            return Ok(());
+        }
+    };
+
+    if !try_acquire_upstream_slot(&target, config.proxy.max_connections as u64) {
+        tracing::warn!(local_addr = %local_addr_str, target_url = %target.url, max_connections = config.proxy.max_connections, "TCP upstream concurrency limit reached");
+        return Ok(());
+    }
+
+    crate::metrics::prometheus::global().connect();
+    let _guard = TcpConnectionGuard {
+        target: target.clone(),
+    };
+
+    let mut upstream = match connect_upstream(&target, &config).await {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            tracing::warn!(target_url = %target.url, %error, "Failed to open TCP upstream connection");
+            return Ok(());
+        }
+    };
+
+    let _ = copy_bidirectional(&mut downstream, &mut upstream).await?;
+    Ok(())
+}
+
+fn lookup_target(
+    route_table: &Arc<ManagedRouteTable>,
+    strategy: &str,
+    local_addr: &str,
+) -> Option<Arc<Target>> {
+    let table = route_table.get();
+    let table: &Table = &table;
+    let route = table.lookup_tcp_route_for_local_addr(local_addr)?;
+    create_picker(strategy).pick(&route.targets, &route.w_targets, &route.rr_counter)
+}
+
+async fn connect_upstream(target: &Target, config: &Config) -> Result<TcpStream, std::io::Error> {
+    if !target.is_host_safe() && !target.ssrf_skip_verify() {
+        return Err(std::io::Error::other("blocked private/reserved upstream target"));
+    }
+
+    let host = target.upstream_host();
+    let port = target.upstream_port();
+    let addr_str = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+
+    let mut addrs = tokio::net::lookup_host(&addr_str).await?;
+    let resolved = addrs
+        .next()
+        .ok_or_else(|| std::io::Error::other("no upstream IP addresses found"))?;
+
+    if !target.ssrf_skip_verify()
+        && (crate::route::target::is_ip_always_blocked(&resolved.ip())
+            || (!target.source_allows_private_upstreams()
+                && crate::route::target::is_ip_rfc1918(&resolved.ip())))
+    {
+        return Err(std::io::Error::other(
+            "blocked upstream target during resolution",
+        ));
+    }
+
+    let timeout = crate::config::Config::parse_duration(&config.proxy.connect_timeout);
+    if timeout.is_zero() {
+        return TcpStream::connect(resolved).await;
+    }
+
+    tokio::time::timeout(timeout, TcpStream::connect(resolved))
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "TCP connect timed out"))?
 }
 
 struct TcpConnectionGuard {
@@ -188,80 +353,14 @@ fn try_acquire_upstream_slot(target: &Target, max_connections: u64) -> bool {
     }
 }
 
-#[async_trait]
-impl ServerApp for TcpProxyApp {
-    async fn process_new(self: &Arc<Self>, io: Stream, _shutdown: &ShutdownWatch) -> Option<Stream> {
-        let target = match self.lookup_target() {
-            Some(target) => target,
-            None => {
-                tracing::warn!(listen_port = self.listen_port, "No TCP route found for listener port");
-                return None;
-            }
-        };
-
-        if !try_acquire_upstream_slot(&target, self.config.proxy.max_connections) {
-            tracing::warn!(
-                listen_port = self.listen_port,
-                target_url = %target.url,
-                max_connections = self.config.proxy.max_connections,
-                "TCP upstream concurrency limit reached"
-            );
-            return None;
-        }
-
-        crate::metrics::prometheus::global().connect();
-        let _guard = TcpConnectionGuard {
-            target: target.clone(),
-        };
-
-        let upstream = match self.connect_upstream(&target).await {
-            Some(upstream) => upstream,
-            None => return None,
-        };
-
-        self.duplex(io, upstream).await;
-        None
-    }
-}
-
-pub fn tcp_proxy_service(
-    route_table: Arc<ManagedRouteTable>,
-    config: Arc<Config>,
-    listen_addr: String,
-    listen_port: u16,
-) -> ListeningService<TcpProxyApp> {
-    let mut service = ListeningService::new(
-        format!("TCP proxy :{listen_port}"),
-        TcpProxyApp::new(route_table, config, listen_port),
-    );
-    service.add_tcp(&listen_addr);
-    service
-}
-
-pub fn tcp_listen_addr(base_addr: &str, port: u16) -> String {
-    if let Some(host) = base_addr.strip_prefix(':') {
-        let _ = host;
-        return format!(":{port}");
-    }
-
-    if let Some(end) = base_addr.find(']')
-        && base_addr.starts_with('[')
-        && base_addr[end..].starts_with("]:")
-    {
-        return format!("{}:{}", &base_addr[..=end], port);
-    }
-
-    if let Some((host, _)) = base_addr.rsplit_once(':') {
-        return format!("{host}:{port}");
-    }
-
-    format!(":{port}")
+fn parse_listener_port(value: &str) -> Option<u16> {
+    value.rsplit(':').next()?.parse().ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, ConsulConfig, LoggingConfig, ProxyConfig, ServerConfig, TlsConfig};
+    use crate::config::{ConsulConfig, LoggingConfig, ProxyConfig, ServerConfig, TcpConfig, TlsConfig};
     use crate::route::definition::{RouteCmd, RouteDef, RouteSource};
     use std::collections::HashMap;
 
@@ -277,6 +376,7 @@ mod tests {
             proxy: ProxyConfig::default(),
             logging: LoggingConfig::default(),
             tls: TlsConfig::default(),
+            tcp: TcpConfig::default(),
         })
     }
 
@@ -296,19 +396,59 @@ mod tests {
     }
 
     #[test]
-    fn tcp_listen_addr_preserves_host() {
-        assert_eq!(tcp_listen_addr(":9999", 4222), ":4222");
-        assert_eq!(tcp_listen_addr("127.0.0.1:9999", 4222), "127.0.0.1:4222");
-        assert_eq!(tcp_listen_addr("[::1]:9999", 4222), "[::1]:4222");
+    fn resolve_tcp_mode_defaults_to_disabled() {
+        assert_eq!(resolve_tcp_mode(&config()).unwrap(), TcpMode::Disabled);
     }
 
     #[test]
-    fn lookup_target_uses_tcp_port_route() {
-        let table = Arc::new(ManagedRouteTable::new());
-        table.update_services(vec![tcp_def(":4222", "tcp://10.0.0.10:4222")]);
+    fn resolve_tcp_mode_supports_fixed_and_dynamic_modes() {
+        let mut fixed = (*config()).clone();
+        fixed.tcp.mode = "tcp".to_string();
+        fixed.tcp.listen = ":4222".to_string();
+        assert_eq!(
+            resolve_tcp_mode(&fixed).unwrap(),
+            TcpMode::Tcp {
+                listen: ":4222".to_string()
+            }
+        );
 
-        let app = TcpProxyApp::new(table, config(), 4222);
-        let target = app.lookup_target().expect("tcp target should exist");
-        assert_eq!(target.url, "tcp://10.0.0.10:4222");
+        let mut dynamic = (*config()).clone();
+        dynamic.tcp.mode = "tcp-dynamic".to_string();
+        dynamic.tcp.refresh = "7s".to_string();
+        assert_eq!(
+            resolve_tcp_mode(&dynamic).unwrap(),
+            TcpMode::TcpDynamic {
+                refresh: Duration::from_secs(7)
+            }
+        );
+    }
+
+    #[test]
+    fn lookup_target_uses_exact_local_addr_then_port_fallback() {
+        let table = Arc::new(ManagedRouteTable::new());
+        table.update_services(vec![
+            tcp_def("127.0.0.1:4222", "tcp://10.0.0.10:4222"),
+            tcp_def(":4333", "tcp://10.0.0.11:4333"),
+        ]);
+
+        let exact = lookup_target(&table, "round-robin", "127.0.0.1:4222")
+            .expect("exact local addr should match");
+        assert_eq!(exact.url, "tcp://10.0.0.10:4222");
+
+        let fallback = lookup_target(&table, "round-robin", "0.0.0.0:4333")
+            .expect("port fallback should match");
+        assert_eq!(fallback.url, "tcp://10.0.0.11:4333");
+    }
+
+    #[test]
+    fn tcp_listener_ports_match_fabio_dynamic_semantics() {
+        let table = Arc::new(ManagedRouteTable::new());
+        table.update_services(vec![
+            tcp_def(":4222", "tcp://10.0.0.10:4222"),
+            tcp_def("127.0.0.1:4333", "tcp://10.0.0.11:4333"),
+        ]);
+
+        let ports = table.get().tcp_listener_ports();
+        assert_eq!(ports, vec![4222, 4333]);
     }
 }
