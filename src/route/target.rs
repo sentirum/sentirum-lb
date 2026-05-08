@@ -2,6 +2,8 @@ use crate::route::definition::RouteSource;
 use pingora::protocols::tls::ALPN;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex, Weak};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum UpstreamProtocol {
@@ -62,6 +64,32 @@ impl UpstreamProtocol {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct TargetStatsRegistry {
+    active_connections: Mutex<HashMap<String, Weak<AtomicU64>>>,
+}
+
+impl TargetStatsRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn active_connections_for(&self, key: &str) -> Arc<AtomicU64> {
+        let mut entries = self.active_connections.lock().unwrap_or_else(|e| {
+            tracing::warn!("Target stats registry lock was poisoned; recovering");
+            e.into_inner()
+        });
+
+        if let Some(counter) = entries.get(key).and_then(Weak::upgrade) {
+            return counter;
+        }
+
+        let counter = Arc::new(AtomicU64::new(0));
+        entries.insert(key.to_string(), Arc::downgrade(&counter));
+        counter
+    }
+}
+
 /// A target backend for a route.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Target {
@@ -100,10 +128,9 @@ pub struct Target {
     pub parsed_protocol: UpstreamProtocol,
     /// Active connection count for least-connections picker
     #[serde(skip)]
-    pub active_connections: std::sync::atomic::AtomicU64,
+    pub active_connections: Arc<AtomicU64>,
 }
 
-// Manual Clone impl because AtomicU64 doesn't impl Clone
 impl Clone for Target {
     fn clone(&self) -> Self {
         Self {
@@ -118,8 +145,7 @@ impl Clone for Target {
             parsed_port: self.parsed_port,
             parsed_tls: self.parsed_tls,
             parsed_protocol: self.parsed_protocol,
-            // Reset active connections on clone (fresh snapshot)
-            active_connections: std::sync::atomic::AtomicU64::new(0),
+            active_connections: Arc::clone(&self.active_connections),
         }
     }
 }
@@ -138,7 +164,7 @@ impl Default for Target {
             parsed_port: None,
             parsed_tls: false,
             parsed_protocol: UpstreamProtocol::Http,
-            active_connections: std::sync::atomic::AtomicU64::new(0),
+            active_connections: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -149,6 +175,21 @@ impl Target {
         let mut target = Self {
             service,
             url,
+            ..Default::default()
+        };
+        target.pre_parse();
+        target
+    }
+
+    pub fn with_active_connections(
+        service: String,
+        url: String,
+        active_connections: Arc<AtomicU64>,
+    ) -> Self {
+        let mut target = Self {
+            service,
+            url,
+            active_connections,
             ..Default::default()
         };
         target.pre_parse();
