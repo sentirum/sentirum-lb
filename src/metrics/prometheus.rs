@@ -387,6 +387,50 @@ impl Metrics {
         let grpc_requests_total = self.grpc_requests_total.load(Ordering::Relaxed);
         let grpc_web_requests_total = self.grpc_web_requests_total.load(Ordering::Relaxed);
         let websocket_requests_total = self.websocket_requests_total.load(Ordering::Relaxed);
+        let cert_reload_total = self.cert_reload_total.load(Ordering::Relaxed);
+        let cert_reload_errors_total = self.cert_reload_errors_total.load(Ordering::Relaxed);
+        let cert_reload_skipped_oversize_total = self
+            .cert_reload_skipped_oversize_total
+            .load(Ordering::Relaxed);
+        let cert_reload_skipped_invalid_total = self
+            .cert_reload_skipped_invalid_total
+            .load(Ordering::Relaxed);
+        let cert_reload_skipped_empty_total = self
+            .cert_reload_skipped_empty_total
+            .load(Ordering::Relaxed);
+        let route_reload_total_static = self.route_reload_total_static.load(Ordering::Relaxed);
+        let route_reload_total_kv = self.route_reload_total_kv.load(Ordering::Relaxed);
+        let route_reload_total_service = self.route_reload_total_service.load(Ordering::Relaxed);
+        let watcher_backoff_services = self
+            .consul_watcher_backoff_seconds_services
+            .load(Ordering::Relaxed);
+        let watcher_backoff_kv = self.consul_watcher_backoff_seconds_kv.load(Ordering::Relaxed);
+        let watcher_backoff_tls = self.consul_watcher_backoff_seconds_tls.load(Ordering::Relaxed);
+        let watcher_last_index_services = self
+            .consul_watcher_last_index_services
+            .load(Ordering::Relaxed);
+        let watcher_last_index_kv = self.consul_watcher_last_index_kv.load(Ordering::Relaxed);
+        let watcher_last_index_tls = self.consul_watcher_last_index_tls.load(Ordering::Relaxed);
+        let watcher_errors_services = self
+            .consul_watcher_errors_total_services
+            .load(Ordering::Relaxed);
+        let watcher_errors_kv = self.consul_watcher_errors_total_kv.load(Ordering::Relaxed);
+        let watcher_errors_tls = self.consul_watcher_errors_total_tls.load(Ordering::Relaxed);
+        let cert_min_expiry_unix_seconds = self
+            .cert_min_expiry_unix_seconds
+            .load(Ordering::Relaxed);
+        let cert_expiry_metrics = self
+            .cert_expiry_entries
+            .read()
+            .expect("cert expiry entries poisoned")
+            .iter()
+            .map(|entry| {
+                format!(
+                    "sentirum_lb_cert_expiry_unix_seconds{{entry=\"{}\",cn=\"{}\"}} {}\n",
+                    entry.entry, entry.cn, entry.not_after_unix
+                )
+            })
+            .collect::<String>();
         let status_2xx = self.status_2xx.load(Ordering::Relaxed);
         let status_3xx = self.status_3xx.load(Ordering::Relaxed);
         let status_4xx = self.status_4xx.load(Ordering::Relaxed);
@@ -448,6 +492,51 @@ sentirum_lb_grpc_web_requests_total {grpc_web_requests_total}
 # TYPE sentirum_lb_websocket_requests_total counter
 sentirum_lb_websocket_requests_total {websocket_requests_total}
 
+# HELP sentirum_lb_cert_reload_total Total successful TLS certificate reloads
+# TYPE sentirum_lb_cert_reload_total counter
+sentirum_lb_cert_reload_total {cert_reload_total}
+
+# HELP sentirum_lb_cert_reload_errors_total Total failed TLS certificate reloads
+# TYPE sentirum_lb_cert_reload_errors_total counter
+sentirum_lb_cert_reload_errors_total {cert_reload_errors_total}
+
+# HELP sentirum_lb_cert_reload_skipped_total TLS certificate reload skips by reason
+# TYPE sentirum_lb_cert_reload_skipped_total counter
+sentirum_lb_cert_reload_skipped_total{{reason="oversize"}} {cert_reload_skipped_oversize_total}
+sentirum_lb_cert_reload_skipped_total{{reason="invalid"}} {cert_reload_skipped_invalid_total}
+sentirum_lb_cert_reload_skipped_total{{reason="empty"}} {cert_reload_skipped_empty_total}
+
+# HELP sentirum_lb_route_reload_total Route table rebuilds by source
+# TYPE sentirum_lb_route_reload_total counter
+sentirum_lb_route_reload_total{{source="static"}} {route_reload_total_static}
+sentirum_lb_route_reload_total{{source="kv"}} {route_reload_total_kv}
+sentirum_lb_route_reload_total{{source="service"}} {route_reload_total_service}
+
+# HELP sentirum_lb_consul_watcher_backoff_seconds Current Consul watcher backoff in seconds
+# TYPE sentirum_lb_consul_watcher_backoff_seconds gauge
+sentirum_lb_consul_watcher_backoff_seconds{{watcher="services"}} {watcher_backoff_services}
+sentirum_lb_consul_watcher_backoff_seconds{{watcher="kv"}} {watcher_backoff_kv}
+sentirum_lb_consul_watcher_backoff_seconds{{watcher="tls"}} {watcher_backoff_tls}
+
+# HELP sentirum_lb_consul_watcher_last_index Last observed Consul index per watcher
+# TYPE sentirum_lb_consul_watcher_last_index gauge
+sentirum_lb_consul_watcher_last_index{{watcher="services"}} {watcher_last_index_services}
+sentirum_lb_consul_watcher_last_index{{watcher="kv"}} {watcher_last_index_kv}
+sentirum_lb_consul_watcher_last_index{{watcher="tls"}} {watcher_last_index_tls}
+
+# HELP sentirum_lb_consul_watcher_errors_total Consul watcher errors by watcher
+# TYPE sentirum_lb_consul_watcher_errors_total counter
+sentirum_lb_consul_watcher_errors_total{{watcher="services"}} {watcher_errors_services}
+sentirum_lb_consul_watcher_errors_total{{watcher="kv"}} {watcher_errors_kv}
+sentirum_lb_consul_watcher_errors_total{{watcher="tls"}} {watcher_errors_tls}
+
+# HELP sentirum_lb_cert_min_expiry_unix_seconds Oldest loaded certificate expiry timestamp
+# TYPE sentirum_lb_cert_min_expiry_unix_seconds gauge
+sentirum_lb_cert_min_expiry_unix_seconds {cert_min_expiry_unix_seconds}
+
+# HELP sentirum_lb_cert_expiry_unix_seconds Per-certificate expiry timestamp
+# TYPE sentirum_lb_cert_expiry_unix_seconds gauge
+{cert_expiry_metrics}
 # HELP sentirum_lb_process_metrics_available Process-level memory and FD metrics availability (Linux /proc based)
 # TYPE sentirum_lb_process_metrics_available gauge
 sentirum_lb_process_metrics_available {process_metrics_available}
@@ -492,6 +581,25 @@ sentirum_lb_request_duration_seconds_count {count}
             grpc_requests_total = grpc_requests_total,
             grpc_web_requests_total = grpc_web_requests_total,
             websocket_requests_total = websocket_requests_total,
+            cert_reload_total = cert_reload_total,
+            cert_reload_errors_total = cert_reload_errors_total,
+            cert_reload_skipped_oversize_total = cert_reload_skipped_oversize_total,
+            cert_reload_skipped_invalid_total = cert_reload_skipped_invalid_total,
+            cert_reload_skipped_empty_total = cert_reload_skipped_empty_total,
+            route_reload_total_static = route_reload_total_static,
+            route_reload_total_kv = route_reload_total_kv,
+            route_reload_total_service = route_reload_total_service,
+            watcher_backoff_services = watcher_backoff_services,
+            watcher_backoff_kv = watcher_backoff_kv,
+            watcher_backoff_tls = watcher_backoff_tls,
+            watcher_last_index_services = watcher_last_index_services,
+            watcher_last_index_kv = watcher_last_index_kv,
+            watcher_last_index_tls = watcher_last_index_tls,
+            watcher_errors_services = watcher_errors_services,
+            watcher_errors_kv = watcher_errors_kv,
+            watcher_errors_tls = watcher_errors_tls,
+            cert_min_expiry_unix_seconds = cert_min_expiry_unix_seconds,
+            cert_expiry_metrics = cert_expiry_metrics,
             process_metrics_available = process_metrics_available,
             resident_memory_bytes = process.resident_memory_bytes,
             virtual_memory_bytes = process.virtual_memory_bytes,
