@@ -43,10 +43,9 @@ const SESSION_TTL_SECS: u64 = 24 * 60 * 60;
 const SESSION_MAX_CAPACITY: usize = 10_000;
 
 /// Session entry with creation timestamp for TTL eviction.
-#[derive(Clone)]
-struct SessionEntry {
-    user: String,
-    created_at: std::time::Instant,
+pub(crate) struct SessionEntry {
+    pub user: String,
+    pub created_at: std::time::Instant,
 }
 
 /// Shared state for admin API handlers
