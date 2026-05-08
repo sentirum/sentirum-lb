@@ -1393,6 +1393,47 @@ mod tests {
     }
 
     #[test]
+    fn test_client_auth_mode_resolve_required() {
+        let config = crate::config::TlsConfig {
+            client_auth: "required".to_string(),
+            ..crate::config::TlsConfig::default()
+        };
+        assert_eq!(ClientAuthMode::resolve(&config).unwrap(), ClientAuthMode::Required);
+    }
+
+    #[test]
+    fn test_client_auth_config_resolve_consul_source() {
+        let config = crate::config::TlsConfig {
+            client_auth: "required".to_string(),
+            client_ca_source: "consul_kv".to_string(),
+            client_ca_consul_prefix: "/fabio/client-ca".to_string(),
+            ..crate::config::TlsConfig::default()
+        };
+
+        match ClientAuthConfig::resolve(&config).unwrap() {
+            Some(ClientAuthConfig { mode, source: ClientCaSource::ConsulKv { prefix }, .. }) => {
+                assert_eq!(mode, ClientAuthMode::Required);
+                assert_eq!(prefix, "/fabio/client-ca");
+            }
+            other => panic!("unexpected client auth config: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_dynamic_client_ca_store_accepts_valid_snapshot() {
+        let cert = self_signed_cert(&["client-ca.local"]);
+        let store = DynamicClientCaStore::new(String::new());
+        let mut entries = BTreeMap::new();
+        entries.insert("client-ca.pem".to_string(), cert.cert.pem().into_bytes());
+        store.apply_consul_snapshot(entries, 42);
+
+        let status = store.status();
+        assert_eq!(status.loaded_entries, vec!["client-ca.pem"]);
+        assert_eq!(status.last_consul_index, 42);
+        assert!(status.certificates.iter().any(|c| c.entry_name == "client-ca.pem"));
+    }
+
+    #[test]
     fn test_dynamic_store_loads_fabio_style_combined_pem() {
         let cert = self_signed_cert(&["example.com", "*.example.com"]);
         let expected_not_after = cert.cert.params().not_after.unix_timestamp() as u64;
