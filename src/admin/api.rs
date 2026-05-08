@@ -636,12 +636,13 @@ async fn targets_metrics_handler(State(state): State<AdminState>) -> impl axum::
                     let bytes = stats.bytes_total.load(Ordering::Relaxed);
                     let cb_state = target.health_tracker.circuit_breaker().current_state();
                     
+                    let svc = escape_prometheus_label(&target.service);
+                    let h = escape_prometheus_label(host);
+                    let p = escape_prometheus_label(&route.path);
+                    let proto = escape_prometheus_label(&format!("{:?}", target.parsed_protocol).to_lowercase());
+
                     output.push_str(&format!(
                         "# HELP sentirum_lb_target_requests_total Requests per target\n                        # TYPE sentirum_lb_target_requests_total counter\n                        sentirum_lb_target_requests_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {req}\n\n                        # HELP sentirum_lb_target_errors_total Errors per target\n                        # TYPE sentirum_lb_target_errors_total counter\n                        sentirum_lb_target_errors_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {err}\n\n                        # HELP sentirum_lb_target_latency_us_total Total latency per target\n                        # TYPE sentirum_lb_target_latency_us_total counter\n                        sentirum_lb_target_latency_us_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {lat}\n\n                        # HELP sentirum_lb_target_bytes_total Bytes per target\n                        # TYPE sentirum_lb_target_bytes_total counter\n                        sentirum_lb_target_bytes_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {bytes}\n\n",
-                        svc = target.service,
-                        h = host,
-                        p = route.path,
-                        proto = format!("{:?}", target.parsed_protocol).to_lowercase(),
                         req = requests,
                         err = errors,
                         lat = latency_sum,
@@ -954,6 +955,42 @@ mod tests {
         }
     }
 
+    fn make_authed_test_state(admin_token: &str, admin_users: Vec<AdminUser>) -> AdminState {
+        AdminState {
+            config: Arc::new(Config {
+                server: ServerConfig {
+                    listen: ":9999".to_string(),
+                    admin_listen: "127.0.0.1:9998".to_string(),
+                    admin_token: admin_token.to_string(),
+                    admin_users,
+                    workers: 0,
+                },
+                consul: ConsulConfig {
+                    address: "127.0.0.1:8500".to_string(),
+                    scheme: "http".to_string(),
+                    token: String::new(),
+                    kv_prefix: "/sentirum-lb/routes".to_string(),
+                    tag_prefix: "urlprefix-".to_string(),
+                    poll_interval: "0s".to_string(),
+                    service_discovery: false,
+                    kv_watching: false,
+                    service_whitelist: Vec::new(),
+                    service_blacklist: Vec::new(),
+                    graceful_shutdown: true,
+                },
+                proxy: ProxyConfig::default(),
+                logging: LoggingConfig::default(),
+                tls: TlsConfig::default(),
+                tcp: TcpConfig::default(),
+            }),
+            route_table: Arc::new(ManagedRouteTable::new()),
+            tls_store: None,
+            client_ca_store: None,
+            log_buffer: None,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
     #[tokio::test]
     async fn test_admin_health() {
         let state = make_test_state();
@@ -1169,6 +1206,99 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_admin_rejects_empty_bearer_when_token_set() {
+        let state = make_authed_test_state("secret", vec![]);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/health")
+                    .header("Authorization", "Bearer ")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn test_admin_session_token_accepted_after_login() {
+        // Configure an admin user with bcrypt hash of "password123"
+        let hash = bcrypt::hash("password123", bcrypt::DEFAULT_COST).unwrap();
+        let state = make_authed_test_state("", vec![AdminUser {
+            username: "admin".to_string(),
+            password: hash,
+        }]);
+        let app = build_router(state.clone());
+
+        // Login first
+        let login_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"username": "admin", "password": "password123"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login_response.status(), 200);
+        let body = to_bytes(login_response.into_body(), usize::MAX).await.unwrap();
+        let login_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let token = login_json["token"].as_str().expect("login should return a token");
+        assert!(!token.is_empty());
+
+        // Use the session token to access a protected route
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/health")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_admin_users_without_admin_token_rejects_empty_bearer() {
+        // Only admin_users set, admin_token is empty — empty bearer must NOT bypass
+        let hash = bcrypt::hash("password123", bcrypt::DEFAULT_COST).unwrap();
+        let state = make_authed_test_state("", vec![AdminUser {
+            username: "admin".to_string(),
+            password: hash,
+        }]);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/health")
+                    .header("Authorization", "Bearer ")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401);
+    }
+
+    #[test]
+    fn test_escape_prometheus_label() {
+        assert_eq!(escape_prometheus_label("simple"), "simple");
+        assert_eq!(escape_prometheus_label("has\"quote"), "has\\\"quote");
+        assert_eq!(escape_prometheus_label("back\\slash"), "back\\\\slash");
+        assert_eq!(escape_prometheus_label("new\nline"), "new\\nline");
+        assert_eq!(escape_prometheus_label("all\"three\\here\n"), "all\\\"three\\\\here\\n");
     }
 
     #[test]
