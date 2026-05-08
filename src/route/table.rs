@@ -283,7 +283,7 @@ impl Table {
             parsed_port: None,
             parsed_tls: false,
             parsed_protocol: crate::route::target::UpstreamProtocol::Http,
-            active_connections: std::sync::atomic::AtomicU64::new(0),
+            active_connections: self.active_connections_for(&def.dst),
         };
         target.pre_parse();
 
@@ -442,6 +442,24 @@ impl Table {
         table
     }
 
+    pub fn from_definitions_with_stats(
+        defs: &[RouteDef],
+        stats_registry: Arc<TargetStatsRegistry>,
+    ) -> Self {
+        let mut table = Table::with_stats_registry(stats_registry);
+        for def in defs {
+            table.apply(def);
+        }
+        table
+    }
+
+    fn active_connections_for(&self, key: &str) -> Arc<std::sync::atomic::AtomicU64> {
+        self.stats_registry
+            .as_ref()
+            .map(|registry| registry.active_connections_for(key))
+            .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicU64::new(0)))
+    }
+
     /// Get the number of routes in the table.
     pub fn route_count(&self) -> usize {
         self.routes.values().map(|r| r.len()).sum()
@@ -475,12 +493,15 @@ impl Table {
 /// Thread-safe routing table using ArcSwap for lock-free reads.
 pub struct RouteTable {
     inner: ArcSwap<Table>,
+    stats_registry: Arc<TargetStatsRegistry>,
 }
 
 impl RouteTable {
     pub fn new() -> Self {
+        let stats_registry = Arc::new(TargetStatsRegistry::new());
         Self {
-            inner: ArcSwap::from(Arc::new(Table::new())),
+            inner: ArcSwap::from(Arc::new(Table::with_stats_registry(stats_registry.clone()))),
+            stats_registry,
         }
     }
 
@@ -507,8 +528,12 @@ impl RouteTable {
 
     /// Apply definitions and swap the table.
     pub fn apply_and_swap(&self, defs: &[RouteDef]) {
-        let table = Table::from_definitions(defs);
+        let table = Table::from_definitions_with_stats(defs, self.stats_registry.clone());
         self.swap(table);
+    }
+
+    pub fn stats_registry(&self) -> Arc<TargetStatsRegistry> {
+        self.stats_registry.clone()
     }
 }
 
