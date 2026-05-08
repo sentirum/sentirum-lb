@@ -820,6 +820,7 @@ pub async fn run_admin_server(
         client_ca_store,
         log_buffer,
         sessions: Arc::new(RwLock::new(HashMap::new())),
+        login_attempts: Arc::new(dashmap::DashMap::new()),
     };
     let app = build_router(state);
 
@@ -887,26 +888,9 @@ async fn admin_auth_middleware(
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
         {
-            // Fast path: read lock for session lookup.
-            let sessions = state.sessions.read().await;
-            if let Some(entry) = sessions.get(bearer) {
-                let still_valid = std::time::Instant::now()
-                    .duration_since(entry.created_at)
-                    .as_secs()
-                    < SESSION_TTL_SECS;
-                drop(sessions);
-
-                if still_valid {
-                    true
-                } else {
-                    // Token expired — acquire write lock to evict and re-check.
-                    let mut sessions = state.sessions.write().await;
-                    evict_expired_sessions(&mut sessions);
-                    sessions.get(bearer).is_some()
-                }
-            } else {
-                false
-            }
+            let mut sessions = state.sessions.write().await;
+            evict_expired_sessions(&mut sessions);
+            sessions.get(bearer).is_some()
         } else {
             false
         }
