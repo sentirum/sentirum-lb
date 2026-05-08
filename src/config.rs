@@ -230,6 +230,10 @@ pub struct TlsConfig {
     /// the first certificate in deterministic order when there is no match.
     #[serde(default)]
     pub strict_sni: bool,
+    /// If true in consul_kv mode, startup fails unless the initial TLS snapshot
+    /// yields at least one active certificate.
+    #[serde(default)]
+    pub require_initial_snapshot: bool,
 }
 
 fn default_tls_consul_cert_prefix() -> String {
@@ -245,6 +249,7 @@ impl Default for TlsConfig {
             listen: String::new(),
             consul_cert_prefix: default_tls_consul_cert_prefix(),
             strict_sni: false,
+            require_initial_snapshot: false,
         }
     }
 }
@@ -327,5 +332,10 @@ mod tests {
         assert!(!proxy.enable_h2c);
         assert_eq!(proxy.upstream_h2_max_streams, 128);
         assert!(proxy.upstream_h2_ping_interval.is_empty());
+    }
+
+    #[test]
+    fn tls_config_defaults_require_initial_snapshot_to_false() {
+        assert!(!TlsConfig::default().require_initial_snapshot);
     }
 }
