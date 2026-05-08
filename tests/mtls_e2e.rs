@@ -293,6 +293,7 @@ fn generate_client_auth_fixture(ca_common_name: &str) -> ClientAuthFixture {
 fn mtls_client(proxy_cert_pem: &str, identity_pem: Option<&str>) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
+        .http1_only()
         .add_root_certificate(reqwest::Certificate::from_pem(proxy_cert_pem.as_bytes()).unwrap());
 
     if let Some(identity_pem) = identity_pem {
