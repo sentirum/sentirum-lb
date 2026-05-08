@@ -3,7 +3,6 @@
 //! Tracks request latency histogram, request counter, active connections gauge,
 //! and route-level metrics for observability.
 
-use std::fs;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 // keep for future use with per-route metrics
 use std::time::Instant;
@@ -24,6 +23,7 @@ struct ProcessMetricsSnapshot {
     open_fds: u64,
 }
 
+#[cfg(target_os = "linux")]
 fn parse_proc_status_value_bytes(status: &str, key: &str) -> Option<u64> {
     status.lines().find_map(|line| {
         let rest = line.strip_prefix(key)?.trim();
@@ -35,8 +35,8 @@ fn parse_proc_status_value_bytes(status: &str, key: &str) -> Option<u64> {
 fn collect_process_metrics() -> ProcessMetricsSnapshot {
     #[cfg(target_os = "linux")]
     {
-        let status = fs::read_to_string("/proc/self/status").ok();
-        let open_fds = fs::read_dir("/proc/self/fd")
+        let status = std::fs::read_to_string("/proc/self/status").ok();
+        let open_fds = std::fs::read_dir("/proc/self/fd")
             .ok()
             .map(|entries| entries.filter_map(Result::ok).count() as u64)
             .unwrap_or(0);
@@ -463,6 +463,7 @@ mod tests {
         assert_eq!(metrics.latency_bucket_5s.load(Ordering::Relaxed), 1);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_parse_proc_status_value_bytes() {
         let status = "Name:\tsentirum-lb\nVmSize:\t  2048 kB\nVmRSS:\t  1024 kB\n";
