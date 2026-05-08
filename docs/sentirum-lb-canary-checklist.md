@@ -9,6 +9,10 @@ Replace Fabio for HTTP/HTTPS ingress without dropping active users.
 - Consul KV certs exist under `/fabio/cert/*`
 - service tags continue to use `urlprefix-...`
 - `proxy.trusted_proxies` is filled correctly for Cloudflare / trusted hops
+- if mTLS is enabled:
+  - `tls.client_auth` is set as intended (`optional` or `required`)
+  - trusted client CA bundles exist in `tls.client_ca_path` or `tls.client_ca_consul_prefix`
+  - `tls.client_ca_upgrade_cn` is set if Fabio-style CA-upgrade compatibility is needed
 
 ## Runtime guarantees to verify
 - route updates are applied without process restart
@@ -43,6 +47,12 @@ For 1–2 low-risk domains:
 - verify `/admin/certs` reflects the new snapshot
 - verify new TLS handshakes use the new cert
 - verify existing long-lived connections are still alive
+- if mTLS is enabled:
+  - verify `/admin/certs.client_auth` shows expected CA source and loaded entries
+  - verify request without client cert fails when `client_auth = "required"`
+  - verify request with valid client cert succeeds
+  - verify upstream receives `X-Client-Cert-*` identity headers
+  - if using non-CA/self-signed Fabio-compatible client CA, verify `client_ca_upgrade_cn` path works as expected
 
 ## Step 4 — Cloudflare / real IP
 - confirm upstream sees real client IP from `CF-Connecting-IP`
