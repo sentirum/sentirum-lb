@@ -1175,6 +1175,34 @@ mod tests {
         cb.record_error();
         assert_eq!(cb.current_state(), CircuitState::Open);
     }
+
+    #[test]
+    fn test_circuit_breaker_closes_on_first_success_when_max_is_one() {
+        let config = CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 10,
+            recovery_timeout_secs: 0,
+            half_open_max_requests: 1,
+        };
+        let cb = CircuitBreaker::with_config(config);
+
+        // Open the circuit
+        for _ in 0..5 {
+            cb.record_success();
+        }
+        for _ in 0..5 {
+            cb.record_error();
+        }
+        assert_eq!(cb.current_state(), CircuitState::Open);
+
+        // Transition to half-open
+        assert!(cb.allow_request());
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+
+        // With max=1, first success closes
+        cb.record_success();
+        assert_eq!(cb.current_state(), CircuitState::Closed);
+    }
 }
 
 // Per-target statistics for admin dashboard and Prometheus labels.
