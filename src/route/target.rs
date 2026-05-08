@@ -124,6 +124,8 @@ struct CircuitInner {
     opened_at_ms: u64,
     /// Number of probe requests sent in half-open state
     half_open_requests: usize,
+    /// Number of successful probe requests in half-open state
+    half_open_successes: usize,
 }
 
 impl CircuitBreaker {
@@ -140,6 +142,7 @@ impl CircuitBreaker {
                 window: std::collections::VecDeque::with_capacity(config.window_size),
                 opened_at_ms: 0,
                 half_open_requests: 0,
+                half_open_successes: 0,
             })),
             config,
         }
@@ -159,6 +162,7 @@ impl CircuitBreaker {
                 if elapsed >= recovery_ms {
                     inner.state = CircuitState::HalfOpen;
                     inner.half_open_requests = 0;
+                    inner.half_open_successes = 0;
                     tracing::info!(
                         recovery_timeout = self.config.recovery_timeout_secs,
                         "Circuit breaker transitioning to half-open"
@@ -183,10 +187,16 @@ impl CircuitBreaker {
                 Self::push_window(&mut inner, false, self.config.window_size);
             }
             CircuitState::HalfOpen => {
-                // All probe requests succeeded → close the circuit
-                inner.state = CircuitState::Closed;
-                inner.window.clear();
-                tracing::info!("Circuit breaker closed after successful recovery probes");
+                inner.half_open_successes += 1;
+                if inner.half_open_successes >= self.config.half_open_max_requests {
+                    // All probes succeeded → close the circuit
+                    inner.state = CircuitState::Closed;
+                    inner.window.clear();
+                    tracing::info!(
+                        successes = inner.half_open_successes,
+                        "Circuit breaker closed after successful recovery probes"
+                    );
+                }
             }
             CircuitState::Open => {
                 // Success while open shouldn't happen (requests are blocked),
