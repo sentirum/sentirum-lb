@@ -607,22 +607,17 @@ pub enum TlsError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
+    use rcgen::generate_simple_self_signed;
 
     fn self_signed_pem(names: &[&str]) -> (String, String) {
-        let key = KeyPair::generate().expect("key should generate");
-        let mut params = CertificateParams::new(
+        let cert = generate_simple_self_signed(
             names
                 .iter()
                 .map(|name| (*name).to_string())
                 .collect::<Vec<_>>(),
         )
-        .expect("params should build");
-        let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, names[0]);
-        params.distinguished_name = dn;
-        let cert = params.self_signed(&key).expect("cert should build");
-        (cert.pem(), key.serialize_pem())
+        .expect("cert should build");
+        (cert.cert.pem(), cert.signing_key.serialize_pem())
     }
 
     #[test]
