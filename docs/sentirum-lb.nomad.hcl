@@ -94,6 +94,12 @@ source = "consul_kv"
 listen = ":443"
 consul_cert_prefix = "/fabio/cert"
 strict_sni = false
+require_initial_snapshot = true
+client_auth = ""                   # set to "optional" or "required" when enabling mTLS
+client_ca_source = ""              # "file" or "consul_kv"
+client_ca_path = ""                # file/dir path when client_ca_source=file
+client_ca_consul_prefix = ""       # e.g. "/fabio/client-ca" when client_ca_source=consul_kv
+client_ca_upgrade_cn = ""          # e.g. "ApiGateway" for Fabio-style CA-upgrade compatibility
 EOF
       }
 
@@ -152,4 +158,5 @@ EOF
 # - This job keeps the Fabio route model: service tags still use `urlprefix-...`.
 # - Downstream HTTPS certs are loaded dynamically from Consul KV under `/fabio/cert/*`.
 # - Existing connections are not dropped on cert updates; new TLS handshakes use the new snapshot.
+# - Optional downstream mTLS can be enabled with `tls.client_auth` + client CA settings.
 # - `/fabio/config` route KV remains optional; if empty, only KV routes are empty, service-tag routes continue.

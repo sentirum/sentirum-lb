@@ -241,7 +241,52 @@ This is the key zero-drop behavior.
 
 ---
 
-## 10. Route update test without restart
+## 10. mTLS smoke test
+
+Run this only when downstream client-cert auth is enabled.
+
+### Confirm runtime config
+```bash
+curl -s -H "X-Admin-Token: <token>" http://127.0.0.1:9998/admin/config | jq '.tls'
+curl -s -H "X-Admin-Token: <token>" http://127.0.0.1:9998/admin/certs | jq '.client_auth'
+```
+
+### Required-mode negative test
+```bash
+curl -skv --resolve <mtls-host>:443:<canary-node-ip> https://<mtls-host>/health
+```
+
+Expected with `client_auth = "required"`:
+- handshake fails without a client cert
+
+### Positive test with client cert
+```bash
+curl -skv \
+  --resolve <mtls-host>:443:<canary-node-ip> \
+  --cert client-cert.pem \
+  --key client-key.pem \
+  --cacert downstream-server-ca.pem \
+  https://<mtls-host>/whoami
+```
+
+Expected:
+- handshake succeeds
+- upstream/app receives:
+  - `X-Client-Cert-Verified: true`
+  - `X-Client-Cert-Serial`
+  - `X-Client-Cert-Organization`
+  - `X-Client-Cert-Common-Name`
+  - `X-Client-Cert-Organizational-Unit`
+  - `X-Client-Cert-Subject`
+  - `X-Client-Cert-SHA256`
+
+### Fabio-style CA-upgrade edge case
+If you rely on self-signed/non-CA client-auth roots similar to Fabio's `ApiGateway` compatibility path:
+- configure `tls.client_ca_upgrade_cn = "ApiGateway"`
+- verify the same client cert fails without it
+- verify the same client cert succeeds with it
+
+## 11. Route update test without restart
 
 Register or edit a test service tag:
 - `urlprefix-<host>/...`
@@ -259,7 +304,7 @@ Expected:
 
 ---
 
-## 11. Broken cert safety test
+## 12. Broken cert safety test
 
 Create a temporary bad PEM for a test-only hostname under `/fabio/cert/*`.
 
@@ -277,7 +322,7 @@ This validates last-known-good protection.
 
 ---
 
-## 12. Cloudflare / trusted proxy validation
+## 13. Cloudflare / trusted proxy validation
 
 After filling `proxy.trusted_proxies`:
 
@@ -296,7 +341,7 @@ Send a direct request from an untrusted source with fake headers and confirm the
 
 ---
 
-## 13. Metrics validation
+## 14. Metrics validation
 
 ```bash
 curl -s -H "X-Admin-Token: <token>" http://127.0.0.1:9998/admin/metrics | head -80
@@ -309,7 +354,7 @@ Check:
 
 ---
 
-## 14. Rollback
+## 15. Rollback
 
 Rollback is traffic-level, not state-level.
 
