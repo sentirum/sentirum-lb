@@ -1330,7 +1330,7 @@ mod tests {
         let cache = DnsCache::with_ttl(300, 10);
         // Fill beyond DNS_CACHE_MAX_ENTRIES
         for i in 0..(DNS_CACHE_MAX_ENTRIES + 50) {
-            let addr: SocketAddr = format!("10.0.{:{}}.{:{}}", i / 256, i % 256)
+            let addr: SocketAddr = format!("10.0.{}.{}", i / 256, i % 256)
                 .parse()
                 .unwrap();
             cache.store(format!("host-{i}"), vec![addr]);
