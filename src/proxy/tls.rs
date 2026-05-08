@@ -527,7 +527,7 @@ struct PemBlock<'a> {
 }
 
 fn pem_blocks(input: &str) -> Vec<PemBlock<'_>> {
-    let re = Regex::new(r"(?s)-----BEGIN ([A-Z0-9 ]+)-----.*?-----END \\1-----")
+    let re = Regex::new(r"(?s)-----BEGIN ([A-Z0-9 ]+)-----.*?-----END \1-----")
         .expect("valid PEM regex");
     re.captures_iter(input)
         .filter_map(|capture| {
