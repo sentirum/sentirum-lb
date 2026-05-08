@@ -1,22 +1,48 @@
 //! Admin API for Sentirum LB using axum.
 //!
 //! Endpoints:
+//! - `GET /admin/` — Dashboard UI (embedded SPA)
 //! - `GET /admin/health` — Health check
 //! - `GET /admin/routes` — Route table inspection
 //! - `GET /admin/metrics` — Prometheus metrics
 //! - `GET /admin/config` — Config inspection
 //! - `GET /admin/certs` — Runtime TLS certificate status
+//! - `GET /admin/logs` — Recent log entries (JSON)
+//! - `GET /admin/logs/stream` — Live log stream (SSE)
 
 use crate::config::Config;
+use crate::route::target::{CircuitState, UpstreamProtocol};
 use crate::proxy::tls::{DynamicCertStore, DynamicClientCaStore};
 use crate::route::registry::ManagedRouteTable;
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Query, State, Json};
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::Response;
-use axum::routing::get;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::routing::{get, post};
+use futures::stream::Stream;
+use tokio_stream::StreamExt;
+use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
+use std::pin::Pin;
 use std::sync::Arc;
+
+use std::collections::HashMap;
+use std::sync::atomic::Ordering;
+use tokio::sync::RwLock;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use rand::Rng;
+use bcrypt::{hash, verify, DEFAULT_COST};
+use async_stream::stream;
+
+/// Session info for authenticated users
+#[derive(Clone)]
+pub struct Session {
+    pub user: String,
+    pub token: String,
+}
 
 /// Shared state for admin API handlers
 #[derive(Clone)]
@@ -25,6 +51,9 @@ pub struct AdminState {
     pub route_table: Arc<ManagedRouteTable>,
     pub tls_store: Option<Arc<DynamicCertStore>>,
     pub client_ca_store: Option<Arc<DynamicClientCaStore>>,
+    pub log_buffer: Option<Arc<crate::admin::logs::LogBuffer>>,
+    /// Active sessions (token -> username)
+    pub sessions: Arc<RwLock<HashMap<String, String>>>,
 }
 
 /// Health check response
@@ -35,22 +64,263 @@ pub struct HealthResponse {
     pub version: &'static str,
 }
 
+/// Login request
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+/// Login response
+#[derive(Serialize)]
+pub struct LoginResponse {
+    pub success: bool,
+    pub message: String,
+    pub user: Option<String>,
+}
+
+/// SSE metrics data
+#[derive(Serialize)]
+pub struct MetricsSnapshot {
+    pub requests_total: u64,
+    pub requests_error_total: u64,
+    pub active_connections: u64,
+    pub route_count: usize,
+    pub target_count: usize,
+    pub targets: Vec<TargetMetrics>,
+    pub timestamp: u64,
+}
+
+#[derive(Serialize)]
+pub struct TargetMetrics {
+    pub service: String,
+    pub url: String,
+    pub protocol: String,
+    pub circuit_breaker: String,
+    pub active_connections: u64,
+    pub requests: u64,
+    pub errors: u64,
+    pub avg_latency_us: u64,
+}
+
+/// Query parameters for the log history endpoint.
+#[derive(Debug, Deserialize)]
+pub struct LogsQuery {
+    /// Maximum number of entries to return (default 100, max 1000).
+    pub limit: Option<usize>,
+    /// Minimum log level: "ERROR", "WARN", "INFO", "DEBUG", "TRACE".
+    pub level: Option<String>,
+}
+
 /// Build the admin API router
 pub fn build_router(state: AdminState) -> Router {
+    // Public routes (no auth required)
+    let public = Router::new()
+        .route("/admin/", get(dashboard_handler))
+        .route("/admin/dashboard", get(dashboard_handler))
+        .route("/admin/login", post(login_handler))
+        .route("/admin/logout", post(logout_handler))
+        .route("/admin/me", get(me_handler)); // Get current user
+
+    // Protected routes (auth required)
     let protected = Router::new()
         .route("/admin/health", get(health_handler))
         .route("/admin/routes", get(routes_handler))
         .route("/admin/metrics", get(metrics_handler))
         .route("/admin/config", get(config_handler))
-        .route("/admin/certs", get(certs_handler));
+        .route("/admin/certs", get(certs_handler))
+        .route("/admin/logs", get(logs_handler))
+        .route("/admin/targets", get(targets_handler))
+        .route("/admin/consul-status", get(consul_status_handler))
+        .route("/admin/topology", get(topology_handler))
+        .route("/admin/targets-metrics", get(targets_metrics_handler))
+        .route("/admin/dns-cache", get(dns_cache_handler))
+        .route("/admin/logs/stream", get(logs_stream_handler))
+        .route("/admin/metrics/stream", get(metrics_stream_handler));
 
-    if state.config.server.admin_token.is_empty() {
-        protected.with_state(state)
+    if state.config.server.admin_token.is_empty() && state.config.server.admin_users.is_empty() {
+        public.merge(protected).with_state(state)
     } else {
-        protected
-            .layer(from_fn_with_state(state.clone(), admin_auth_middleware))
-            .with_state(state)
+        public.with_state(state.clone())
+            .merge(protected.layer(from_fn_with_state(state.clone(), admin_auth_middleware)).with_state(state))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+/// Serve the embedded dashboard SPA.
+async fn dashboard_handler() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("dashboard.html"))
+}
+
+/// Login handler
+async fn login_handler(
+    State(state): State<AdminState>,
+    Json(req): Json<LoginRequest>,
+) -> axum::Json<LoginResponse> {
+    // Check against configured users (with bcrypt verification)
+    let valid = state.config.server.admin_users.iter()
+        .any(|u| u.username == req.username && verify_password(&req.password, &u.password));
+    
+    // Also check legacy admin_token for backwards compat
+    let legacy_valid = !state.config.server.admin_token.is_empty() && 
+        req.password == state.config.server.admin_token;
+    
+    if valid || legacy_valid {
+        let user = if valid {
+            state.config.server.admin_users.iter()
+                .find(|u| u.username == req.username)
+                .map(|u| u.username.clone())
+                .unwrap_or(req.username.clone())
+        } else {
+            "admin".to_string()
+        };
+        
+        // Generate session token
+        let token = generate_token();
+        let mut sessions = state.sessions.write().await;
+        sessions.insert(token.clone(), user.clone());
+        drop(sessions);
+        
+        axum::Json(LoginResponse {
+            success: true,
+            message: "Login successful".to_string(),
+            user: Some(user),
+        })
+    } else {
+        axum::Json(LoginResponse {
+            success: false,
+            message: "Invalid credentials".to_string(),
+            user: None,
+        })
+    }
+}
+
+/// Logout handler
+async fn logout_handler(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+) -> axum::Json<serde_json::Value> {
+    if let Some(auth) = headers.get(AUTHORIZATION) {
+        if let Ok(token) = auth.to_str() {
+            if token.starts_with("Bearer ") {
+                let token = token[7..].to_string();
+                let mut sessions = state.sessions.write().await;
+                sessions.remove(&token);
+            }
+        }
+    }
+    axum::Json(serde_json::json!({ "success": true, "message": "Logged out" }))
+}
+
+/// Get current user
+async fn me_handler(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+) -> axum::Json<serde_json::Value> {
+    if let Some(auth) = headers.get(AUTHORIZATION) {
+        if let Ok(token) = auth.to_str() {
+            if token.starts_with("Bearer ") {
+                let token = token[7..].to_string();
+                let sessions = state.sessions.read().await;
+                if let Some(user) = sessions.get(&token) {
+                    return axum::Json(serde_json::json!({
+                        "authenticated": true,
+                        "user": user
+                    }));
+                }
+            }
+        }
+    }
+    axum::Json(serde_json::json!({ "authenticated": false }))
+}
+
+/// Real-time metrics stream (SSE)
+async fn metrics_stream_handler(
+    State(state): State<AdminState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::time::{interval, Duration};
+    
+    async fn make_snapshot(state: &AdminState) -> MetricsSnapshot {
+        let table = state.route_table.get();
+        let hosts = table.hosts();
+        
+        let mut targets = Vec::new();
+        for host in hosts {
+            if let Some(routes) = table.get_routes(host) {
+                for route in routes.iter() {
+                    for target in route.targets.iter() {
+                        let stats = target.stats.as_ref();
+                        targets.push(TargetMetrics {
+                            service: target.service.clone(),
+                            url: target.url.clone(),
+                            protocol: format!("{:?}", target.parsed_protocol).to_lowercase(),
+                            circuit_breaker: format!("{:?}", target.health_tracker.circuit_breaker().current_state()).to_lowercase(),
+                            active_connections: target.active_connections.load(Ordering::Relaxed),
+                            requests: stats.requests_total.load(Ordering::Relaxed),
+                            errors: stats.errors_total.load(Ordering::Relaxed),
+                            avg_latency_us: stats.avg_latency_us(),
+                        });
+                    }
+                }
+            }
+        }
+        
+        MetricsSnapshot {
+            requests_total: targets.iter().map(|t| t.requests).sum(),
+            requests_error_total: targets.iter().map(|t| t.errors).sum(),
+            active_connections: targets.iter().map(|t| t.active_connections).sum(),
+            route_count: table.route_count(),
+            target_count: table.target_count(),
+            targets,
+            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+        }
+    }
+    
+    // Create a stream that yields metrics every second
+    let state_clone = state.clone();
+    let stream = async_stream::stream! {
+        let mut timer = interval(Duration::from_secs(1));
+        
+        // Send initial connection message
+        yield Ok::<_, Infallible>(Event::default().data("event: connected\n\n"));
+        
+        loop {
+            timer.tick().await;
+            let snapshot = make_snapshot(&state_clone).await;
+            let data = serde_json::to_string(&snapshot).unwrap_or_default();
+            yield Ok(Event::default().data(format!("data: {}\n\n", data)));
+        }
+    };
+    
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Generate a random session token
+/// Hash a password using bcrypt
+fn hash_password(password: &str) -> String {
+    bcrypt::hash(password, DEFAULT_COST).unwrap_or_default()
+}
+
+/// Verify password against hash
+fn verify_password(password: &str, hash: &str) -> bool {
+    // If hash looks like bcrypt (starts with $2), verify it
+    if hash.starts_with("$2") {
+        verify(password, hash).unwrap_or(false)
+    } else {
+        // Legacy plain text comparison
+        password == hash
+    }
+}
+
+/// Generate a random session token
+fn generate_token() -> String {
+    let mut rng = rand::thread_rng();
+    let bytes: Vec<u8> = (0..32).map(|_| rng.r#gen()).collect();
+    BASE64.encode(&bytes)
 }
 
 async fn health_handler() -> axum::Json<HealthResponse> {
@@ -207,12 +477,274 @@ async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
     }))
 }
 
+
+
+use crate::route::target::global_dns_cache;
+
+async fn dns_cache_handler() -> axum::Json<serde_json::Value> {
+    let cache = global_dns_cache();
+    let stats = cache.stats();
+    let entries = cache.entries();
+    
+    axum::Json(serde_json::json!({
+        "stats": {
+            "total_entries": stats.entries,
+            "hits": stats.hits,
+            "misses": stats.misses,
+            "negatives": stats.negatives,
+            "hit_rate": if stats.hits + stats.misses > 0 {
+                (stats.hits as f64 / (stats.hits + stats.misses) as f64 * 100.0).round() as u64
+            } else { 0 },
+        },
+        "entries": entries,
+    }))
+}
+
+
+use crate::metrics::prometheus::global;
+
+async fn consul_status_handler() -> axum::Json<serde_json::Value> {
+    let m = global();
+    
+    axum::Json(serde_json::json!({
+        "services": {
+            "status": "unknown",
+            "last_index": m.consul_watcher_last_index_services.load(std::sync::atomic::Ordering::Relaxed),
+            "backoff_secs": m.consul_watcher_backoff_seconds_services.load(std::sync::atomic::Ordering::Relaxed),
+            "errors": m.consul_watcher_errors_total_services.load(std::sync::atomic::Ordering::Relaxed),
+        },
+        "kv": {
+            "status": "unknown",
+            "last_index": m.consul_watcher_last_index_kv.load(std::sync::atomic::Ordering::Relaxed),
+            "backoff_secs": m.consul_watcher_backoff_seconds_kv.load(std::sync::atomic::Ordering::Relaxed),
+            "errors": m.consul_watcher_errors_total_kv.load(std::sync::atomic::Ordering::Relaxed),
+        },
+        "tls": {
+            "status": "unknown",
+            "last_index": m.consul_watcher_last_index_tls.load(std::sync::atomic::Ordering::Relaxed),
+            "backoff_secs": m.consul_watcher_backoff_seconds_tls.load(std::sync::atomic::Ordering::Relaxed),
+            "errors": m.consul_watcher_errors_total_tls.load(std::sync::atomic::Ordering::Relaxed),
+        },
+        "client_ca": {
+            "status": "unknown",
+            "last_index": m.consul_watcher_last_index_client_ca.load(std::sync::atomic::Ordering::Relaxed),
+            "backoff_secs": m.consul_watcher_backoff_seconds_client_ca.load(std::sync::atomic::Ordering::Relaxed),
+            "errors": m.consul_watcher_errors_total_client_ca.load(std::sync::atomic::Ordering::Relaxed),
+        },
+    }))
+}
+
+
+
+
+async fn topology_handler(State(state): State<AdminState>) -> axum::Json<serde_json::Value> {
+    let table = state.route_table.get();
+    let hosts = table.hosts();
+    let metrics = global();
+    
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    
+    // LB node
+    nodes.push(serde_json::json!({
+        "id": "lb",
+        "type": "lb",
+        "label": "Sentirum LB",
+        "x": 400,
+        "y": 50,
+        "stats": {
+            "requests": metrics.requests_total.load(Ordering::Relaxed),
+            "active_connections": metrics.active_connections.load(Ordering::Relaxed),
+            "error_rate": if metrics.requests_total.load(Ordering::Relaxed) > 0 {
+                (metrics.requests_error_total.load(Ordering::Relaxed) as f64 / metrics.requests_total.load(Ordering::Relaxed) as f64 * 100.0).round() as u64
+            } else { 0 },
+        }
+    }));
+    
+    // Targets
+    let mut target_idx = 0;
+    for host in hosts {
+        if let Some(routes) = table.get_routes(host) {
+            for route in routes.iter() {
+                for target in route.targets.iter() {
+                    let cb_state = target.health_tracker.circuit_breaker().current_state();
+                    let active_conns = target.active_connections.load(Ordering::Relaxed);
+                    
+                    let y = 180 + (target_idx % 4) * 100;
+                    let x = 100 + (target_idx / 4) * 200;
+                    
+                    nodes.push(serde_json::json!({
+                        "id": format!("target-{}", target_idx),
+                        "type": "target",
+                        "label": target.service,
+                        "url": target.url,
+                        "x": x,
+                        "y": y,
+                        "protocol": format!("{:?}", target.parsed_protocol).to_lowercase(),
+                        "tls": target.parsed_tls,
+                        "cb_state": format!("{:?}", cb_state).to_lowercase(),
+                        "stats": {
+                            "active_connections": active_conns,
+                        }
+                    }));
+                    
+                    edges.push(serde_json::json!({
+                        "from": "lb",
+                        "to": format!("target-{}", target_idx),
+                        "cb_state": format!("{:?}", cb_state).to_lowercase(),
+                    }));
+                    
+                    target_idx += 1;
+                }
+            }
+        }
+    }
+    
+    axum::Json(serde_json::json!({
+        "nodes": nodes,
+        "edges": edges,
+    }))
+}
+
+
+async fn targets_metrics_handler(State(state): State<AdminState>) -> impl axum::response::IntoResponse {
+    
+    
+    let table = state.route_table.get();
+    let hosts = table.hosts();
+    
+    let mut output = String::new();
+    
+    for host in hosts {
+        if let Some(routes) = table.get_routes(host) {
+            for route in routes.iter() {
+                for target in route.targets.iter() {
+                    let stats = target.stats.as_ref();
+                    let requests = stats.requests_total.load(Ordering::Relaxed);
+                    let errors = stats.errors_total.load(Ordering::Relaxed);
+                    let latency_sum = stats.latency_sum_us.load(Ordering::Relaxed);
+                    let bytes = stats.bytes_total.load(Ordering::Relaxed);
+                    let cb_state = target.health_tracker.circuit_breaker().current_state();
+                    
+                    output.push_str(&format!(
+                        "# HELP sentirum_lb_target_requests_total Requests per target\n                        # TYPE sentirum_lb_target_requests_total counter\n                        sentirum_lb_target_requests_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {req}\n\n                        # HELP sentirum_lb_target_errors_total Errors per target\n                        # TYPE sentirum_lb_target_errors_total counter\n                        sentirum_lb_target_errors_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {err}\n\n                        # HELP sentirum_lb_target_latency_us_total Total latency per target\n                        # TYPE sentirum_lb_target_latency_us_total counter\n                        sentirum_lb_target_latency_us_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {lat}\n\n                        # HELP sentirum_lb_target_bytes_total Bytes per target\n                        # TYPE sentirum_lb_target_bytes_total counter\n                        sentirum_lb_target_bytes_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {bytes}\n\n",
+                        svc = target.service,
+                        h = host,
+                        p = route.path,
+                        proto = format!("{:?}", target.parsed_protocol).to_lowercase(),
+                        req = requests,
+                        err = errors,
+                        lat = latency_sum,
+                        bytes = bytes
+                    ));
+                }
+            }
+        }
+    }
+    
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        output
+    )
+}
+
+/// Return per-target health and circuit breaker status.
+async fn targets_handler(State(state): State<AdminState>) -> axum::Json<serde_json::Value> {
+    
+    
+    let table = state.route_table.get();
+    let hosts = table.hosts();
+
+    let mut targets = Vec::new();
+    for host in hosts {
+        if let Some(routes) = table.get_routes(host) {
+            for route in routes.iter() {
+                for target in route.targets.iter() {
+                    let cb_state = target.health_tracker.circuit_breaker().current_state();
+                    let active_conns = target.active_connections.load(Ordering::Relaxed);
+                    let stats = target.stats.as_ref();
+                    let requests = stats.requests_total.load(Ordering::Relaxed);
+                    let errors = stats.errors_total.load(Ordering::Relaxed);
+                    let error_rate = if requests > 0 { (errors as f64 / requests as f64 * 100.0).round() as u64 } else { 0 };
+                    let avg_latency = stats.avg_latency_us();
+                    
+                    targets.push(serde_json::json!({
+                        "host": host,
+                        "path": &route.path,
+                        "service": &target.service,
+                        "url": &target.url,
+                        "protocol": format!("{:?}", target.parsed_protocol).to_lowercase(),
+                        "tls": target.parsed_tls,
+                        "http2": target.parsed_protocol.requires_http2(),
+                        "active_connections": active_conns,
+                        "circuit_breaker": format!("{:?}", cb_state).to_lowercase(),
+                        "stats": {
+                            "requests": requests,
+                            "errors": errors,
+                            "error_rate_pct": error_rate,
+                            "avg_latency_us": avg_latency,
+                            "bytes_total": stats.bytes_total.load(Ordering::Relaxed),
+                        }
+                    }));
+                }
+            }
+        }
+    }
+
+    axum::Json(serde_json::json!({
+        "targets": targets,
+        "total": targets.len(),
+    }))
+}
+
+/// Return recent log entries from the ring buffer.
+async fn logs_handler(
+    State(state): State<AdminState>,
+    Query(params): Query<LogsQuery>,
+) -> axum::Json<Vec<crate::admin::logs::LogEntry>> {
+    let limit = params.limit.unwrap_or(100).min(1000);
+    let level = params.level.as_deref();
+
+    if let Some(buffer) = &state.log_buffer {
+        axum::Json(buffer.recent(limit, level))
+    } else {
+        axum::Json(Vec::new())
+    }
+}
+
+/// SSE stream of live log events.
+async fn logs_stream_handler(
+    State(state): State<AdminState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let buffer = state.log_buffer.clone();
+    let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> = if let Some(buf) = &buffer {
+        let receiver = buf.subscribe();
+        let stream = tokio_stream::wrappers::BroadcastStream::new(receiver)
+            .filter_map(|result| match result {
+                Ok(entry) => {
+                    let data = serde_json::to_string(&entry).unwrap_or_default();
+                    Some(Ok(Event::default().data(data)))
+                }
+                Err(_) => None, // Skip lagged messages.
+            });
+        Box::pin(stream)
+    } else {
+        Box::pin(tokio_stream::pending())
+    };
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+// ---------------------------------------------------------------------------
+// Server bootstrap
+// ---------------------------------------------------------------------------
+
 /// Run the admin API server using axum
 pub async fn run_admin_server(
     config: Arc<Config>,
     route_table: Arc<ManagedRouteTable>,
     tls_store: Option<Arc<DynamicCertStore>>,
     client_ca_store: Option<Arc<DynamicClientCaStore>>,
+    log_buffer: Option<Arc<crate::admin::logs::LogBuffer>>,
 ) {
     let addr = config.server.admin_listen.clone();
 
@@ -227,6 +759,8 @@ pub async fn run_admin_server(
         route_table,
         tls_store,
         client_ca_store,
+        log_buffer,
+        sessions: Arc::new(RwLock::new(HashMap::new())),
     };
     let app = build_router(state);
 
@@ -244,6 +778,10 @@ pub async fn run_admin_server(
         tracing::error!(error = %e, "Admin API server error");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Auth helpers
+// ---------------------------------------------------------------------------
 
 /// Constant-time comparison to prevent timing side-channel attacks on the admin token.
 fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -341,6 +879,8 @@ mod tests {
             route_table: Arc::new(ManagedRouteTable::new()),
             tls_store: None,
             client_ca_store: None,
+            log_buffer: None,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -441,6 +981,73 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_admin_dashboard() {
+        let state = make_test_state();
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("sentirum"));
+    }
+
+    #[tokio::test]
+    async fn test_admin_logs_returns_empty_without_buffer() {
+        let state = make_test_state();
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/logs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_admin_logs_with_buffer() {
+        let buffer = crate::admin::logs::LogBuffer::new();
+        buffer.push(crate::admin::logs::LogEntry {
+            ts: 1000,
+            level: "INFO".to_string(),
+            message: "test message".to_string(),
+            target: "test".to_string(),
+        });
+
+        let mut state = make_test_state();
+        state.log_buffer = Some(buffer);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/logs?limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["message"], "test message");
     }
 
     #[tokio::test]

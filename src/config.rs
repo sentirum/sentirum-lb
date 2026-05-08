@@ -15,6 +15,13 @@ pub struct Config {
     pub tcp: TcpConfig,
 }
 
+/// Admin user for dashboard authentication
+#[derive(Debug, Deserialize, Clone)]
+pub struct AdminUser {
+    pub username: String,
+    pub password: String, // bcrypt hashed
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
     /// Proxy listen address (e.g. ":9999")
@@ -22,8 +29,11 @@ pub struct ServerConfig {
     /// Admin API listen address (e.g. "127.0.0.1:9998")
     #[serde(default = "default_admin_listen")]
     pub admin_listen: String,
-    /// Optional admin bearer/token auth secret
-    #[serde(default)]
+    /// Admin users (username/password pairs)
+    #[serde(default = "default_admin_users")]
+    pub admin_users: Vec<AdminUser>,
+    /// Legacy: single admin token (for backwards compatibility)
+    #[serde(default = "default_admin_token")]
     pub admin_token: String,
     /// Number of worker threads (0 = auto)
     #[serde(default)]
@@ -32,6 +42,14 @@ pub struct ServerConfig {
 
 fn default_admin_listen() -> String {
     "127.0.0.1:9998".to_string()
+}
+
+fn default_admin_token() -> String {
+    String::new()
+}
+
+fn default_admin_users() -> Vec<AdminUser> {
+    Vec::new()
 }
 
 #[derive(Debug, Deserialize, Clone)]

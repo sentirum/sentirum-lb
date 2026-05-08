@@ -155,8 +155,7 @@ If you change user-facing behavior, also update:
 
 ## Known non-goals / placeholders
 
-- Raw TCP proxy mode is not finished yet
-- Avoid documenting TCP proxy support as production-ready unless it is actually implemented
+- Raw TCP proxy mode supports plain TCP, TCP+SNI routing, dynamic listeners, and PROXY protocol v1; avoid documenting multiplexed HTTPS+TCP+SNI as production-ready until further hardening under load
 
 ## Commit hygiene
 

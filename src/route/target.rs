@@ -66,9 +66,10 @@ impl UpstreamProtocol {
 }
 
 /// Circuit breaker state machine
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 pub enum CircuitState {
     /// Normal operation — requests flow through
+    #[default]
     Closed,
     /// Circuit is open — requests fail fast with 503
     Open,
@@ -76,11 +77,6 @@ pub enum CircuitState {
     HalfOpen,
 }
 
-impl Default for CircuitState {
-    fn default() -> Self {
-        Self::Closed
-    }
-}
 
 /// Immutable circuit breaker configuration
 #[derive(Debug, Clone, Serialize)]
@@ -107,7 +103,6 @@ impl Default for CircuitBreakerConfig {
 }
 
 /// Circuit breaker for per-target failure protection.
-
     /// Uses a sliding window of N requests to track error rate.
     /// When error_threshold % of requests in the window fail, the circuit opens.
     /// After recovery_timeout, the circuit enters half-open and allows N probe requests.
@@ -160,7 +155,7 @@ impl CircuitBreaker {
             CircuitState::Closed => true,
             CircuitState::Open => {
                 let elapsed = now_ms.saturating_sub(inner.opened_at_ms);
-                let recovery_ms = self.config.recovery_timeout_secs as u64 * 1000;
+                let recovery_ms = self.config.recovery_timeout_secs * 1000;
                 if elapsed >= recovery_ms {
                     inner.state = CircuitState::HalfOpen;
                     inner.half_open_requests = 0;
@@ -378,7 +373,7 @@ impl DnsCache {
         let expired = self
             .inner
             .get(host)
-            .map_or(false, |e| now_ms >= e.expires_at_ms);
+            .is_some_and(|e| now_ms >= e.expires_at_ms);
         if expired {
             self.inner.remove(host);
             self.misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -443,10 +438,34 @@ impl DnsCache {
         }
     }
 
-    /// Record a cache miss
-    pub fn record_miss(&self) {
-        self.misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    /// Get all cached entries with expiration info (for admin API).
+    pub fn entries(&self) -> Vec<DnsCacheEntryView> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        
+        self.inner.iter()
+            .map(|entry| {
+                let ttl_remaining_ms = entry.expires_at_ms.saturating_sub(now_ms);
+                DnsCacheEntryView {
+                    host: entry.key().clone(),
+                    addrs: entry.addrs.iter().map(|a| a.to_string()).collect(),
+                    ttl_remaining_secs: ttl_remaining_ms as i64 / 1000,
+                    is_negative: entry.negative,
+                }
+            })
+            .collect()
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DnsCacheEntryView {
+    pub host: String,
+    pub addrs: Vec<String>,
+    pub ttl_remaining_secs: i64,
+    pub is_negative: bool,
 }
 
 impl Default for DnsCache {
@@ -543,6 +562,8 @@ pub struct Target {
     /// Circuit breaker for upstream failure protection
     #[serde(skip)]
     pub health_tracker: TargetHealthTracker,
+    #[serde(skip)]
+    pub stats: Arc<TargetStats>,
 }
 
 impl Clone for Target {
@@ -561,6 +582,7 @@ impl Clone for Target {
             parsed_protocol: self.parsed_protocol,
             active_connections: Arc::clone(&self.active_connections),
             health_tracker: self.health_tracker.clone(),
+            stats: Arc::clone(&self.stats),
         }
     }
 }
@@ -581,6 +603,7 @@ impl Default for Target {
             parsed_protocol: UpstreamProtocol::Http,
             active_connections: Arc::new(AtomicU64::new(0)),
             health_tracker: TargetHealthTracker::new(),
+            stats: Arc::new(TargetStats::default()),
         }
     }
 }
@@ -718,11 +741,11 @@ impl Target {
 
         // Try DNS cache first
         let cache = global_dns_cache();
-        if let Some(addrs) = cache.lookup(&cache_key) {
-            if let Some(addr) = addrs.first() {
-                tracing::trace!(host, port, "DNS cache hit");
-                return Ok(*addr);
-            }
+        if let Some(addrs) = cache.lookup(&cache_key)
+            && let Some(addr) = addrs.first()
+        {
+            tracing::trace!(host, port, "DNS cache hit");
+            return Ok(*addr);
         }
 
         let addr_str = if host.contains(':') {
@@ -1137,5 +1160,47 @@ mod tests {
         // Any error reopens the circuit
         cb.record_error();
         assert_eq!(cb.current_state(), CircuitState::Open);
+    }
+}
+
+// Per-target statistics for admin dashboard and Prometheus labels.
+#[derive(Debug, Default)]
+pub struct TargetStats {
+    pub requests_total: AtomicU64,
+    pub errors_total: AtomicU64,
+    pub latency_sum_us: AtomicU64,
+    pub bytes_total: AtomicU64,
+    pub last_access: AtomicU64, // Unix timestamp
+}
+
+impl TargetStats {
+    pub fn record_request(&self, latency_us: u64, bytes: usize, is_error: bool) {
+        self.requests_total.fetch_add(1, Ordering::Relaxed);
+        if is_error {
+            self.errors_total.fetch_add(1, Ordering::Relaxed);
+        }
+        self.latency_sum_us.fetch_add(latency_us, Ordering::Relaxed);
+        self.bytes_total.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.last_access.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            Ordering::Relaxed
+        );
+    }
+    
+    pub fn error_rate(&self) -> f64 {
+        let total = self.requests_total.load(Ordering::Relaxed);
+        if total == 0 { return 0.0; }
+        let errors = self.errors_total.load(Ordering::Relaxed);
+        (errors as f64 / total as f64) * 100.0
+    }
+    
+    pub fn avg_latency_us(&self) -> u64 {
+        let total = self.requests_total.load(Ordering::Relaxed);
+        if total == 0 { return 0; }
+        let sum = self.latency_sum_us.load(Ordering::Relaxed);
+        sum / total
     }
 }

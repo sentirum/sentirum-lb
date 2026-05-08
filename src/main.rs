@@ -46,17 +46,29 @@ struct Args {
 }
 
 fn init_logging(config: &Config) {
-    use tracing_subscriber::{EnvFilter, fmt};
+    use tracing_subscriber::{EnvFilter, Registry, fmt};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
 
     let level = config.logging.level.clone();
     let format = config.logging.format.clone();
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&level));
+    let log_buffer = sentirum_lb::admin::logs::global_log_buffer();
+    let capture_layer = sentirum_lb::admin::logs::LogCaptureLayer::new(log_buffer);
 
     if format == "json" {
-        fmt().with_env_filter(env_filter).json().init();
+        Registry::default()
+            .with(fmt::layer().json())
+            .with(capture_layer)
+            .with(env_filter)
+            .init();
     } else {
-        fmt().pretty().with_env_filter(env_filter).init();
+        Registry::default()
+            .with(fmt::layer().pretty())
+            .with(capture_layer)
+            .with(env_filter)
+            .init();
     }
 }
 
@@ -283,6 +295,7 @@ struct AdminBackgroundService {
     route_table: Arc<ManagedRouteTable>,
     tls_store: Option<Arc<DynamicCertStore>>,
     client_ca_store: Option<Arc<DynamicClientCaStore>>,
+    log_buffer: Option<Arc<sentirum_lb::admin::logs::LogBuffer>>,
 }
 
 #[async_trait]
@@ -294,6 +307,7 @@ impl BackgroundService for AdminBackgroundService {
                 self.route_table.clone(),
                 self.tls_store.clone(),
                 self.client_ca_store.clone(),
+                self.log_buffer.clone(),
             ) => {}
             _ = shutdown.changed() => {
                 tracing::info!("Admin background service shutting down");
@@ -322,6 +336,7 @@ fn main() {
             listen: args.listen.clone().unwrap_or_else(|| ":9999".to_string()),
             admin_listen: "127.0.0.1:9998".to_string(),
             admin_token: String::new(),
+            admin_users: vec![],
             workers: 0,
         };
         let consul = sentirum_lb::config::ConsulConfig {
@@ -756,6 +771,7 @@ fn main() {
             route_table: managed_table.clone(),
             tls_store: tls_store_for_admin,
             client_ca_store: client_ca_store_for_admin,
+            log_buffer: Some(sentirum_lb::admin::logs::global_log_buffer()),
         },
     );
     admin_service.threads = Some(1);

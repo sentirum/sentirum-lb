@@ -301,7 +301,8 @@ impl Table {
             active_connections: self.active_connections_for(&def.dst),
             health_tracker: self.cb_config.as_ref()
                 .map(|cb| crate::route::target::TargetHealthTracker::with_config(cb.clone()))
-                .unwrap_or_else(crate::route::target::TargetHealthTracker::new),
+                .unwrap_or_default(),
+            stats: Arc::new(crate::route::target::TargetStats::default()),
         };
         target.pre_parse();
 

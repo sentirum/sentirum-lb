@@ -1,6 +1,5 @@
 # Static routes for local testing
 # ssrfskipverify=true needed because Docker network uses RFC1918 addresses
-# and static routes block private IPs by default (only Consul sources are allowed)
 
 # Web app — two backends for round-robin
 route add web-blue myhost.com/ http://upstream-web-blue:8080/ opts "ssrfskipverify=true"

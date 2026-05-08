@@ -272,18 +272,18 @@ impl ProxyHttp for SentirumProxy {
         tracing::debug!(host, path, target_url = %target.url, "Route found");
 
         // Circuit breaker check — fail fast if circuit is open
-        if self.config.proxy.circuit_breaker_enabled {
-            if !target.health_tracker.circuit_breaker().allow_request() {
-                tracing::warn!(
-                    host,
-                    path,
-                    target_url = %target.url,
-                    service = %target.service,
-                    state = ?target.health_tracker.circuit_breaker().current_state(),
-                    "Circuit breaker OPEN — failing fast with 503"
-                );
-                return Err(Error::new(ErrorType::HTTPStatus(503)));
-            }
+        if self.config.proxy.circuit_breaker_enabled
+            && !target.health_tracker.circuit_breaker().allow_request()
+        {
+            tracing::warn!(
+                host,
+                path,
+                target_url = %target.url,
+                service = %target.service,
+                state = ?target.health_tracker.circuit_breaker().current_state(),
+                "Circuit breaker OPEN — failing fast with 503"
+            );
+            return Err(Error::new(ErrorType::HTTPStatus(503)));
         }
 
         // Store target in context for upstream_request_filter (avoids double lookup)
@@ -398,6 +398,13 @@ impl ProxyHttp for SentirumProxy {
                     || matches!(e, Some(err) if err.etype() == &ErrorType::ConnectTimedout)
                     || matches!(e, Some(err) if err.etype() == &ErrorType::ConnectRefused)
                     || matches!(e, Some(err) if err.etype() == &ErrorType::ConnectNoRoute);
+                // Record per-target stats
+                let is_error = status >= 500
+                    || matches!(e, Some(err) if err.etype() == &ErrorType::ConnectTimedout)
+                    || matches!(e, Some(err) if err.etype() == &ErrorType::ConnectRefused)
+                    || matches!(e, Some(err) if err.etype() == &ErrorType::ConnectNoRoute);
+                target.stats.record_request(latency_us, ctx.upstream_response_bytes, is_error);
+                
                 if should_record_error {
                     target.health_tracker.circuit_breaker().record_error();
                 } else {
@@ -969,6 +976,7 @@ mod tests {
                 listen: ":9999".into(),
                 admin_listen: "127.0.0.1:9998".into(),
                 admin_token: String::new(),
+                admin_users: vec![],
                 workers: 0,
             },
             consul: crate::config::ConsulConfig {
@@ -1015,6 +1023,7 @@ mod tests {
                 listen: ":9999".into(),
                 admin_listen: "127.0.0.1:9998".into(),
                 admin_token: String::new(),
+                admin_users: vec![],
                 workers: 0,
             },
             consul: crate::config::ConsulConfig {
@@ -1056,6 +1065,7 @@ mod tests {
                 listen: ":9999".into(),
                 admin_listen: "127.0.0.1:9998".into(),
                 admin_token: String::new(),
+                admin_users: vec![],
                 workers: 0,
             },
             consul: crate::config::ConsulConfig {

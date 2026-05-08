@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sentirum LB</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html { font-size: 14px; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0f0f0f;
+            color: #e0e0e0;
+            line-height: 1.5;
+        }
+        
+        /* Login Screen */
+        #login-screen {
+            position: fixed;
+            inset: 0;
+            background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+        }
+        #login-screen.hidden { display: none; }
+        .login-card {
+            background: rgba(20, 20, 20, 0.95);
+            border: 1px solid #2a2a3a;
+            border-radius: 16px;
+            padding: 3rem;
+            text-align: center;
+            min-width: 360px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+        }
+        .login-card h1 {
+            font-size: 1.8rem;
+            font-weight: 600;
+            color: #fff;
+            margin-bottom: 0.5rem;
+            letter-spacing: -0.02em;
+        }
+        .login-card .subtitle {
+            color: #666;
+            margin-bottom: 2rem;
+            font-size: 0.9rem;
+        }
+        .login-card input {
+            width: 100%;
+            padding: 1rem;
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 1rem;
+            margin-bottom: 1rem;
+            transition: border-color 0.2s;
+        }
+        .login-card input:focus {
+            outline: none;
+            border-color: #6366f1;
+        }
+        .login-card button {
+            width: 100%;
+            padding: 1rem;
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            border: none;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        .login-card button:hover { opacity: 0.9; }
+        .login-error {
+            color: #ef4444;
+            font-size: 0.85rem;
+            margin-top: 1rem;
+            display: none;
+        }
+        
+        /* App Layout */
+        .app { display: none; }
+        .app.active { display: grid; }
+        .layout {
+            display: grid;
+            grid-template-columns: 200px 1fr;
+            min-height: 100vh;
+        }
+        
+        /* Sidebar */
+        nav {
+            background: #0a0a0a;
+            padding: 1.5rem 1rem;
+            border-right: 1px solid #1a1a1a;
+            position: fixed;
+            width: 200px;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .logo {
+            font-size: 1.1rem;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            margin-bottom: 2rem;
+            padding: 0 0.5rem;
+        }
+        .logo span { color: #6366f1; }
+        .nav-links { flex: 1; }
+        .nav a {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.6rem 0.75rem;
+            color: #666;
+            text-decoration: none;
+            font-size: 0.85rem;
+            border-radius: 6px;
+            transition: all 0.15s;
+        }
+        .nav a:hover, .nav a.active { 
+            background: #1a1a1a;
+            color: #e0e0e0;
+        }
+        .nav a.active { background: #1f1f2e; color: #6366f1; }
+        .nav-icon { font-size: 1.1rem; }
+        
+        /* User section */
+        .user-section {
+            padding-top: 1rem;
+            border-top: 1px solid #1a1a1a;
+        }
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+        .user-avatar {
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 0.8rem;
+        }
+        .user-name { font-size: 0.85rem; color: #e0e0e0; }
+        .logout-btn {
+            width: 100%;
+            padding: 0.5rem;
+            background: transparent;
+            border: 1px solid #333;
+            border-radius: 6px;
+            color: #666;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .logout-btn:hover { border-color: #ef4444; color: #ef4444; }
+        
+        /* Main content */
+        main {
+            margin-left: 200px;
+            padding: 2rem 2.5rem;
+        }
+        .page { display: none; }
+        .page.active { display: block; }
+        
+        /* Header */
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+        }
+        h1 {
+            font-size: 1.3rem;
+            font-weight: 500;
+            color: #ccc;
+            letter-spacing: -0.01em;
+        }
+        .live-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.4rem 0.8rem;
+            background: rgba(34, 197, 94, 0.1);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+            border-radius: 20px;
+            font-size: 0.75rem;
+            color: #22c55e;
+        }
+        .live-dot {
+            width: 8px;
+            height: 8px;
+            background: #22c55e;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        /* Stats grid */
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 1px;
+            background: #1a1a1a;
+            border-radius: 12px;
+            overflow: hidden;
+            margin-bottom: 2rem;
+        }
+        .stat {
+            background: #141414;
+            padding: 1.5rem;
+        }
+        .stat label {
+            display: block;
+            font-size: 0.7rem;
+            color: #555;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-bottom: 0.5rem;
+        }
+        .stat .val {
+            font-size: 2rem;
+            font-weight: 300;
+            color: #fff;
+        }
+        .stat .sub {
+            font-size: 0.75rem;
+            color: #444;
+            margin-top: 0.3rem;
+        }
+        .stat .val.ok { color: #22c55e; }
+        .stat .val.warn { color: #eab308; }
+        .stat .val.err { color: #ef4444; }
+        
+        /* Charts */
+        .charts {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        .chart-card {
+            background: #141414;
+            border-radius: 12px;
+            padding: 1.5rem;
+        }
+        .chart-card h3 {
+            font-size: 0.85rem;
+            color: #666;
+            margin-bottom: 1rem;
+            font-weight: 500;
+        }
+        .chart-card canvas { max-height: 200px; }
+        
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            text-align: left;
+            padding: 1rem 0.75rem;
+            border-bottom: 1px solid #1a1a1a;
+        }
+        th {
+            font-size: 0.7rem;
+            color: #555;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            font-weight: 500;
+        }
+        td { font-size: 0.85rem; }
+        .mono { font-family: 'SF Mono', Monaco, monospace; font-size: 0.8rem; color: #888; }
+        
+        /* Badges */
+        .badge {
+            display: inline-block;
+            padding: 0.2rem 0.5rem;
+            background: #1a1a1a;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            color: #888;
+            text-transform: uppercase;
+        }
+        .badge.tls { background: rgba(99, 102, 241, 0.2); color: #6366f1; }
+        .badge.grpc { background: rgba(234, 179, 8, 0.2); color: #eab308; }
+        
+        /* Circuit breaker badges */
+        .cb-badge {
+            padding: 0.25rem 0.6rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+        .cb-closed { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
+        .cb-open { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+        .cb-halfopen { background: rgba(234, 179, 8, 0.15); color: #eab308; }
+        
+        /* Topology cards */
+        .topology-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 1rem;
+            margin-top: 1.5rem;
+        }
+        .node-card {
+            background: #1a1a1a;
+            border-radius: 12px;
+            padding: 1.25rem;
+            text-align: center;
+            border: 1px solid #252525;
+            transition: all 0.2s;
+        }
+        .node-card:hover { border-color: #333; transform: translateY(-2px); }
+        .node-card.lb {
+            background: linear-gradient(135deg, #1f1f2e, #2a2a4a);
+            border-color: #6366f1;
+        }
+        .node-icon { font-size: 1.5rem; margin-bottom: 0.5rem; }
+        .node-label { font-weight: 500; color: #e0e0e0; margin-bottom: 0.25rem; }
+        .node-stats { font-size: 0.75rem; color: #666; margin-top: 0.5rem; }
+        .node-status { 
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-left: 0.5rem;
+        }
+        .node-status.ok { background: #22c55e; }
+        .node-status.err { background: #ef4444; }
+        .node-status.warn { background: #eab308; }
+        
+        /* Cards */
+        .card {
+            background: #141414;
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+        }
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 1rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid #1a1a1a;
+        }
+        .card-title { font-size: 0.9rem; font-weight: 500; color: #ccc; }
+        
+        /* Logs */
+        #logs-container {
+            background: #0a0a0a;
+            border-radius: 8px;
+            padding: 1rem;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.8rem;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .log {
+            padding: 0.4rem 0;
+            border-bottom: 1px solid #151515;
+            display: flex;
+            gap: 1rem;
+        }
+        .log .ts { color: #444; flex-shrink: 0; }
+        .log .lvl { 
+            width: 50px;
+            flex-shrink: 0;
+            font-weight: 500;
+        }
+        .log .lvl.I { color: #22c55e; }
+        .log .lvl.W { color: #eab308; }
+        .log .lvl.E { color: #ef4444; }
+        .log .lvl.D { color: #666; }
+        .log .msg { color: #888; }
+        
+        /* Refresh button */
+        .refresh-btn {
+            padding: 0.5rem 1rem;
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 6px;
+            color: #888;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .refresh-btn:hover { background: #222; color: #fff; }
+        
+        /* Error rows */
+        tr.err { background: rgba(239, 68, 68, 0.05); }
+        tr.warn { background: rgba(234, 179, 8, 0.05); }
+        
+        /* No data */
+        .no-data { color: #444; text-align: center; padding: 2rem; }
+        
+        /* Loading */
+        .loading { color: #666; }
+        .loading::after {
+            content: '';
+            animation: dots 1.5s infinite;
+        }
+        @keyframes dots {
+            0%, 20% { content: '.'; }
+            40% { content: '..'; }
+            60%, 100% { content: '...'; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Login Screen -->
+    <div id="login-screen">
+        <div class="login-card">
+            <h1>⚖️ Sentirum LB</h1>
+            <p class="subtitle">Admin Dashboard</p>
+            <input type="text" id="username-input" placeholder="Username" autocomplete="off" />
+            <input type="password" id="password-input" placeholder="Password" />
+            <button onclick="doLogin()">Giriş Yap</button>
+            <p class="login-error" id="login-error">Invalid credentials</p>
+        </div>
+    </div>
+    
+    <!-- App -->
+    <div class="app" id="app">
+        <div class="layout">
+            <nav>
+                <div class="logo"><span>sentirum</span> lb</div>
+                <div class="nav-links">
+                    <a href="#" data-page="overview" class="active" onclick="showPage('overview')">
+                        <span class="nav-icon">📊</span> Overview
+                    </a>
+                    <a href="#" data-page="topology" onclick="showPage('topology')">
+                        <span class="nav-icon">🔗</span> Topology
+                    </a>
+                    <a href="#" data-page="targets" onclick="showPage('targets')">
+                        <span class="nav-icon">🎯</span> Targets
+                    </a>
+                    <a href="#" data-page="dns" onclick="showPage('dns')">
+                        <span class="nav-icon">🌐</span> DNS Cache
+                    </a>
+                    <a href="#" data-page="consul" onclick="showPage('consul')">
+                        <span class="nav-icon">☁️</span> Consul
+                    </a>
+                    <a href="#" data-page="routes" onclick="showPage('routes')">
+                        <span class="nav-icon">🛤️</span> Routes
+                    </a>
+                    <a href="#" data-page="logs" onclick="showPage('logs')">
+                        <span class="nav-icon">📋</span> Logs
+                    </a>
+                    <a href="#" data-page="config" onclick="showPage('config')">
+                        <span class="nav-icon">⚙️</span> Config
+                    </a>
+                </div>
+                <div class="user-section">
+                    <div class="user-info">
+                        <div class="user-avatar" id="user-avatar">?</div>
+                        <span class="user-name" id="user-name">Loading...</span>
+                    </div>
+                    <button class="logout-btn" onclick="doLogout()">Çıkış</button>
+                </div>
+            </nav>
+            
+            <main>
+                <!-- Overview -->
+                <div id="page-overview" class="page active">
+                    <div class="page-header">
+                        <h1>Overview</h1>
+                        <div class="live-badge"><div class="live-dot" id="live-indicator"></div> <span id="live-text">LIVE</span></div>
+                    </div>
+                    <div class="stats" id="stats-row">
+                        <div class="stat"><label>Total Requests</label><div class="val" id="stat-requests">-</div></div>
+                        <div class="stat"><label>Error Rate</label><div class="val" id="stat-errors">-</div></div>
+                        <div class="stat"><label>Active Connections</label><div class="val" id="stat-conn">-</div></div>
+                        <div class="stat"><label>Routes</label><div class="val" id="stat-routes">-</div></div>
+                        <div class="stat"><label>Targets</label><div class="val" id="stat-targets">-</div></div>
+                    </div>
+                    <div class="charts">
+                        <div class="chart-card">
+                            <h3>Latency Distribution</h3>
+                            <canvas id="lat-chart"></canvas>
+                        </div>
+                        <div class="chart-card">
+                            <h3>Status Codes</h3>
+                            <canvas id="status-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Topology -->
+                <div id="page-topology" class="page">
+                    <div class="page-header">
+                        <h1>Topology</h1>
+                        <div class="live-badge"><div class="live-dot" id="live-indicator"></div> <span id="live-text">LIVE</span></div>
+                    </div>
+                    <div class="topology-grid" id="topology-grid"></div>
+                </div>
+                
+                <!-- Targets -->
+                <div id="page-targets" class="page">
+                    <div class="page-header">
+                        <h1>Targets</h1>
+                        <div class="live-badge"><div class="live-dot" id="live-indicator"></div> <span id="live-text">LIVE</span></div>
+                    </div>
+                    <div class="card">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Service</th>
+                                    <th>URL</th>
+                                    <th>Protocol</th>
+                                    <th>Requests</th>
+                                    <th>Errors</th>
+                                    <th>Err%</th>
+                                    <th>Avg Latency</th>
+                                    <th>Connections</th>
+                                    <th>CB State</th>
+                                </tr>
+                            </thead>
+                            <tbody id="targets-table"></tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <!-- DNS Cache -->
+                <div id="page-dns" class="page">
+                    <div class="page-header">
+                        <h1>DNS Cache</h1>
+                        <div class="live-badge"><div class="live-dot" id="live-indicator"></div> <span id="live-text">LIVE</span></div>
+                    </div>
+                    <div class="stats" id="dns-stats" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 1.5rem;"></div>
+                    <div id="dns-entries"></div>
+                </div>
+                
+                <!-- Consul -->
+                <div id="page-consul" class="page">
+                    <div class="page-header">
+                        <h1>Consul Status</h1>
+                        <div class="live-badge"><div class="live-dot" id="live-indicator"></div> <span id="live-text">LIVE</span></div>
+                    </div>
+                    <div class="topology-grid" id="consul-watchers"></div>
+                </div>
+                
+                <!-- Routes -->
+                <div id="page-routes" class="page">
+                    <div class="page-header">
+                        <h1>Routes</h1>
+                    </div>
+                    <div class="card" id="routes-list"></div>
+                </div>
+                
+                <!-- Logs -->
+                <div id="page-logs" class="page">
+                    <div class="page-header">
+                        <h1>Logs</h1>
+                        <button class="refresh-btn" onclick="toggleStream()">Stream: OFF</button>
+                    </div>
+                    <div id="logs-container"></div>
+                </div>
+                
+                <!-- Config -->
+                <div id="page-config" class="page">
+                    <div class="page-header">
+                        <h1>Configuration</h1>
+                    </div>
+                    <div id="config-list"></div>
+                </div>
+            </main>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script>
+        const API = '/admin';
+        let token = localStorage.getItem('admin_token') || '';
+        let username = localStorage.getItem('admin_user') || '';
+        let sse = null;
+        let charts = {};
+        
+        // Auth
+        async function doLogin() {
+            const user = document.getElementById('username-input').value.trim();
+            const pass = document.getElementById('password-input').value;
+            
+            try {
+                const r = await fetch(API + '/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: user, password: pass })
+                });
+                const d = await r.json();
+                
+                if (d.success) {
+                    token = 'session_' + Math.random().toString(36).slice(2);
+                    username = d.user || user;
+                    localStorage.setItem('admin_token', token);
+                    localStorage.setItem('admin_user', username);
+                    showApp();
+                } else {
+                    document.getElementById('login-error').style.display = 'block';
+                }
+            } catch(e) {
+                document.getElementById('login-error').style.display = 'block';
+            }
+        }
+        
+        async function doLogout() {
+            try {
+                await fetch(API + '/logout', { 
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+            } catch(e) {}
+            localStorage.removeItem('admin_token');
+            localStorage.removeItem('admin_user');
+            location.reload();
+        }
+        
+        function showApp() {
+            document.getElementById('login-screen').classList.add('hidden');
+            document.getElementById('app').classList.add('active');
+            document.getElementById('user-name').textContent = username;
+            document.getElementById('user-avatar').textContent = username[0].toUpperCase();
+            startRealtime();
+            refreshAll();
+        }
+        
+        // Auth header
+        function headers() {
+            return { 'Authorization': 'Bearer ' + token };
+        }
+        
+        // API call
+        async function api(path) {
+            const r = await fetch(API + path, { headers: headers() });
+            if (r.status === 401) {
+                localStorage.removeItem('admin_token');
+                location.reload();
+                throw new Error('unauthorized');
+            }
+            return r.json();
+        }
+        
+        // Page navigation
+        function showPage(page) {
+            document.querySelectorAll('.nav a').forEach(a => a.classList.remove('active'));
+            document.querySelector(`[data-page="${page}"]`).classList.add('active');
+            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+            document.getElementById('page-' + page).classList.add('active');
+        }
+        
+        // Format numbers
+        function fmt(n) {
+            if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
+            if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+            if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+            return n.toString();
+        }
+        
+        // Charts
+        function initCharts() {
+            charts.latency = new Chart(document.getElementById('lat-chart'), {
+                type: 'bar',
+                data: { labels: [], datasets: [{ data: [], backgroundColor: '#333' }] },
+                options: { responsive: true, plugins: { legend: { display: false } },
+                    scales: { y: { ticks: { color: '#666' }, grid: { color: '#1a1a1a' } },
+                              x: { ticks: { color: '#666' }, grid: { display: false } } } }
+            });
+            charts.status = new Chart(document.getElementById('status-chart'), {
+                type: 'doughnut',
+                data: { labels: ['2xx','3xx','4xx','5xx'], 
+                       datasets: [{ data: [0,0,0,0], backgroundColor: ['#22c55e','#eab308','#f97316','#ef4444'] }] },
+                options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { color: '#888' } } } }
+            });
+        }
+        
+        // Refresh all data
+        async function refreshAll() {
+            if (!token) return;
+            
+            const [h, r, targets, dns, consul, config, logs] = await Promise.all([
+                api('/health').catch(() => ({})),
+                api('/routes').catch(() => ({ route_count: 0, target_count: 0 })),
+                api('/targets').catch(() => ({ targets: [] })),
+                api('/dns-cache').catch(() => ({ stats: {}, entries: [] })),
+                api('/consul-status').catch(() => ({})),
+                api('/config').catch(() => ({})),
+                api('/logs?limit=100').catch(() => [])
+            ]);
+            
+            // Overview
+            document.getElementById('stat-routes').textContent = r.route_count || 0;
+            document.getElementById('stat-targets').textContent = r.target_count || 0;
+            
+            // Parse metrics (fetch separately)
+            fetch(API + '/metrics', { headers: headers() })
+                .then(r => r.text())
+                .then(text => {
+                    const m = {};
+                    text.split('\n').forEach(l => {
+                        if (l.includes(' ')) {
+                            const n = l.split(' ')[0].replace(/\{.*?\}/, '');
+                            const v = parseFloat(l.split(' ').pop());
+                            if (!isNaN(v)) m[n.replace(/sentirum_lb_/, '')] = v;
+                        }
+                    });
+                    document.getElementById('stat-requests').textContent = fmt(m.requests_total || 0);
+                    const errRate = m.requests_total ? ((m.requests_error_total / m.requests_total) * 100).toFixed(1) + '%' : '0%';
+                    document.getElementById('stat-errors').textContent = errRate;
+                    document.getElementById('stat-conn').textContent = m.active_connections || 0;
+                    
+                    // Charts
+                    if (charts.latency) {
+                        charts.latency.data.labels = ['<1ms','<5ms','<10ms','<50ms','<100ms','<500ms'];
+                        charts.latency.data.datasets[0].data = [
+                            m.latency_bucket_1ms || 0,
+                            m.latency_bucket_5ms || 0,
+                            m.latency_bucket_10ms || 0,
+                            m.latency_bucket_50ms || 0,
+                            m.latency_bucket_100ms || 0,
+                            (m.latency_bucket_250ms || 0) + (m.latency_bucket_500ms || 0)
+                        ];
+                        charts.latency.update();
+                    }
+                    if (charts.status) {
+                        charts.status.data.datasets[0].data = [
+                            m.status_2xx || 0,
+                            m.status_3xx || 0,
+                            m.status_4xx || 0,
+                            m.status_5xx || 0
+                        ];
+                        charts.status.update();
+                    }
+                });
+            
+            // Targets
+            if (targets.targets) {
+                document.getElementById('targets-table').innerHTML = targets.targets.map(t => {
+                    const errClass = (t.stats?.error_rate_pct || 0) > 1 ? 'err' : '';
+                    const lat = t.stats?.avg_latency_us ? (t.stats.avg_latency_us / 1000).toFixed(1) + 'ms' : '-';
+                    return `<tr class="${errClass}">
+                        <td>${t.service}</td>
+                        <td class="mono">${t.url}</td>
+                        <td><span class="badge">${t.protocol}</span>${t.tls ? '<span class="badge tls">TLS</span>' : ''}</td>
+                        <td>${fmt(t.stats?.requests || 0)}</td>
+                        <td>${fmt(t.stats?.errors || 0)}</td>
+                        <td>${t.stats?.error_rate_pct || 0}%</td>
+                        <td>${lat}</td>
+                        <td>${t.active_connections || 0}</td>
+                        <td><span class="cb-badge cb-${t.circuit_breaker}">${t.circuit_breaker}</span></td>
+                    </tr>`;
+                }).join('');
+            }
+            
+            // Topology
+            api('/topology').then(d => {
+                let html = `<div class="node-card lb"><div class="node-icon">⚖️</div><div class="node-label">Load Balancer</div><div class="node-stats">${fmt(d.nodes?.[0]?.stats?.requests || 0)} req</div></div>`;
+                (d.nodes || []).filter(n => n.type === 'target').forEach(n => {
+                    const status = n.cb_state === 'open' ? 'err' : n.cb_state === 'halfopen' ? 'warn' : 'ok';
+                    html += `<div class="node-card"><div class="node-icon">🎯</div><div class="node-label">${n.label}<span class="node-status ${status}"></span></div><div class="node-stats">${fmt(n.stats?.requests || 0)} req</div></div>`;
+                });
+                document.getElementById('topology-grid').innerHTML = html;
+            });
+            
+            // DNS
+            document.getElementById('dns-stats').innerHTML = `
+                <div class="stat"><label>Entries</label><div class="val">${dns.stats?.total_entries || 0}</div></div>
+                <div class="stat"><label>Hits</label><div class="val ok">${dns.stats?.hits || 0}</div></div>
+                <div class="stat"><label>Misses</label><div class="val">${dns.stats?.misses || 0}</div></div>
+                <div class="stat"><label>Hit Rate</label><div class="val ${(dns.stats?.hit_rate || 0) > 80 ? 'ok' : 'warn'}">${dns.stats?.hit_rate || 0}%</div></div>
+            `;
+            document.getElementById('dns-entries').innerHTML = (dns.entries || []).map(e => `
+                <div class="card" style="margin-top: 0.5rem;">
+                    <strong>${e.host}</strong> → ${e.addrs.join(', ')}
+                    <span style="color:#666;font-size:0.8rem;margin-left:1rem;">TTL: ${e.ttl_remaining_secs}s${e.is_negative ? ' (NXDOMAIN)' : ''}</span>
+                </div>
+            `).join('') || '<p class="no-data">No cached entries</p>';
+            
+            // Consul
+            const watchers = ['services', 'kv', 'tls', 'client_ca'];
+            document.getElementById('consul-watchers').innerHTML = watchers.map(w => {
+                const d = consul[w] || {};
+                return `<div class="node-card">
+                    <div class="node-icon">☁️</div>
+                    <div class="node-label">${w.toUpperCase()}</div>
+                    <div class="node-stats">Index: ${d.last_index || 0}<br>Backoff: ${d.backoff_secs || 0}s<br>Errors: ${d.errors || 0}</div>
+                </div>`;
+            }).join('');
+            
+            // Config
+            if (typeof config === 'object' && config !== null) {
+                document.getElementById('config-list').innerHTML = '<pre style="background:#1a1a1a;padding:1rem;border-radius:8px;overflow:auto;font-size:0.8rem;">' + JSON.stringify(config, null, 2) + '</pre>';
+            }
+            
+            // Logs
+            if (Array.isArray(logs)) {
+                document.getElementById('logs-container').innerHTML = logs.map(l => `
+                    <div class="log">
+                        <span class="ts">${new Date(l.timestamp * 1000).toISOString().slice(11,19)}</span>
+                        <span class="lvl ${l.level[0]}">${l.level}</span>
+                        <span class="msg">${l.message}</span>
+                    </div>
+                `).join('');
+            }
+        }
+        
+        // Real-time updates
+        function startRealtime() {
+            initCharts();
+            // Refresh every 3 seconds
+            setInterval(refreshAll, 3000);
+        }
+        
+        // Log stream toggle
+        function toggleStream() {
+            const btn = document.querySelector('.refresh-btn');
+            if (sse) {
+                sse.close();
+                sse = null;
+                btn.textContent = 'Stream: OFF';
+                btn.style.background = '#1a1a1a';
+            } else {
+                sse = new EventSource(API + '/logs/stream', { headers: headers() });
+                sse.onmessage = e => {
+                    try {
+                        const l = JSON.parse(e.data);
+                        const container = document.getElementById('logs-container');
+                        container.innerHTML += `<div class="log"><span class="ts">${new Date(l.timestamp * 1000).toISOString().slice(11,19)}</span><span class="lvl ${l.level[0]}">${l.level}</span><span class="msg">${l.message}</span></div>`;
+                        container.scrollTop = container.scrollHeight;
+                    } catch(e) {}
+                };
+                sse.onerror = () => { sse.close(); sse = null; btn.textContent = 'Stream: OFF'; };
+                btn.textContent = 'Stream: ON';
+                btn.style.background = '#22c55e';
+            }
+        }
+        
+        // Init
+        if (token && username) {
+            // Verify token is still valid
+            fetch(API + '/me', { headers: headers() })
+                .then(r => r.json())
+                .then(d => {
+                    if (d.authenticated) showApp();
+                    else {
+                        localStorage.removeItem('admin_token');
+                        localStorage.removeItem('admin_user');
+                    }
+                })
+                .catch(() => {
+                    localStorage.removeItem('admin_token');
+                    localStorage.removeItem('admin_user');
+                });
+        }
+        
+        // Enter key for login
+        document.getElementById('password-input').addEventListener('keypress', e => {
+            if (e.key === 'Enter') doLogin();
+        });
+    </script>
+</body>
+</html>
