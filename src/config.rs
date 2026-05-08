@@ -263,6 +263,21 @@ pub struct TlsConfig {
     /// yields at least one active certificate.
     #[serde(default)]
     pub require_initial_snapshot: bool,
+    /// Downstream client certificate auth mode: "", "optional", or "required".
+    #[serde(default)]
+    pub client_auth: String,
+    /// Client CA source: "file" or "consul_kv" when client_auth is enabled.
+    #[serde(default)]
+    pub client_ca_source: String,
+    /// File or directory path containing trusted client CA PEM blocks.
+    #[serde(default)]
+    pub client_ca_path: String,
+    /// Consul KV prefix containing trusted client CA PEM bundles.
+    #[serde(default)]
+    pub client_ca_consul_prefix: String,
+    /// Fabio-compatible CA upgrade CN for self-signed/non-CA client auth certs.
+    #[serde(default)]
+    pub client_ca_upgrade_cn: String,
 }
 
 fn default_tls_consul_cert_prefix() -> String {
@@ -279,6 +294,11 @@ impl Default for TlsConfig {
             consul_cert_prefix: default_tls_consul_cert_prefix(),
             strict_sni: false,
             require_initial_snapshot: false,
+            client_auth: String::new(),
+            client_ca_source: String::new(),
+            client_ca_path: String::new(),
+            client_ca_consul_prefix: String::new(),
+            client_ca_upgrade_cn: String::new(),
         }
     }
 }
@@ -365,7 +385,12 @@ mod tests {
 
     #[test]
     fn tls_config_defaults_require_initial_snapshot_to_false() {
-        assert!(!TlsConfig::default().require_initial_snapshot);
+        let tls = TlsConfig::default();
+        assert!(!tls.require_initial_snapshot);
+        assert!(tls.client_auth.is_empty());
+        assert!(tls.client_ca_source.is_empty());
+        assert!(tls.client_ca_path.is_empty());
+        assert!(tls.client_ca_consul_prefix.is_empty());
     }
 
     #[test]
