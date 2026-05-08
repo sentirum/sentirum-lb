@@ -32,7 +32,7 @@ impl Picker for RoundRobinPicker {
         // Use SeqCst to ensure the increment is visible to all threads before
         // any thread reads the updated counter value for indexing.
         let counter_val = counter.fetch_add(1, Ordering::SeqCst);
-        let idx = counter_val as usize % targets.len();
+        let idx = counter_val as usize % w_targets.len();
 
         // DEBUG: Log the pick decision
         tracing::debug!(
