@@ -443,6 +443,7 @@ impl ProxyHttp for SentirumProxy {
             peer_addr.as_deref(),
             &self.trusted_proxies,
         )?;
+        append_client_certificate_headers(session, upstream_request)?;
 
         // Use stored target from upstream_peer (no double lookup!)
         if let Some(target) = &ctx.picked_target {
@@ -853,6 +854,115 @@ fn append_forwarded_headers(
     };
     upstream_request.insert_header("X-Forwarded-Proto", scheme)?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Default)]
+struct ClientCertIdentity {
+    verified: bool,
+    serial: Option<String>,
+    organization: Option<String>,
+    organizational_unit: Option<String>,
+    common_name: Option<String>,
+    subject: Option<String>,
+    sha256: Option<String>,
+}
+
+fn append_client_certificate_headers(
+    session: &Session,
+    upstream_request: &mut pingora_http::RequestHeader,
+) -> pingora::Result<()> {
+    let Some(identity) = client_certificate_identity(session) else {
+        return Ok(());
+    };
+    if !identity.verified {
+        return Ok(());
+    }
+
+    upstream_request.insert_header("X-Client-Cert-Verified", "true")?;
+    if let Some(value) = &identity.serial {
+        upstream_request.insert_header("X-Client-Cert-Serial", value)?;
+    }
+    if let Some(value) = &identity.organization {
+        upstream_request.insert_header("X-Client-Cert-Organization", value)?;
+    }
+    if let Some(value) = &identity.organizational_unit {
+        upstream_request.insert_header("X-Client-Cert-Organizational-Unit", value)?;
+    }
+    if let Some(value) = &identity.common_name {
+        upstream_request.insert_header("X-Client-Cert-Common-Name", value)?;
+    }
+    if let Some(value) = &identity.subject {
+        upstream_request.insert_header("X-Client-Cert-Subject", value)?;
+    }
+    if let Some(value) = &identity.sha256 {
+        upstream_request.insert_header("X-Client-Cert-SHA256", value)?;
+    }
+    Ok(())
+}
+
+fn client_certificate_identity(session: &Session) -> Option<ClientCertIdentity> {
+    let digest = session.digest()?.ssl_digest.as_ref()?;
+    let mut identity = ClientCertIdentity {
+        verified: !digest.cert_digest.is_empty(),
+        serial: digest.serial_number.clone(),
+        organization: digest.organization.clone(),
+        organizational_unit: None,
+        common_name: None,
+        subject: None,
+        sha256: (!digest.cert_digest.is_empty()).then(|| hex_lower(&digest.cert_digest)),
+    };
+
+    if let Some(stream) = session.stream()
+        && let Some(ssl) = stream.get_ssl()
+        && let Some(cert) = ssl.peer_certificate()
+    {
+        identity.common_name = first_subject_value(&cert, Nid::COMMONNAME);
+        identity.organization = first_subject_value(&cert, Nid::ORGANIZATIONNAME)
+            .or(identity.organization);
+        identity.organizational_unit = first_subject_value(&cert, Nid::ORGANIZATIONALUNITNAME);
+        identity.subject = Some(subject_string(&cert));
+        identity.sha256 = cert
+            .digest(MessageDigest::sha256())
+            .ok()
+            .map(|bytes| hex_lower(bytes.as_ref()))
+            .or(identity.sha256);
+        identity.verified = ssl.verify_result().as_raw() == pingora::tls::ssl_sys::X509_V_OK;
+    }
+
+    Some(identity)
+}
+
+fn first_subject_value(cert: &pingora::tls::x509::X509, nid: Nid) -> Option<String> {
+    cert.subject_name()
+        .entries_by_nid(nid)
+        .find_map(|entry| entry.data().as_utf8().ok().map(|value| value.to_string()))
+}
+
+fn subject_string(cert: &pingora::tls::x509::X509) -> String {
+    let mut parts = Vec::new();
+    if let Some(cn) = first_subject_value(cert, Nid::COMMONNAME) {
+        parts.push(format!("CN={cn}"));
+    }
+    if let Some(org) = first_subject_value(cert, Nid::ORGANIZATIONNAME) {
+        parts.push(format!("O={org}"));
+    }
+    if let Some(ou) = first_subject_value(cert, Nid::ORGANIZATIONALUNITNAME) {
+        parts.push(format!("OU={ou}"));
+    }
+    if parts.is_empty() {
+        "<unknown-subject>".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
 }
 
 fn rewrite_upstream_uri(
