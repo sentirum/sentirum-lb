@@ -689,7 +689,21 @@ async fn targets_metrics_handler(State(state): State<AdminState>) -> impl axum::
                     let proto = escape_prometheus_label(&format!("{:?}", target.parsed_protocol).to_lowercase());
 
                     output.push_str(&format!(
-                        "# HELP sentirum_lb_target_requests_total Requests per target\n                        # TYPE sentirum_lb_target_requests_total counter\n                        sentirum_lb_target_requests_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {req}\n\n                        # HELP sentirum_lb_target_errors_total Errors per target\n                        # TYPE sentirum_lb_target_errors_total counter\n                        sentirum_lb_target_errors_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {err}\n\n                        # HELP sentirum_lb_target_latency_us_total Total latency per target\n                        # TYPE sentirum_lb_target_latency_us_total counter\n                        sentirum_lb_target_latency_us_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {lat}\n\n                        # HELP sentirum_lb_target_bytes_total Bytes per target\n                        # TYPE sentirum_lb_target_bytes_total counter\n                        sentirum_lb_target_bytes_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {bytes}\n\n",
+                        "# HELP sentirum_lb_target_requests_total Requests per target\n\
+                        # TYPE sentirum_lb_target_requests_total counter\n\
+                        sentirum_lb_target_requests_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {req}\n\
+                        \n\
+                        # HELP sentirum_lb_target_errors_total Errors per target\n\
+                        # TYPE sentirum_lb_target_errors_total counter\n\
+                        sentirum_lb_target_errors_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {err}\n\
+                        \n\
+                        # HELP sentirum_lb_target_latency_us_total Total latency per target\n\
+                        # TYPE sentirum_lb_target_latency_us_total counter\n\
+                        sentirum_lb_target_latency_us_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {lat}\n\
+                        \n\
+                        # HELP sentirum_lb_target_bytes_total Bytes per target\n\
+                        # TYPE sentirum_lb_target_bytes_total counter\n\
+                        sentirum_lb_target_bytes_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {bytes}\n\n",
                         req = requests,
                         err = errors,
                         lat = latency_sum,
