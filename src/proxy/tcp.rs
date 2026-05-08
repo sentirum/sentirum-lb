@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::route::picker::create_picker;
+use crate::route::picker::{Picker, create_picker};
 use crate::route::registry::ManagedRouteTable;
 use crate::route::table::Table;
 use crate::route::target::Target;
