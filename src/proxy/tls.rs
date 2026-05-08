@@ -743,14 +743,18 @@ mod tests {
     use super::*;
     use rcgen::generate_simple_self_signed;
 
-    fn self_signed_pem(names: &[&str]) -> (String, String) {
-        let cert = generate_simple_self_signed(
+    fn self_signed_cert(names: &[&str]) -> rcgen::CertifiedKey<KeyPair = rcgen::KeyPair> {
+        generate_simple_self_signed(
             names
                 .iter()
                 .map(|name| (*name).to_string())
                 .collect::<Vec<_>>(),
         )
-        .expect("cert should build");
+        .expect("cert should build")
+    }
+
+    fn self_signed_pem(names: &[&str]) -> (String, String) {
+        let cert = self_signed_cert(names);
         (cert.cert.pem(), cert.key_pair.serialize_pem())
     }
 
@@ -860,8 +864,9 @@ mod tests {
 
     #[test]
     fn test_dynamic_store_loads_fabio_style_combined_pem() {
-        let (cert_pem, key_pem) = self_signed_pem(&["example.com", "*.example.com"]);
-        let combined = format!("{cert_pem}{key_pem}");
+        let cert = self_signed_cert(&["example.com", "*.example.com"]);
+        let expected_not_after = cert.cert.params().not_after.unix_timestamp() as u64;
+        let combined = format!("{}{}", cert.cert.pem(), cert.key_pair.serialize_pem());
         let mut entries = BTreeMap::new();
         entries.insert("example.com.pem".to_string(), combined.into_bytes());
 
@@ -878,6 +883,11 @@ mod tests {
             status.default_certificate,
             Some("example.com.pem".to_string())
         );
+        assert_eq!(status.certificates.len(), 1);
+        assert_eq!(status.certificates[0].entry_name, "example.com.pem");
+        assert_eq!(status.certificates[0].primary_name.as_deref(), Some("example.com"));
+        assert_eq!(status.certificates[0].not_after_unix, Some(expected_not_after));
+        assert!(status.certificates[0].days_remaining.is_some());
         assert!(status.last_error.is_none());
         assert!(store.select_for_server_name(Some("example.com")).is_some());
         assert!(
