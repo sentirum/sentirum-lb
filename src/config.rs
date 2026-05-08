@@ -208,7 +208,7 @@ fn default_log_format() -> String {
     "json".to_string()
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct TlsConfig {
     /// TLS source: "file" or "consul_kv". Empty keeps backwards-compatible auto-detection.
     #[serde(default)]
@@ -234,6 +234,19 @@ pub struct TlsConfig {
 
 fn default_tls_consul_cert_prefix() -> String {
     "/fabio/cert".to_string()
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            source: String::new(),
+            cert_path: String::new(),
+            key_path: String::new(),
+            listen: String::new(),
+            consul_cert_prefix: default_tls_consul_cert_prefix(),
+            strict_sni: false,
+        }
+    }
 }
 
 impl Config {
