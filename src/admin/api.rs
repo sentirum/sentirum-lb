@@ -361,6 +361,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_admin_certs() {
+        let state = make_test_state();
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/certs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
     async fn test_admin_config() {
         let state = make_test_state();
         let app = build_router(state);
