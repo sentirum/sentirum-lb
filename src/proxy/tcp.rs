@@ -326,6 +326,53 @@ async fn handle_tcp_connection(
     Ok(())
 }
 
+async fn handle_tcp_sni_connection(
+    mut downstream: TcpStream,
+    route_table: Arc<ManagedRouteTable>,
+    config: Arc<Config>,
+) -> Result<(), std::io::Error> {
+    let client_hello = read_client_hello(&mut downstream).await?;
+    let server_name = read_server_name(&client_hello[5..]).ok_or_else(|| {
+        std::io::Error::other("unable to parse TLS client hello server_name")
+    })?;
+    if server_name.is_empty() {
+        tracing::debug!("tcp+sni: server_name missing");
+        return Ok(());
+    }
+
+    let target = match lookup_sni_target(&route_table, &config.proxy.strategy, &server_name) {
+        Some(target) => target,
+        None => {
+            tracing::warn!(server_name = %server_name, "No TCP SNI route found");
+            return Ok(());
+        }
+    };
+
+    if !try_acquire_upstream_slot(&target, config.proxy.max_connections as u64) {
+        tracing::warn!(server_name = %server_name, target_url = %target.url, max_connections = config.proxy.max_connections, "TCP SNI upstream concurrency limit reached");
+        return Ok(());
+    }
+
+    crate::metrics::prometheus::global().connect();
+    let _guard = TcpConnectionGuard {
+        target: target.clone(),
+    };
+
+    let mut upstream = match connect_upstream(&target, &config).await {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            tracing::warn!(server_name = %server_name, target_url = %target.url, %error, "Failed to open TCP SNI upstream connection");
+            return Ok(());
+        }
+    };
+
+    upstream.write_all(&client_hello).await?;
+    upstream.flush().await?;
+
+    let _ = copy_bidirectional(&mut downstream, &mut upstream).await?;
+    Ok(())
+}
+
 fn lookup_target(
     route_table: &Arc<ManagedRouteTable>,
     strategy: &str,
@@ -334,6 +381,17 @@ fn lookup_target(
     let table = route_table.get();
     let table: &Table = &table;
     let route = table.lookup_tcp_route_for_local_addr(local_addr)?;
+    create_picker(strategy).pick(&route.targets, &route.w_targets, &route.rr_counter)
+}
+
+fn lookup_sni_target(
+    route_table: &Arc<ManagedRouteTable>,
+    strategy: &str,
+    server_name: &str,
+) -> Option<Arc<Target>> {
+    let table = route_table.get();
+    let table: &Table = &table;
+    let route = table.lookup_tcp_sni_route(server_name)?;
     create_picker(strategy).pick(&route.targets, &route.w_targets, &route.rr_counter)
 }
 
