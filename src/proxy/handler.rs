@@ -1277,6 +1277,7 @@ mod tests {
             },
             logging: crate::config::LoggingConfig::default(),
             tls: crate::config::TlsConfig::default(),
+            tcp: crate::config::TcpConfig::default(),
         });
         let target =
             crate::route::target::Target::new("svc".into(), "grpcs://example.com/service".into());
@@ -1315,6 +1316,7 @@ mod tests {
             proxy: crate::config::ProxyConfig::default(),
             logging: crate::config::LoggingConfig::default(),
             tls: crate::config::TlsConfig::default(),
+            tcp: crate::config::TcpConfig::default(),
         });
         let mut target =
             crate::route::target::Target::new("svc".into(), "wss://example.com/socket".into());
@@ -1352,6 +1354,7 @@ mod tests {
             proxy: crate::config::ProxyConfig::default(),
             logging: crate::config::LoggingConfig::default(),
             tls: crate::config::TlsConfig::default(),
+            tcp: crate::config::TcpConfig::default(),
         });
         let mut target =
             crate::route::target::Target::new("svc".into(), "grpcs://example.com/service".into());
