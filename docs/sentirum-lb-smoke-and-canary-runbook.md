@@ -4,6 +4,7 @@
 Validate that `sentirum-lb` can replace Fabio for HTTP/HTTPS ingress with:
 - runtime route updates
 - runtime TLS cert updates from Consul KV
+- optional downstream mTLS / client-cert auth
 - no LB restart for route/cert changes
 - no active connection drops during cert changes
 
@@ -116,6 +117,7 @@ Look for:
 - `tls.source == "consul_kv"`
 - `tls.consul_cert_prefix == "/fabio/cert"`
 - `tls.require_initial_snapshot == true`
+- if enabled: `tls.client_auth`, `tls.client_ca_source`, `tls.client_ca_consul_prefix` / `tls.client_ca_path`
 
 ### Cert runtime state
 ```bash
@@ -132,6 +134,7 @@ Look for:
 - `default_certificate`
 - `last_consul_index`
 - `last_error == null`
+- if enabled: `client_auth.loaded_entries` is non-empty and `client_auth.last_error == null`
 
 ### Routes
 ```bash
