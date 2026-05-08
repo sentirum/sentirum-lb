@@ -13,7 +13,8 @@ use pingora::tls::{
     nid::Nid,
     pkey::{PKey, Private},
     ssl,
-    x509::{X509, store::X509Store},
+    ssl_sys,
+    x509::{X509, X509VerifyResult, store::X509Store},
 };
 use regex::Regex;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1144,6 +1145,7 @@ impl ServerCertificateSource {
 struct ClientAuthState {
     mode: ClientAuthMode,
     store: Arc<DynamicClientCaStore>,
+    ca_upgrade_cn: String,
 }
 
 impl ClientAuthState {
@@ -1164,7 +1166,22 @@ impl ClientAuthState {
         ext::ssl_set_verify_cert_store(ssl, verify_store).map_err(|e| {
             TlsError::ConfigError(format!("failed to attach client CA verify store: {e}"))
         })?;
-        ssl.set_verify(verify_mode);
+
+        if self.ca_upgrade_cn.is_empty() {
+            ssl.set_verify(verify_mode);
+        } else {
+            let ca_upgrade_cn = self.ca_upgrade_cn.clone();
+            ssl.set_verify_callback(verify_mode, move |preverify_ok, store_ctx| {
+                if preverify_ok {
+                    return true;
+                }
+                if should_accept_ca_upgrade_error(&ca_upgrade_cn, store_ctx) {
+                    store_ctx.set_error(X509VerifyResult::OK);
+                    return true;
+                }
+                false
+            });
+        }
         Ok(())
     }
 }
@@ -1241,7 +1258,11 @@ fn build_tls_settings_from_source(
 ) -> Result<TlsSettings, TlsError> {
     let callbacks = Box::new(TlsSelector {
         server_certs,
-        client_auth: client_auth.map(|(mode, store)| ClientAuthState { mode, store }),
+        client_auth: client_auth.map(|(mode, store)| ClientAuthState {
+            mode,
+            store: store.clone(),
+            ca_upgrade_cn: store.ca_upgrade_cn.clone(),
+        }),
     });
     TlsSettings::with_callbacks(callbacks).map_err(|e| TlsError::ConfigError(e.to_string()))
 }
