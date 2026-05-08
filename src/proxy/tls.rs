@@ -867,11 +867,13 @@ mod tests {
 
         let status = store.status();
         assert_eq!(status.last_consul_index, 2);
-        assert!(status
-            .last_error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("exceeds max size"));
+        assert!(
+            status
+                .last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("exceeds max size")
+        );
         assert!(store.select_for_server_name(Some("example.com")).is_some());
     }
 }

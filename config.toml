@@ -36,3 +36,4 @@ key_path = ""                # Path to PEM private key when source=file
 listen = ""                  # TLS listen address (empty = HTTP port + 1)
 consul_cert_prefix = "/fabio/cert"  # Fabio-compatible KV prefix when source=consul_kv
 strict_sni = false            # true = handshake fails when no exact/wildcard SNI match exists
+require_initial_snapshot = false  # true = fail startup unless first consul_kv TLS snapshot yields a valid cert

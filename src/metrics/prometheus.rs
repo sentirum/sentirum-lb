@@ -466,8 +466,14 @@ mod tests {
     #[test]
     fn test_parse_proc_status_value_bytes() {
         let status = "Name:\tsentirum-lb\nVmSize:\t  2048 kB\nVmRSS:\t  1024 kB\n";
-        assert_eq!(parse_proc_status_value_bytes(status, "VmRSS:"), Some(1_048_576));
-        assert_eq!(parse_proc_status_value_bytes(status, "VmSize:"), Some(2_097_152));
+        assert_eq!(
+            parse_proc_status_value_bytes(status, "VmRSS:"),
+            Some(1_048_576)
+        );
+        assert_eq!(
+            parse_proc_status_value_bytes(status, "VmSize:"),
+            Some(2_097_152)
+        );
         assert_eq!(parse_proc_status_value_bytes(status, "VmData:"), None);
     }
 }

@@ -99,6 +99,7 @@ key_path = ""
 listen = ""
 consul_cert_prefix = "/fabio/cert"
 strict_sni = false
+require_initial_snapshot = false
 ```
 
 ### TLS sources
@@ -121,6 +122,8 @@ Each KV value may be a single bundled PEM containing:
 
 Certificates are selected dynamically per SNI and reloaded from Consul without listener restarts.
 Existing connections stay alive; only new TLS handshakes use the updated certificate snapshot.
+Each Consul cert entry is capped at 1 MiB to avoid pathological memory spikes.
+If `require_initial_snapshot = true`, startup fails unless the first Consul TLS load yields at least one valid certificate.
 
 Example:
 
@@ -130,6 +133,7 @@ source = "consul_kv"
 listen = ":443"
 consul_cert_prefix = "/fabio/cert"
 strict_sni = false
+require_initial_snapshot = true
 ```
 
 Deployment examples:
@@ -151,6 +155,7 @@ Deployment examples:
 - `tls.source`: select `file` or `consul_kv` for downstream TLS.
 - `tls.consul_cert_prefix`: Fabio-compatible certificate KV prefix, e.g. `/fabio/cert`.
 - `tls.strict_sni`: if true, fail TLS handshakes without an exact/wildcard SNI match.
+- `tls.require_initial_snapshot`: if true in `consul_kv` mode, refuse startup until the initial cert snapshot is valid.
 
 ## Route format
 
@@ -258,6 +263,12 @@ Prometheus metrics are exposed via:
 ```text
 GET /admin/metrics
 ```
+
+In addition to request metrics, the endpoint exports Linux `/proc`-based process gauges for:
+
+- resident memory bytes
+- virtual memory bytes
+- open file descriptors
 
 Tracked metrics include:
 
