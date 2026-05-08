@@ -18,6 +18,7 @@ pub enum TcpMode {
     Disabled,
     Tcp { listen: String },
     TcpSni { listen: String },
+    HttpsTcpSni,
     TcpDynamic { refresh: Duration },
 }
 
@@ -47,12 +48,9 @@ pub fn resolve_tcp_mode(config: &Config) -> Result<TcpMode, String> {
             refresh: crate::config::Config::parse_optional_duration(&config.tcp.refresh)
                 .unwrap_or_else(|| Duration::from_secs(5)),
         }),
-        "https+tcp+sni" => Err(
-            "tcp.mode=https+tcp+sni is not implemented yet; it requires downstream listener multiplexing with the HTTPS Pingora listener"
-                .to_string(),
-        ),
+        "https+tcp+sni" => Ok(TcpMode::HttpsTcpSni),
         other => Err(format!(
-            "unknown tcp.mode '{other}', expected 'tcp', 'tcp+sni', or 'tcp-dynamic'"
+            "unknown tcp.mode '{other}', expected 'tcp', 'tcp+sni', 'https+tcp+sni', or 'tcp-dynamic'"
         )),
     }
 }
