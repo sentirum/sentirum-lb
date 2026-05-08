@@ -11,6 +11,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub tls: TlsConfig,
+    #[serde(default)]
+    pub tcp: TcpConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -199,6 +201,33 @@ impl Default for LoggingConfig {
             format: default_log_format(),
         }
     }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TcpConfig {
+    /// Fabio-style TCP listener mode: "tcp", "tcp-dynamic", or empty/disabled.
+    #[serde(default)]
+    pub mode: String,
+    /// Fixed TCP listener address when mode="tcp".
+    #[serde(default)]
+    pub listen: String,
+    /// Poll interval for tcp-dynamic listener reconciliation.
+    #[serde(default = "default_tcp_refresh")]
+    pub refresh: String,
+}
+
+impl Default for TcpConfig {
+    fn default() -> Self {
+        Self {
+            mode: String::new(),
+            listen: String::new(),
+            refresh: default_tcp_refresh(),
+        }
+    }
+}
+
+fn default_tcp_refresh() -> String {
+    "5s".to_string()
 }
 
 fn default_log_level() -> String {
