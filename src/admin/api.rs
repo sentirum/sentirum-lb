@@ -264,7 +264,7 @@ fn is_loopback_bind(addr: &str) -> bool {
 mod tests {
     use super::*;
     use crate::config::*;
-    use axum::body::Body;
+    use axum::body::{Body, to_bytes};
     use http::Request;
     use tower::ServiceExt; // for oneshot()
 
@@ -378,6 +378,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.get("certificates").is_some());
     }
 
     #[tokio::test]

@@ -743,7 +743,7 @@ mod tests {
     use super::*;
     use rcgen::generate_simple_self_signed;
 
-    fn self_signed_cert(names: &[&str]) -> rcgen::CertifiedKey<KeyPair = rcgen::KeyPair> {
+    fn self_signed_cert(names: &[&str]) -> rcgen::CertifiedKey {
         generate_simple_self_signed(
             names
                 .iter()
