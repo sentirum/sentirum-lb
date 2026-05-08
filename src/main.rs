@@ -380,8 +380,9 @@ fn main() {
         Ok(Some(TlsMode::ConsulKv(consul_tls))) => {
             let tls_listen = tls_listen_addr(&config.server.listen, &config.tls.listen);
             let tls_store = Arc::new(DynamicCertStore::new(consul_tls.strict_sni));
-            let consul_config = sentirum_lb::consul::ConsulConfig::from(&config.consul);
+            let consul_config = ConsulConfig::for_tls_cert_watch(&config.consul);
             let mut initial_index = 0;
+            let mut initial_snapshot_ready = false;
 
             match ConsulClient::new(consul_config.clone()) {
                 Ok(client) => {
@@ -398,15 +399,8 @@ fn main() {
                                 Ok(index) => {
                                     initial_index = index;
                                     let status = tls_store.status();
-                                    if status.loaded_certificates.is_empty() {
-                                        tracing::warn!(
-                                            prefix = %consul_tls.cert_prefix,
-                                            initial_index,
-                                            strict_sni = consul_tls.strict_sni,
-                                            last_error = ?status.last_error,
-                                            "Initial Consul TLS snapshot did not yield any active certificates"
-                                        );
-                                    } else {
+                                    initial_snapshot_ready = !status.loaded_certificates.is_empty();
+                                    if initial_snapshot_ready {
                                         tracing::info!(
                                             prefix = %consul_tls.cert_prefix,
                                             initial_index,
@@ -414,13 +408,23 @@ fn main() {
                                             certificates = ?status.loaded_certificates,
                                             "Loaded initial TLS certificate snapshot from Consul"
                                         );
+                                    } else {
+                                        tracing::warn!(
+                                            prefix = %consul_tls.cert_prefix,
+                                            initial_index,
+                                            strict_sni = consul_tls.strict_sni,
+                                            require_initial_snapshot = consul_tls.require_initial_snapshot,
+                                            last_error = ?status.last_error,
+                                            "Initial Consul TLS snapshot did not yield any active certificates"
+                                        );
                                     }
                                 }
                                 Err(e) => {
                                     tracing::warn!(
                                         prefix = %consul_tls.cert_prefix,
+                                        require_initial_snapshot = consul_tls.require_initial_snapshot,
                                         error = %e,
-                                        "Initial Consul TLS certificate load failed; listener will start and retry in background"
+                                        "Initial Consul TLS certificate load failed"
                                     );
                                 }
                             }
@@ -439,6 +443,15 @@ fn main() {
                         "Failed to create Consul client for initial TLS certificate load"
                     );
                 }
+            }
+
+            if consul_tls.require_initial_snapshot && !initial_snapshot_ready {
+                tracing::error!(
+                    prefix = %consul_tls.cert_prefix,
+                    strict_sni = consul_tls.strict_sni,
+                    "Initial Consul TLS snapshot is required but unavailable; refusing to start"
+                );
+                std::process::exit(1);
             }
 
             match build_dynamic_tls_settings(tls_store.clone()) {
