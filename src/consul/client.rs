@@ -5,7 +5,7 @@ use crate::config::ConsulConfig as AppConsulConfig;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::{Client, Url};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 /// Consul client configuration
@@ -88,6 +88,13 @@ pub struct ConsulClient {
     client: Client,
     config: ConsulConfig,
     base_url: String,
+}
+
+/// A base64-decoded Consul KV entry.
+#[derive(Debug, Clone)]
+pub struct DecodedKvPair {
+    pub key: String,
+    pub value: Vec<u8>,
 }
 
 impl ConsulClient {
@@ -190,13 +197,13 @@ impl ConsulClient {
         Ok(dc.to_string())
     }
 
-    /// Watch Consul KV for route configuration changes (blocking query)
-    /// Returns (value, index) on change
-    pub async fn watch_kv(
+    /// Watch Consul KV for raw entry changes (blocking query)
+    /// Returns (decoded entries, index) on change.
+    pub async fn watch_kv_pairs(
         &self,
         path: &str,
         index: u64,
-    ) -> Result<(Option<String>, u64), ConsulError> {
+    ) -> Result<(Vec<DecodedKvPair>, u64), ConsulError> {
         let url = self.kv_watch_url(path, index)?;
         let mut request = self.client.get(url);
 
@@ -206,7 +213,6 @@ impl ConsulClient {
 
         let response = request.send().await?;
 
-        // Check for Consul index in response headers
         let new_index: u64 = response
             .headers()
             .get("X-Consul-Index")
@@ -222,13 +228,8 @@ impl ConsulClient {
         }
 
         let kv_pairs: Vec<KVPair> = response.json().await?;
+        let mut decoded_pairs = Vec::with_capacity(kv_pairs.len());
 
-        if kv_pairs.is_empty() {
-            return Ok((None, new_index));
-        }
-
-        // Combine all KV values with key separators (like Fabio)
-        let mut parts = Vec::new();
         for kv in kv_pairs {
             let raw_value = kv.Value.unwrap_or_default();
             if raw_value.trim().is_empty() {
@@ -242,16 +243,41 @@ impl ConsulClient {
                     continue;
                 }
             };
-            let decoded_text = match String::from_utf8(decoded) {
+
+            decoded_pairs.push(DecodedKvPair {
+                key: kv.Key,
+                value: decoded,
+            });
+        }
+
+        Ok((decoded_pairs, new_index))
+    }
+
+    /// Watch Consul KV for route configuration changes (blocking query)
+    /// Returns (value, index) on change
+    pub async fn watch_kv(
+        &self,
+        path: &str,
+        index: u64,
+    ) -> Result<(Option<String>, u64), ConsulError> {
+        let (kv_pairs, new_index) = self.watch_kv_pairs(path, index).await?;
+
+        if kv_pairs.is_empty() {
+            return Ok((None, new_index));
+        }
+
+        let mut parts = Vec::new();
+        for kv in kv_pairs {
+            let decoded_text = match String::from_utf8(kv.value) {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!(key = %kv.Key, error = %e, "Failed to UTF-8 decode KV value; skipping");
+                    tracing::warn!(key = %kv.key, error = %e, "Failed to UTF-8 decode KV value; skipping");
                     continue;
                 }
             };
             let trimmed = decoded_text.trim();
             if !trimmed.is_empty() {
-                parts.push(format!("# --- {}\n{}", kv.Key, trimmed));
+                parts.push(format!("# --- {}\n{}", kv.key, trimmed));
             }
         }
 
@@ -262,6 +288,29 @@ impl ConsulClient {
         };
 
         Ok((combined, new_index))
+    }
+
+    /// Watch Consul KV and return a Fabio-compatible basename -> raw PEM map.
+    pub async fn watch_kv_basenames(
+        &self,
+        path: &str,
+        index: u64,
+    ) -> Result<(BTreeMap<String, Vec<u8>>, u64), ConsulError> {
+        let (pairs, new_index) = self.watch_kv_pairs(path, index).await?;
+        let mut entries = BTreeMap::new();
+
+        for pair in pairs {
+            let basename = pair
+                .key
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(pair.key.as_str())
+                .to_string();
+            entries.insert(basename, pair.value);
+        }
+
+        Ok((entries, new_index))
     }
 
     /// Get health checks for all services

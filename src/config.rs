@@ -210,13 +210,30 @@ fn default_log_format() -> String {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct TlsConfig {
-    /// Path to TLS certificate (PEM)
+    /// TLS source: "file" or "consul_kv". Empty keeps backwards-compatible auto-detection.
+    #[serde(default)]
+    pub source: String,
+    /// Path to TLS certificate (PEM). Used when source=file.
+    #[serde(default)]
     pub cert_path: String,
-    /// Path to TLS private key (PEM)
+    /// Path to TLS private key (PEM). Used when source=file.
+    #[serde(default)]
     pub key_path: String,
     /// TLS listen address (e.g. ":9443"). Empty = auto-derive from HTTP port +1
     #[serde(default)]
     pub listen: String,
+    /// Consul KV prefix for Fabio-compatible bundled PEM certificates.
+    /// Example: "/fabio/cert" with values like "/fabio/cert/example.com.pem".
+    #[serde(default = "default_tls_consul_cert_prefix")]
+    pub consul_cert_prefix: String,
+    /// If true, only exact/wildcard SNI matches are served. If false, fallback to
+    /// the first certificate in deterministic order when there is no match.
+    #[serde(default)]
+    pub strict_sni: bool,
+}
+
+fn default_tls_consul_cert_prefix() -> String {
+    "/fabio/cert".to_string()
 }
 
 impl Config {
