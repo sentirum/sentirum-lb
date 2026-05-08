@@ -136,6 +136,7 @@ Deployment examples:
 
 - Nomad job template: `docs/sentirum-lb.nomad.hcl`
 - Canary checklist: `docs/sentirum-lb-canary-checklist.md`
+- Smoke/canary runbook: `docs/sentirum-lb-smoke-and-canary-runbook.md`
 
 ### Important knobs
 
