@@ -45,7 +45,7 @@ services:
   sentirum-lb:
     build:
       context: ../..
-      dockerfile: Dockerfile
+      dockerfile: docker/test/Dockerfile
     command: >
       --config /app/config.toml
       --routes /app/routes.txt
