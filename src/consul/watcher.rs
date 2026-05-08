@@ -61,7 +61,7 @@ impl ServiceMonitor {
                 }
             };
 
-            if new_index == last_index && checks.is_empty() {
+            if new_index == last_index {
                 backoff_secs = 1;
                 metrics.set_consul_watcher_backoff_seconds("services", 0);
                 continue;

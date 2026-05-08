@@ -328,9 +328,9 @@ struct DnsCacheEntry {
 pub struct DnsCache {
     inner: dashmap::DashMap<String, DnsCacheEntry>,
     /// Default TTL in seconds
-    default_ttl_secs: u64,
+    default_ttl_secs: AtomicU64,
     /// Negative cache TTL in seconds
-    negative_ttl_secs: u64,
+    negative_ttl_secs: AtomicU64,
     /// Metrics reference
     hits: std::sync::atomic::AtomicU64,
     misses: std::sync::atomic::AtomicU64,
@@ -341,8 +341,8 @@ impl DnsCache {
     pub fn new() -> Self {
         Self {
             inner: dashmap::DashMap::new(),
-            default_ttl_secs: 30,
-            negative_ttl_secs: 10,
+            default_ttl_secs: AtomicU64::new(30),
+            negative_ttl_secs: AtomicU64::new(10),
             hits: std::sync::atomic::AtomicU64::new(0),
             misses: std::sync::atomic::AtomicU64::new(0),
             negatives: std::sync::atomic::AtomicU64::new(0),
@@ -352,18 +352,18 @@ impl DnsCache {
     pub fn with_ttl(default_ttl_secs: u64, negative_ttl_secs: u64) -> Self {
         Self {
             inner: dashmap::DashMap::new(),
-            default_ttl_secs,
-            negative_ttl_secs,
+            default_ttl_secs: AtomicU64::new(default_ttl_secs),
+            negative_ttl_secs: AtomicU64::new(negative_ttl_secs),
             hits: std::sync::atomic::AtomicU64::new(0),
             misses: std::sync::atomic::AtomicU64::new(0),
             negatives: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    /// Set the TTL values
+    /// Set the TTL values (thread-safe, can be called after OnceLock init)
     pub fn set_ttl(&self, default_secs: u64, negative_secs: u64) {
-        // Note: We can't modify OnceLock contents, but we can use a new instance
-        // For simplicity, we'll use the configured values at creation time
+        self.default_ttl_secs.store(default_secs, Ordering::Relaxed);
+        self.negative_ttl_secs.store(negative_secs, Ordering::Relaxed);
     }
 
     /// Lookup a cached DNS entry
@@ -405,7 +405,7 @@ impl DnsCache {
 
         let entry = DnsCacheEntry {
             addrs,
-            expires_at_ms: now_ms + (self.default_ttl_secs as u64 * 1000),
+            expires_at_ms: now_ms + (self.default_ttl_secs.load(Ordering::Relaxed) * 1000),
             negative: false,
         };
 
@@ -421,7 +421,7 @@ impl DnsCache {
 
         let entry = DnsCacheEntry {
             addrs: Vec::new(),
-            expires_at_ms: now_ms + (self.negative_ttl_secs as u64 * 1000),
+            expires_at_ms: now_ms + (self.negative_ttl_secs.load(Ordering::Relaxed) * 1000),
             negative: true,
         };
 
@@ -763,11 +763,10 @@ impl Target {
             ));
         }
 
-        // Cache successful result
-        let addr_list: Vec<SocketAddr> = addrs.collect();
-        if !addr_list.is_empty() {
-            cache.store(cache_key, addr_list);
-        }
+        // Cache ALL addresses including the one we resolved to
+        let mut addr_list = vec![resolved];
+        addr_list.extend(addrs);
+        cache.store(cache_key, addr_list);
 
         Ok(resolved)
     }

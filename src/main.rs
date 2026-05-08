@@ -379,6 +379,12 @@ fn main() {
         "Starting Sentirum LB"
     );
 
+    // Apply DNS cache TTL from config to the global singleton
+    sentirum_lb::route::target::global_dns_cache().set_ttl(
+        config.proxy.dns_cache_ttl,
+        config.proxy.dns_negative_cache_ttl,
+    );
+
     // Create managed routing table (supports multiple sources)
     let managed_table = Arc::new(ManagedRouteTable::new());
 

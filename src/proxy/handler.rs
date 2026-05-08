@@ -295,6 +295,11 @@ impl ProxyHttp for SentirumProxy {
                 max_connections = self.config.proxy.max_connections,
                 "Upstream concurrency limit reached"
             );
+            // Resolve the consumed circuit breaker probe slot so the breaker
+            // doesn't get stuck in half-open when the connection limit is hit.
+            if self.config.proxy.circuit_breaker_enabled {
+                target.health_tracker.circuit_breaker().record_error();
+            }
             return Err(Error::new(ErrorType::HTTPStatus(503)));
         }
 

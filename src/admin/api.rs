@@ -248,14 +248,12 @@ pub async fn run_admin_server(
 /// Constant-time comparison to prevent timing side-channel attacks on the admin token.
 fn constant_time_eq(a: &str, b: &str) -> bool {
     let equal_len = a.len() == b.len();
-    let max_len = a.len().max(b.len());
     let a_bytes = a.as_bytes();
     let b_bytes = b.as_bytes();
+    // Fixed iteration count so runtime doesn't depend on either string's length.
     let mut result: u8 = 0;
-    for i in 0..max_len {
-        let a_byte = a_bytes.get(i).copied().unwrap_or(0);
-        let b_byte = b_bytes.get(i).copied().unwrap_or(0);
-        result |= a_byte ^ b_byte;
+    for i in 0..256 {
+        result |= a_bytes.get(i).copied().unwrap_or(0) ^ b_bytes.get(i).copied().unwrap_or(0);
     }
     equal_len && result == 0
 }

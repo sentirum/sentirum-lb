@@ -92,6 +92,19 @@ pub(super) fn append_client_certificate_headers(
     session: &Session,
     upstream_request: &mut pingora_http::RequestHeader,
 ) -> pingora::Result<()> {
+    // Always strip — prevents downstream spoofing when no mTLS cert is presented
+    for header in [
+        "X-Client-Cert-Verified",
+        "X-Client-Cert-Serial",
+        "X-Client-Cert-Organization",
+        "X-Client-Cert-Organizational-Unit",
+        "X-Client-Cert-Common-Name",
+        "X-Client-Cert-Subject",
+        "X-Client-Cert-SHA256",
+    ] {
+        upstream_request.remove_header(header);
+    }
+
     let Some(identity) = client_certificate_identity(session) else {
         return Ok(());
     };
