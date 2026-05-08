@@ -397,12 +397,24 @@ fn main() {
                             )) {
                                 Ok(index) => {
                                     initial_index = index;
-                                    tracing::info!(
-                                        prefix = %consul_tls.cert_prefix,
-                                        initial_index,
-                                        strict_sni = consul_tls.strict_sni,
-                                        "Loaded initial TLS certificate snapshot from Consul"
-                                    );
+                                    let status = tls_store.status();
+                                    if status.loaded_certificates.is_empty() {
+                                        tracing::warn!(
+                                            prefix = %consul_tls.cert_prefix,
+                                            initial_index,
+                                            strict_sni = consul_tls.strict_sni,
+                                            last_error = ?status.last_error,
+                                            "Initial Consul TLS snapshot did not yield any active certificates"
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            prefix = %consul_tls.cert_prefix,
+                                            initial_index,
+                                            strict_sni = consul_tls.strict_sni,
+                                            certificates = ?status.loaded_certificates,
+                                            "Loaded initial TLS certificate snapshot from Consul"
+                                        );
+                                    }
                                 }
                                 Err(e) => {
                                     tracing::warn!(
