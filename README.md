@@ -156,6 +156,7 @@ Current implementation supports:
 - `client_auth = "required"` — require a valid client cert for the TLS handshake
 - `client_ca_source = "consul_kv"` — dynamically load trusted client CA PEM bundles from Consul KV
 - `client_ca_source = "file"` — load trusted client CA PEMs from a file or directory on disk
+- `client_ca_upgrade_cn` — Fabio-compatible CA-upgrade behavior for awkward self-signed/non-CA client-auth cert chains (for matching CNs)
 
 When mTLS is enabled, successful requests propagate verified client identity upstream with headers such as:
 
