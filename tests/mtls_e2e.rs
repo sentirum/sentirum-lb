@@ -2,6 +2,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use axum::{Json, Router, extract::State, routing::get};
+use http::Version;
 use rcgen::{
     CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose, generate_simple_self_signed,
@@ -56,6 +57,7 @@ async fn downstream_mtls_ca_upgrade_cn_smoke() {
     let no_upgrade_client = mtls_client(
         &no_upgrade_runtime.proxy_cert_pem,
         Some(&client_auth.client_identity_pem),
+        true,
     );
     assert!(no_upgrade_client
         .get(format!("https://localhost:{}/whoami", no_upgrade_runtime.tls_port))
@@ -74,32 +76,55 @@ async fn downstream_mtls_ca_upgrade_cn_smoke() {
     )
     .await;
 
-    let no_cert_client = mtls_client(&upgrade_runtime.proxy_cert_pem, None);
+    let no_cert_client = mtls_client(&upgrade_runtime.proxy_cert_pem, None, true);
     assert!(no_cert_client
         .get(format!("https://localhost:{}/whoami", upgrade_runtime.tls_port))
         .send()
         .await
         .is_err());
 
-    let client = mtls_client(
+    let h1_client = mtls_client(
         &upgrade_runtime.proxy_cert_pem,
         Some(&client_auth.client_identity_pem),
+        true,
     );
-    let resp = client
+    let h1_resp = h1_client
         .get(format!("https://localhost:{}/whoami", upgrade_runtime.tls_port))
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success());
+    assert!(h1_resp.status().is_success());
 
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["verified"], "true");
-    assert_eq!(body["common_name"], "client.sentirum.test");
-    assert_eq!(body["organization"], "Sentirum");
-    assert_eq!(body["organizational_unit"], "Platform");
-    assert_eq!(body["subject"], "CN=client.sentirum.test, O=Sentirum, OU=Platform");
-    assert!(body["serial"].as_str().is_some_and(|v| !v.is_empty()));
-    assert!(body["sha256"].as_str().is_some_and(|v| v.len() == 64));
+    let h1_body: serde_json::Value = h1_resp.json().await.unwrap();
+    assert_eq!(h1_body["verified"], "true");
+    assert_eq!(h1_body["common_name"], "client.sentirum.test");
+    assert_eq!(h1_body["organization"], "Sentirum");
+    assert_eq!(h1_body["organizational_unit"], "Platform");
+    assert_eq!(h1_body["subject"], "CN=client.sentirum.test, O=Sentirum, OU=Platform");
+    assert!(h1_body["serial"].as_str().is_some_and(|v| !v.is_empty()));
+    assert!(h1_body["sha256"].as_str().is_some_and(|v| v.len() == 64));
+
+    let h2_client = mtls_client(
+        &upgrade_runtime.proxy_cert_pem,
+        Some(&client_auth.client_identity_pem),
+        false,
+    );
+    let h2_resp = h2_client
+        .get(format!("https://localhost:{}/whoami", upgrade_runtime.tls_port))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(h2_resp.version(), Version::HTTP_2);
+    assert!(h2_resp.status().is_success());
+
+    let h2_body: serde_json::Value = h2_resp.json().await.unwrap();
+    assert_eq!(h2_body["verified"], "true");
+    assert_eq!(h2_body["common_name"], "client.sentirum.test");
+    assert_eq!(h2_body["organization"], "Sentirum");
+    assert_eq!(h2_body["organizational_unit"], "Platform");
+    assert_eq!(h2_body["subject"], "CN=client.sentirum.test, O=Sentirum, OU=Platform");
+    assert!(h2_body["serial"].as_str().is_some_and(|v| !v.is_empty()));
+    assert!(h2_body["sha256"].as_str().is_some_and(|v| v.len() == 64));
 }
 
 async fn spawn_header_echo_server(expected_path: &str) -> std::net::SocketAddr {
@@ -290,11 +315,14 @@ fn generate_client_auth_fixture(ca_common_name: &str) -> ClientAuthFixture {
     }
 }
 
-fn mtls_client(proxy_cert_pem: &str, identity_pem: Option<&str>) -> reqwest::Client {
+fn mtls_client(proxy_cert_pem: &str, identity_pem: Option<&str>, http1_only: bool) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
-        .http1_only()
         .add_root_certificate(reqwest::Certificate::from_pem(proxy_cert_pem.as_bytes()).unwrap());
+
+    if http1_only {
+        builder = builder.http1_only();
+    }
 
     if let Some(identity_pem) = identity_pem {
         builder = builder.identity(reqwest::Identity::from_pem(identity_pem.as_bytes()).unwrap());

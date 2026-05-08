@@ -1218,35 +1218,41 @@ impl ClientAuthState {
             TlsError::ConfigError(format!("failed to attach client CA verify store: {e}"))
         })?;
 
-        if self.ca_upgrade_cn.is_empty() {
-            ssl.set_verify(verify_mode);
-        } else {
-            let ca_upgrade_cn = self.ca_upgrade_cn.clone();
-            ssl.set_verify_callback(verify_mode, move |preverify_ok, store_ctx| {
-                if preverify_ok {
-                    return true;
+        let ca_upgrade_cn = self.ca_upgrade_cn.clone();
+        ssl.set_verify_callback(verify_mode, move |preverify_ok, store_ctx| {
+            if preverify_ok {
+                if store_ctx.error_depth() == 0
+                    && let Some(cert) = store_ctx.current_cert()
+                {
+                    crate::proxy::handler::remember_verified_client_certificate(cert);
                 }
-                tracing::debug!(
+                return true;
+            }
+            tracing::debug!(
+                ca_upgrade_cn,
+                error_code = store_ctx.error().as_raw(),
+                error = %store_ctx.error(),
+                subject = store_ctx.current_cert().map(certificate_subject_string_ref),
+                "client certificate verification failed before CA-upgrade override"
+            );
+            if should_accept_ca_upgrade_error(&ca_upgrade_cn, store_ctx) {
+                tracing::info!(
                     ca_upgrade_cn,
                     error_code = store_ctx.error().as_raw(),
                     error = %store_ctx.error(),
                     subject = store_ctx.current_cert().map(certificate_subject_string_ref),
-                    "client certificate verification failed before CA-upgrade override"
+                    "accepting client certificate verification failure via CA-upgrade override"
                 );
-                if should_accept_ca_upgrade_error(&ca_upgrade_cn, store_ctx) {
-                    tracing::info!(
-                        ca_upgrade_cn,
-                        error_code = store_ctx.error().as_raw(),
-                        error = %store_ctx.error(),
-                        subject = store_ctx.current_cert().map(certificate_subject_string_ref),
-                        "accepting client certificate verification failure via CA-upgrade override"
-                    );
-                    store_ctx.set_error(X509VerifyResult::OK);
-                    return true;
+                if store_ctx.error_depth() == 0
+                    && let Some(cert) = store_ctx.current_cert()
+                {
+                    crate::proxy::handler::remember_verified_client_certificate(cert);
                 }
-                false
-            });
-        }
+                store_ctx.set_error(X509VerifyResult::OK);
+                return true;
+            }
+            false
+        });
         Ok(())
     }
 }
