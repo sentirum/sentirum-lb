@@ -716,6 +716,7 @@ mod tests {
             listen: ":9443".to_string(),
             consul_cert_prefix: "/fabio/cert".to_string(),
             strict_sni: false,
+            require_initial_snapshot: false,
         };
         assert!(matches!(
             TlsMode::resolve(&config).unwrap(),
@@ -732,11 +733,13 @@ mod tests {
             listen: ":9443".to_string(),
             consul_cert_prefix: "/fabio/cert".to_string(),
             strict_sni: true,
+            require_initial_snapshot: true,
         };
         match TlsMode::resolve(&config).unwrap() {
             Some(TlsMode::ConsulKv(consul)) => {
                 assert_eq!(consul.cert_prefix, "/fabio/cert");
                 assert!(consul.strict_sni);
+                assert!(consul.require_initial_snapshot);
             }
             other => panic!("unexpected mode: {other:?}"),
         }
@@ -758,6 +761,7 @@ mod tests {
             listen: ":9443".to_string(),
             consul_cert_prefix: "/fabio/cert".to_string(),
             strict_sni: false,
+            require_initial_snapshot: false,
         };
         let result: Option<TlsCertConfig> = (&config).into();
         assert!(result.is_some());
@@ -841,6 +845,33 @@ mod tests {
         let status = store.status();
         assert_eq!(status.last_consul_index, 2);
         assert!(status.last_error.is_some());
+        assert!(store.select_for_server_name(Some("example.com")).is_some());
+    }
+
+    #[test]
+    fn test_dynamic_store_rejects_oversized_entries() {
+        let (cert_pem, key_pem) = self_signed_pem(&["example.com"]);
+        let combined = format!("{cert_pem}{key_pem}");
+        let mut entries = BTreeMap::new();
+        entries.insert("example.com.pem".to_string(), combined.into_bytes());
+
+        let store = DynamicCertStore::new(false);
+        store.apply_consul_snapshot(entries, 1);
+
+        let mut oversized = BTreeMap::new();
+        oversized.insert(
+            "example.com.pem".to_string(),
+            vec![b'x'; MAX_CONSUL_CERT_ENTRY_BYTES + 1],
+        );
+        store.apply_consul_snapshot(oversized, 2);
+
+        let status = store.status();
+        assert_eq!(status.last_consul_index, 2);
+        assert!(status
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("exceeds max size"));
         assert!(store.select_for_server_name(Some("example.com")).is_some());
     }
 }
