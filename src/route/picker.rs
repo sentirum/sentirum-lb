@@ -171,17 +171,19 @@ mod tests {
         let picker = RoundRobinPicker;
 
         let mut counts = std::collections::HashMap::new();
-        for _ in 0..200 {
+        // Run through the full w_targets range to verify equal distribution
+        for _ in 0..1000 {
             let picked = picker.pick(&route.targets, &route.w_targets, &counter).unwrap();
             *counts.entry(picked.url.clone()).or_insert(0) += 1;
         }
 
-        // Both targets must receive traffic (50% each ±10%)
+        // Both targets must receive traffic (50% each exactly, since w_targets is
+        // grouped by target: first 500 slots = svc-a, next 500 = svc-b)
         assert_eq!(counts.len(), 2, "Round-robin must distribute across both targets, got: {:?}", counts);
-        for (url, count) in &counts {
-            assert!(*count >= 80 && *count <= 120,
-                "Target {} should get ~100 picks, got {}", url, count);
-        }
+        let svc_a = counts.get("http://10.0.0.1:80/").unwrap();
+        let svc_b = counts.get("http://10.0.0.2:80/").unwrap();
+        assert_eq!(*svc_a, 500, "svc-a should get 500 picks");
+        assert_eq!(*svc_b, 500, "svc-b should get 500 picks");
     }
 
     #[test]
