@@ -161,6 +161,9 @@ impl BackgroundService for ConsulTlsBackgroundService {
 
         let mut last_index = self.initial_index;
         let mut backoff_secs: u64 = 1;
+        let metrics = sentirum_lb::metrics::prometheus::global();
+        metrics.set_consul_watcher_backoff_seconds("tls", 0);
+        metrics.set_consul_watcher_last_index("tls", last_index);
         tracing::info!(prefix = %self.cert_prefix, "Consul TLS certificate watcher started");
 
         loop {
@@ -176,8 +179,12 @@ impl BackgroundService for ConsulTlsBackgroundService {
                 Ok(new_index) => {
                     backoff_secs = 1;
                     last_index = new_index;
+                    metrics.set_consul_watcher_backoff_seconds("tls", 0);
+                    metrics.set_consul_watcher_last_index("tls", new_index);
                 }
                 Err(e) => {
+                    metrics.record_consul_watcher_error("tls");
+                    metrics.set_consul_watcher_backoff_seconds("tls", backoff_secs);
                     tracing::warn!(
                         prefix = %self.cert_prefix,
                         backoff_secs,

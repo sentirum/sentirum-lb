@@ -9,6 +9,7 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use pingora::listeners::tls::TlsSettings;
 use pingora::tls::{
+    asn1::Asn1Time,
     ext,
     nid::Nid,
     pkey::{PKey, Private},
@@ -140,10 +141,19 @@ pub fn tls_listen_addr(http_listen: &str, tls_listen: &str) -> String {
     format!(":{}", http_port + 1)
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DynamicTlsCertificateStatus {
+    pub entry_name: String,
+    pub primary_name: Option<String>,
+    pub not_after_unix: Option<u64>,
+    pub days_remaining: Option<i64>,
+}
+
 /// Lightweight runtime view for admin/config visibility.
 #[derive(Debug, Clone, Default)]
 pub struct DynamicTlsStatus {
     pub loaded_certificates: Vec<String>,
+    pub certificates: Vec<DynamicTlsCertificateStatus>,
     pub default_certificate: Option<String>,
     pub last_consul_index: u64,
     pub last_reload_unix: Option<u64>,
@@ -187,6 +197,9 @@ impl DynamicCertStore {
 
     pub fn apply_consul_snapshot(&self, entries: BTreeMap<String, Vec<u8>>, consul_index: u64) {
         if entries.is_empty() {
+            let metrics = crate::metrics::prometheus::global();
+            metrics.record_cert_reload_error();
+            metrics.record_cert_reload_skipped("empty");
             let mut status = self.status.write().expect("tls status poisoned");
             status.last_consul_index = consul_index;
             status.last_error = Some(
@@ -204,6 +217,9 @@ impl DynamicCertStore {
         let (next_snapshot, warnings) = CertSnapshot::from_fabio_entries(&entries, &previous);
 
         if next_snapshot.ordered.is_empty() {
+            let metrics = crate::metrics::prometheus::global();
+            metrics.record_cert_reload_error();
+            record_warning_metrics(metrics, &warnings);
             let mut status = self.status.write().expect("tls status poisoned");
             status.last_consul_index = consul_index;
             status.last_error = Some(
@@ -221,10 +237,33 @@ impl DynamicCertStore {
 
         let default_certificate = next_snapshot.default_certificate_name();
         let loaded_certificates = next_snapshot.entry_names();
+        let certificate_statuses = next_snapshot.runtime_certificates();
         self.snapshot.store(Arc::new(next_snapshot));
+
+        let metrics = crate::metrics::prometheus::global();
+        metrics.record_cert_reload_success();
+        record_warning_metrics(metrics, &warnings);
+        metrics.set_cert_expiry_entries(
+            certificate_statuses
+                .iter()
+                .filter_map(|cert| {
+                    cert.not_after_unix.map(|not_after_unix| {
+                        crate::metrics::prometheus::CertificateExpiryMetric {
+                            entry: cert.entry_name.clone(),
+                            cn: cert
+                                .primary_name
+                                .clone()
+                                .unwrap_or_else(|| cert.entry_name.clone()),
+                            not_after_unix,
+                        }
+                    })
+                })
+                .collect(),
+        );
 
         let mut status = self.status.write().expect("tls status poisoned");
         status.loaded_certificates = loaded_certificates.clone();
+        status.certificates = certificate_statuses;
         status.default_certificate = default_certificate.clone();
         status.last_consul_index = consul_index;
         status.last_reload_unix = Some(now_unix());
@@ -285,6 +324,19 @@ impl LoadedCertificate {
             key,
             names,
         })
+    }
+
+    fn runtime_status(&self) -> DynamicTlsCertificateStatus {
+        let not_after_unix = asn1_time_to_unix_seconds(self.leaf.not_after());
+        let now = now_unix() as i64;
+        let days_remaining = not_after_unix.map(|not_after| (not_after as i64 - now) / 86_400);
+
+        DynamicTlsCertificateStatus {
+            entry_name: self.entry_name.clone(),
+            primary_name: self.names.first().cloned(),
+            not_after_unix,
+            days_remaining,
+        }
     }
 }
 
@@ -411,6 +463,13 @@ impl CertSnapshot {
             .collect()
     }
 
+    fn runtime_certificates(&self) -> Vec<DynamicTlsCertificateStatus> {
+        self.ordered
+            .iter()
+            .map(|cert| cert.runtime_status())
+            .collect()
+    }
+
     fn select(
         &self,
         server_name: Option<&str>,
@@ -459,6 +518,17 @@ fn maybe_reuse_previous(
         warnings.push(format!("{reason}; reusing previous certificate"));
     } else {
         warnings.push(reason);
+    }
+}
+
+fn record_warning_metrics(metrics: &crate::metrics::prometheus::Metrics, warnings: &[String]) {
+    for warning in warnings {
+        let reason = if warning.contains("exceeds max size") {
+            "oversize"
+        } else {
+            "invalid"
+        };
+        metrics.record_cert_reload_skipped(reason);
     }
 }
 
@@ -596,6 +666,13 @@ fn pem_blocks(input: &str) -> Vec<PemBlock<'_>> {
     }
 
     blocks
+}
+
+fn asn1_time_to_unix_seconds(time: &pingora::tls::asn1::Asn1TimeRef) -> Option<u64> {
+    let epoch = Asn1Time::from_unix(0).ok()?;
+    let diff = epoch.diff(time).ok()?;
+    let total = i64::from(diff.days) * 86_400 + i64::from(diff.secs);
+    u64::try_from(total).ok()
 }
 
 fn now_unix() -> u64 {
