@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 # Proxy framework (pingora umbrella crate re-exports everything)
-pingora = { version = "0.5", features = ["proxy", "lb", "rustls"] }
+pingora = { version = "0.5", features = ["proxy", "lb", "openssl"] }
 pingora-http = "0.5"
 
 # Async runtime
@@ -58,10 +58,18 @@ base64 = "0.21"
 
 # Random number generation (for RandomPicker)
 rand = { version = "0.8", features = ["small_rng"] }
+
+# Fast mutex (for circuit breaker state)
+parking_lot = "0.12"
+
+# Concurrent hash map (for DNS cache)
+dashmap = "5"
+
 axum = "0.8.8"
 tower = "0.5.3"
 http = "1"
 rustls = { version = "0.23", features = ["ring"] }
+time = "0.3"
 
 [build-dependencies]
 protoc-bin-vendored = "3"
