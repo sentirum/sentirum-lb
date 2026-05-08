@@ -307,6 +307,15 @@ async fn run_tcp_listener_with_watch(
                         TcpListenerMode::Sni => {
                             handle_tcp_sni_connection(downstream, route_table, config).await
                         }
+                        TcpListenerMode::HttpsFallback(https_fallback_addr) => {
+                            handle_https_tcp_sni_connection(
+                                downstream,
+                                route_table,
+                                config,
+                                &https_fallback_addr,
+                            )
+                            .await
+                        }
                     };
                     if let Err(error) = result {
                         tracing::debug!(listen_port, client = %peer_addr, %error, "TCP proxy connection ended with error");
@@ -376,29 +385,42 @@ async fn handle_tcp_sni_connection(
         }
     };
 
-    if !try_acquire_upstream_slot(&target, config.proxy.max_connections as u64) {
-        tracing::warn!(server_name = %server_name, target_url = %target.url, max_connections = config.proxy.max_connections, "TCP SNI upstream concurrency limit reached");
-        return Ok(());
-    }
+    proxy_tcp_streams(downstream, client_hello, target, &config, Some(&server_name)).await
+}
 
-    crate::metrics::prometheus::global().connect();
-    let _guard = TcpConnectionGuard {
-        target: target.clone(),
-    };
+async fn handle_https_tcp_sni_connection(
+    mut downstream: TcpStream,
+    route_table: Arc<ManagedRouteTable>,
+    config: Arc<Config>,
+    https_fallback_addr: &str,
+) -> Result<(), std::io::Error> {
+    let mut headers = [0_u8; 9];
+    downstream.read_exact(&mut headers).await?;
 
-    let mut upstream = match connect_upstream(&target, &config).await {
-        Ok(upstream) => upstream,
-        Err(error) => {
-            tracing::warn!(server_name = %server_name, target_url = %target.url, %error, "Failed to open TCP SNI upstream connection");
-            return Ok(());
+    let client_hello = match client_hello_buffer_size(&headers) {
+        Ok(buffer_size) => {
+            let mut data = vec![0_u8; buffer_size];
+            data[..9].copy_from_slice(&headers);
+            downstream.read_exact(&mut data[9..]).await?;
+            data
+        }
+        Err(_) => {
+            return proxy_to_https_fallback(downstream, headers.to_vec(), config.as_ref(), https_fallback_addr).await;
         }
     };
 
-    upstream.write_all(&client_hello).await?;
-    upstream.flush().await?;
+    let target = read_server_name(&client_hello[5..])
+        .filter(|server_name| !server_name.is_empty())
+        .and_then(|server_name| {
+            lookup_sni_target(&route_table, &config.proxy.strategy, &server_name)
+                .map(|target| (server_name, target))
+        });
 
-    let _ = copy_bidirectional(&mut downstream, &mut upstream).await?;
-    Ok(())
+    if let Some((server_name, target)) = target {
+        return proxy_tcp_streams(downstream, client_hello, target, &config, Some(&server_name)).await;
+    }
+
+    proxy_to_https_fallback(downstream, client_hello, config.as_ref(), https_fallback_addr).await
 }
 
 fn lookup_target(
