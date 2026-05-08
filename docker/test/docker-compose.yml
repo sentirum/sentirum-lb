@@ -1,0 +1,72 @@
+version: "3.8"
+
+services:
+  # ============================================================
+  # Consul (dev mode — no persistence, single node)
+  # ============================================================
+  consul:
+    image: hashicorp/consul:1.19
+    command: agent -dev -client=0.0.0.0 -log-level=warn
+    ports:
+      - "8500:8500"
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ============================================================
+  # Upstream mock services
+  # Each responds with its name, the request path, and upstream info.
+  # ============================================================
+  upstream-web-blue:
+    image: hashicorp/http-echo:0.2.3
+    args: ["-text", "{\"service\":\"web-blue\",\"port\":8080}", "-listen", ":8080"]
+    ports: []
+
+  upstream-web-green:
+    image: hashicorp/http-echo:0.2.3
+    args: ["-text", "{\"service\":\"web-green\",\"port\":8081}", "-listen", ":8081"]
+    ports: []
+
+  upstream-api:
+    image: hashicorp/http-echo:0.2.3
+    args: ["-text", "{\"service\":\"api\",\"port\":9090}", "-listen", ":9090"]
+    ports: []
+
+  upstream-static:
+    image: hashicorp/http-echo:0.2.3
+    args: ["-text", "{\"service\":\"static\",\"port\":3000}", "-listen", ":3000"]
+    ports: []
+
+  upstream-grpc:
+    image: hashicorp/http-echo:0.2.3
+    args: ["-text", "{\"service\":\"grpc-backend\",\"port\":50051}", "-listen", ":50051"]
+    ports: []
+
+  # ============================================================
+  # Sentirum LB
+  # ============================================================
+  sentirum-lb:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: >
+      --config /app/config.toml
+    ports:
+      - "9999:9999"   # HTTP proxy
+      - "9998:9998"   # Admin API
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - ./routes.txt:/app/routes.txt:ro
+    depends_on:
+      consul:
+        condition: service_healthy
+      upstream-web-blue:
+        condition: service_started
+      upstream-web-green:
+        condition: service_started
+      upstream-api:
+        condition: service_started
+      upstream-static:
+        condition: service_started
