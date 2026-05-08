@@ -458,6 +458,10 @@ async fn proxy_tcp_streams(
         }
     };
 
+    if target.proxy_proto() {
+        write_proxy_header(&mut upstream, &downstream).await?;
+    }
+
     if !initial_bytes.is_empty() {
         upstream.write_all(&initial_bytes).await?;
         upstream.flush().await?;
@@ -522,6 +526,24 @@ async fn connect_addr(addr: &str, config: &Config) -> Result<TcpStream, std::io:
     tokio::time::timeout(timeout, TcpStream::connect(addr))
         .await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "TCP connect timed out"))?
+}
+
+async fn write_proxy_header(
+    upstream: &mut TcpStream,
+    downstream: &TcpStream,
+) -> Result<(), std::io::Error> {
+    let client = downstream.peer_addr()?;
+    let server = downstream.local_addr()?;
+    let proto = if client.ip().is_ipv4() { "TCP4" } else { "TCP6" };
+    let header = format!(
+        "PROXY {proto} {} {} {} {}\r\n",
+        client.ip(),
+        server.ip(),
+        client.port(),
+        server.port()
+    );
+    upstream.write_all(header.as_bytes()).await?;
+    Ok(())
 }
 
 async fn read_client_hello(stream: &mut TcpStream) -> Result<Vec<u8>, std::io::Error> {
