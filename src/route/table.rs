@@ -559,7 +559,7 @@ mod tests {
             url: url.to_string(),
             fixed_weight,
             weight,
-            active_connections: std::sync::atomic::AtomicU64::new(0),
+            active_connections: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             ..Default::default()
         };
         t.pre_parse();

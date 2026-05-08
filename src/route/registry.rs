@@ -108,7 +108,7 @@ impl ManagedRouteTable {
     /// Rebuild table from registry and atomically swap
     fn rebuild_and_swap(&self, registry: &RouteRegistry) {
         let all_defs = registry.get_all();
-        let table = Table::from_definitions(&all_defs);
+        let table = Table::from_definitions_with_stats(&all_defs, self.inner.stats_registry());
         let route_count = table.route_count();
         let target_count = table.target_count();
         self.registry.store(Arc::new(registry.clone()));
