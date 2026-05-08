@@ -30,6 +30,9 @@ level = "info"               # trace, debug, info, warn, error
 format = "text"              # text or json
 
 [tls]
-cert_path = ""               # Path to PEM certificate
-key_path = ""                # Path to PEM private key
+source = ""                  # "" auto-detects file mode when cert_path/key_path are set; or use "file" / "consul_kv"
+cert_path = ""               # Path to PEM certificate when source=file
+key_path = ""                # Path to PEM private key when source=file
 listen = ""                  # TLS listen address (empty = HTTP port + 1)
+consul_cert_prefix = "/fabio/cert"  # Fabio-compatible KV prefix when source=consul_kv
+strict_sni = false            # true = handshake fails when no exact/wildcard SNI match exists

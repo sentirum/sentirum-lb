@@ -93,10 +93,33 @@ level = "info"
 format = "text"
 
 [tls]
+source = ""
 cert_path = ""
 key_path = ""
 listen = ""
+consul_cert_prefix = "/fabio/cert"
+strict_sni = false
 ```
+
+### TLS sources
+
+`sentirum-lb` supports two downstream TLS modes:
+
+- `source = "file"` — classic PEM files from disk via `cert_path` + `key_path`
+- `source = "consul_kv"` — Fabio-compatible Consul KV bundles under `tls.consul_cert_prefix`
+
+In `consul_kv` mode the load balancer watches keys like:
+
+- `/fabio/cert/example.com.pem`
+- `/fabio/cert/api.example.com.pem`
+
+Each KV value may be a single bundled PEM containing:
+
+- leaf certificate
+- intermediate chain
+- private key
+
+Certificates are selected dynamically per SNI and reloaded from Consul without listener restarts.
 
 ### Important knobs
 
@@ -108,6 +131,9 @@ listen = ""
 - `proxy.upstream_h2_ping_interval`: optional upstream H2 ping interval for long-lived gRPC streams.
 - `consul.poll_interval`: blocking query wait duration for Consul watchers.
 - `proxy.no_route_status`: status returned when no route matches.
+- `tls.source`: select `file` or `consul_kv` for downstream TLS.
+- `tls.consul_cert_prefix`: Fabio-compatible certificate KV prefix, e.g. `/fabio/cert`.
+- `tls.strict_sni`: if true, fail TLS handshakes without an exact/wildcard SNI match.
 
 ## Route format
 
