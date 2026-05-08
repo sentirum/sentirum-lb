@@ -17,6 +17,7 @@ use tokio::sync::watch;
 pub enum TcpMode {
     Disabled,
     Tcp { listen: String },
+    TcpSni { listen: String },
     TcpDynamic { refresh: Duration },
 }
 
@@ -33,15 +34,25 @@ pub fn resolve_tcp_mode(config: &Config) -> Result<TcpMode, String> {
                 listen: listen.to_string(),
             })
         }
+        "tcp+sni" => {
+            let listen = config.tcp.listen.trim();
+            if listen.is_empty() {
+                return Err("tcp.listen cannot be empty when tcp.mode=tcp+sni".to_string());
+            }
+            Ok(TcpMode::TcpSni {
+                listen: listen.to_string(),
+            })
+        }
         "tcp-dynamic" => Ok(TcpMode::TcpDynamic {
             refresh: crate::config::Config::parse_optional_duration(&config.tcp.refresh)
                 .unwrap_or_else(|| Duration::from_secs(5)),
         }),
-        "tcp+sni" | "https+tcp+sni" => Err(format!(
-            "tcp.mode={mode} is not implemented yet; use tcp or tcp-dynamic for now"
-        )),
+        "https+tcp+sni" => Err(
+            "tcp.mode=https+tcp+sni is not implemented yet; it requires downstream listener multiplexing with the HTTPS Pingora listener"
+                .to_string(),
+        ),
         other => Err(format!(
-            "unknown tcp.mode '{other}', expected 'tcp' or 'tcp-dynamic'"
+            "unknown tcp.mode '{other}', expected 'tcp', 'tcp+sni', or 'tcp-dynamic'"
         )),
     }
 }
@@ -70,6 +81,26 @@ impl BackgroundService for TcpBackgroundService {
                 run_tcp_listener(
                     listen,
                     port,
+                    TcpListenerMode::Plain,
+                    self.route_table.clone(),
+                    self.config.clone(),
+                    &mut shutdown,
+                )
+                .await;
+            }
+            Ok(TcpMode::TcpSni { listen }) => {
+                let port = match parse_listener_port(&listen) {
+                    Some(port) => port,
+                    None => {
+                        tracing::error!(listen = %listen, "Invalid tcp.listen address");
+                        return;
+                    }
+                };
+                tracing::info!(addr = %listen, "TCP proxy listening (SNI passthrough)");
+                run_tcp_listener(
+                    listen,
+                    port,
+                    TcpListenerMode::Sni,
                     self.route_table.clone(),
                     self.config.clone(),
                     &mut shutdown,
@@ -158,7 +189,15 @@ async fn reconcile_dynamic_listeners(
         let route_table = route_table.clone();
         let config = config.clone();
         let task = tokio::spawn(async move {
-            run_tcp_listener_with_watch(listen, port, route_table, config, shutdown_rx).await;
+            run_tcp_listener_with_watch(
+                listen,
+                port,
+                TcpListenerMode::Plain,
+                route_table,
+                config,
+                shutdown_rx,
+            )
+            .await;
         });
         listeners.insert(
             port,
@@ -170,16 +209,24 @@ async fn reconcile_dynamic_listeners(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TcpListenerMode {
+    Plain,
+    Sni,
+}
+
 async fn run_tcp_listener(
     listen: String,
     listen_port: u16,
+    mode: TcpListenerMode,
     route_table: Arc<ManagedRouteTable>,
     config: Arc<Config>,
     shutdown: &mut pingora::server::ShutdownWatch,
 ) {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let listener_task = tokio::spawn(async move {
-        run_tcp_listener_with_watch(listen, listen_port, route_table, config, shutdown_rx).await;
+        run_tcp_listener_with_watch(listen, listen_port, mode, route_table, config, shutdown_rx)
+            .await;
     });
 
     let _ = shutdown.changed().await;
@@ -191,6 +238,7 @@ async fn run_tcp_listener(
 async fn run_tcp_listener_with_watch(
     listen: String,
     listen_port: u16,
+    mode: TcpListenerMode,
     route_table: Arc<ManagedRouteTable>,
     config: Arc<Config>,
     mut shutdown: watch::Receiver<bool>,
@@ -203,7 +251,7 @@ async fn run_tcp_listener_with_watch(
         }
     };
 
-    tracing::info!(addr = %listen, listen_port, "TCP listener started");
+    tracing::info!(addr = %listen, listen_port, mode = ?mode, "TCP listener started");
 
     loop {
         tokio::select! {
@@ -224,7 +272,15 @@ async fn run_tcp_listener_with_watch(
                 let route_table = route_table.clone();
                 let config = config.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = handle_tcp_connection(downstream, route_table, config).await {
+                    let result = match mode {
+                        TcpListenerMode::Plain => {
+                            handle_tcp_connection(downstream, route_table, config).await
+                        }
+                        TcpListenerMode::Sni => {
+                            handle_tcp_sni_connection(downstream, route_table, config).await
+                        }
+                    };
+                    if let Err(error) = result {
                         tracing::debug!(listen_port, client = %peer_addr, %error, "TCP proxy connection ended with error");
                     }
                 });
