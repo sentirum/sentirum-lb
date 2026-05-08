@@ -341,24 +341,11 @@ fn main() {
     );
 
     // Add TLS listener if configured
-    let tls_cert_config: Option<sentirum_lb::proxy::tls::TlsCertConfig> = (&config.tls).into();
-    if let Some(tls) = &tls_cert_config {
-        match tls.validate() {
+    let mut tls_background_service: Option<ConsulTlsBackgroundService> = None;
+    match TlsMode::resolve(&config.tls) {
+        Ok(Some(TlsMode::File(tls))) => match tls.validate() {
             Ok(()) => {
-                // Use explicit TLS listen address, or derive from HTTP port +1
-                let tls_listen = if config.tls.listen.is_empty() {
-                    let http_port: u16 = config
-                        .server
-                        .listen
-                        .rsplit(':')
-                        .next()
-                        .and_then(|p| p.parse().ok())
-                        .unwrap_or(9999);
-                    format!(":{}", http_port + 1)
-                } else {
-                    config.tls.listen.clone()
-                };
-
+                let tls_listen = tls_listen_addr(&config.server.listen, &config.tls.listen);
                 match pingora::listeners::tls::TlsSettings::intermediate(
                     &tls.cert_path,
                     &tls.key_path,
@@ -366,16 +353,104 @@ fn main() {
                     Ok(mut settings) => {
                         settings.enable_h2();
                         lb_service.add_tls_with_settings(&tls_listen, None, settings);
-                        tracing::info!(addr = %tls_listen, h2_enabled = true, "Proxy listening (HTTPS/TLS)");
+                        tracing::info!(
+                            addr = %tls_listen,
+                            source = "file",
+                            h2_enabled = true,
+                            "Proxy listening (HTTPS/TLS)"
+                        );
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "Failed to configure TLS listener");
+                        tracing::error!(error = %e, "Failed to configure file-based TLS listener");
                     }
                 }
             }
             Err(e) => {
                 tracing::error!(error = %e, "TLS configuration invalid, skipping HTTPS listener");
             }
+        },
+        Ok(Some(TlsMode::ConsulKv(consul_tls))) => {
+            let tls_listen = tls_listen_addr(&config.server.listen, &config.tls.listen);
+            let tls_store = Arc::new(DynamicCertStore::new(consul_tls.strict_sni));
+            let consul_config = sentirum_lb::consul::ConsulConfig::from(&config.consul);
+            let mut initial_index = 0;
+
+            match ConsulClient::new(consul_config.clone()) {
+                Ok(client) => {
+                    match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(runtime) => {
+                            match runtime.block_on(tls_store.refresh_from_consul(
+                                &client,
+                                &consul_tls.cert_prefix,
+                                0,
+                            )) {
+                                Ok(index) => {
+                                    initial_index = index;
+                                    tracing::info!(
+                                        prefix = %consul_tls.cert_prefix,
+                                        initial_index,
+                                        strict_sni = consul_tls.strict_sni,
+                                        "Loaded initial TLS certificate snapshot from Consul"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        prefix = %consul_tls.cert_prefix,
+                                        error = %e,
+                                        "Initial Consul TLS certificate load failed; listener will start and retry in background"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to create temporary runtime for initial TLS certificate load"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to create Consul client for initial TLS certificate load"
+                    );
+                }
+            }
+
+            match build_dynamic_tls_settings(tls_store.clone()) {
+                Ok(mut settings) => {
+                    settings.enable_h2();
+                    lb_service.add_tls_with_settings(&tls_listen, None, settings);
+                    tracing::info!(
+                        addr = %tls_listen,
+                        source = "consul_kv",
+                        prefix = %consul_tls.cert_prefix,
+                        strict_sni = consul_tls.strict_sni,
+                        h2_enabled = true,
+                        "Proxy listening (HTTPS/TLS)"
+                    );
+                    tls_background_service = Some(ConsulTlsBackgroundService {
+                        tls_store,
+                        consul_config,
+                        cert_prefix: consul_tls.cert_prefix,
+                        initial_index,
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "Failed to configure Consul-backed TLS listener"
+                    );
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "Invalid TLS source configuration; skipping HTTPS listener");
         }
     }
 
