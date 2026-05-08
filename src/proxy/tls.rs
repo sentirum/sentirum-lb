@@ -1070,6 +1070,7 @@ fn should_treat_as_upgraded_ca(
     let is_ca_flag_error = matches!(
         error_code,
         ssl_sys::X509_V_ERR_INVALID_CA
+            | ssl_sys::X509_V_ERR_INVALID_PURPOSE
             | ssl_sys::X509_V_ERR_KEYUSAGE_NO_CERTSIGN
             | ssl_sys::X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT
             | ssl_sys::X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN
