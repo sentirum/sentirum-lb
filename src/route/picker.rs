@@ -203,17 +203,18 @@ mod tests {
         let picker = RoundRobinPicker;
 
         let mut counts = std::collections::HashMap::new();
+        // Run through the full w_targets range
         for _ in 0..1000 {
             let picked = picker.pick(&route.targets, &route.w_targets, &counter).unwrap();
             *counts.entry(picked.url.clone()).or_insert(0) += 1;
         }
 
-        // Both targets must receive traffic, heavy ~900, light ~100
+        // heavy: 900 slots, light: 100 slots → 90/10 split
         assert_eq!(counts.len(), 2, "Both targets must get traffic: {:?}", counts);
         let heavy = counts.get("http://10.0.0.1:80/").unwrap();
         let light = counts.get("http://10.0.0.2:80/").unwrap();
-        assert!(*heavy >= 850, "heavy target should get ~900 picks, got {}", heavy);
-        assert!(*light >= 50, "light target should get ~100 picks, got {}", light);
+        assert_eq!(*heavy, 900, "heavy target should get 900 picks");
+        assert_eq!(*light, 100, "light target should get 100 picks");
     }
 
     #[test]
