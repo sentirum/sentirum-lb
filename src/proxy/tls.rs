@@ -67,6 +67,7 @@ impl TlsCertConfig {
 pub struct ConsulTlsConfig {
     pub cert_prefix: String,
     pub strict_sni: bool,
+    pub require_initial_snapshot: bool,
 }
 
 /// Resolved TLS runtime mode.
@@ -106,6 +107,7 @@ impl TlsMode {
                 Ok(Some(TlsMode::ConsulKv(ConsulTlsConfig {
                     cert_prefix,
                     strict_sni: config.strict_sni,
+                    require_initial_snapshot: config.require_initial_snapshot,
                 })))
             }
             other => Err(TlsError::ConfigError(format!(
@@ -153,6 +155,8 @@ pub struct DynamicCertStore {
     status: RwLock<DynamicTlsStatus>,
     strict_sni: bool,
 }
+
+const MAX_CONSUL_CERT_ENTRY_BYTES: usize = 1 << 20;
 
 impl DynamicCertStore {
     pub fn new(strict_sni: bool) -> Self {
@@ -334,6 +338,32 @@ impl CertSnapshot {
                 continue;
             };
 
+            if let Err(reason) = validate_entry_size(&cert_name, cert_pem.len()) {
+                maybe_reuse_previous(
+                    previous,
+                    &entry_name,
+                    &mut ordered,
+                    &mut by_entry_name,
+                    &mut warnings,
+                    reason,
+                );
+                continue;
+            }
+
+            if key_name != cert_name {
+                if let Err(reason) = validate_entry_size(&key_name, key_pem.len()) {
+                    maybe_reuse_previous(
+                        previous,
+                        &entry_name,
+                        &mut ordered,
+                        &mut by_entry_name,
+                        &mut warnings,
+                        reason,
+                    );
+                    continue;
+                }
+            }
+
             match LoadedCertificate::from_pem_pair(&entry_name, cert_pem, key_pem) {
                 Ok(cert) => {
                     let cert = Arc::new(cert);
@@ -451,6 +481,16 @@ fn classify_fabio_entry(name: &str) -> Option<(String, String, String)> {
         return Some((name.to_string(), name.to_string(), name.to_string()));
     }
     None
+}
+
+fn validate_entry_size(entry_name: &str, byte_len: usize) -> Result<(), String> {
+    if byte_len > MAX_CONSUL_CERT_ENTRY_BYTES {
+        return Err(format!(
+            "entry '{entry_name}' exceeds max size {} bytes ({byte_len} bytes)",
+            MAX_CONSUL_CERT_ENTRY_BYTES
+        ));
+    }
+    Ok(())
 }
 
 fn extract_certificate_names(cert: &X509) -> Vec<String> {

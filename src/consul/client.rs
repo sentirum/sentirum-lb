@@ -82,6 +82,18 @@ impl Default for ConsulConfig {
     }
 }
 
+impl ConsulConfig {
+    pub fn with_consistent_reads(mut self) -> Self {
+        self.allow_stale = false;
+        self.require_consistent = true;
+        self
+    }
+
+    pub fn for_tls_cert_watch(cfg: &AppConsulConfig) -> Self {
+        Self::from(cfg).with_consistent_reads()
+    }
+}
+
 /// Consul client for interacting with Consul's HTTP API
 #[derive(Debug, Clone)]
 pub struct ConsulClient {
@@ -483,10 +495,8 @@ mod tests {
     }
 
     fn make_consistent_client() -> ConsulClient {
-        let mut config = ConsulConfig::default();
-        config.allow_stale = false;
-        config.require_consistent = true;
-        ConsulClient::new(config).expect("client should build")
+        ConsulClient::new(ConsulConfig::default().with_consistent_reads())
+            .expect("client should build")
     }
 
     #[test]
@@ -547,5 +557,23 @@ mod tests {
         assert!(query.contains("keys=true"));
         assert!(!query.contains("stale="));
         assert!(query.contains("consistent=true"));
+    }
+
+    #[test]
+    fn tls_cert_watch_config_forces_consistent_reads() {
+        let app = AppConsulConfig {
+            address: "127.0.0.1:8500".to_string(),
+            scheme: "http".to_string(),
+            token: String::new(),
+            kv_prefix: "/sentirum-lb/routes".to_string(),
+            tag_prefix: "urlprefix-".to_string(),
+            poll_interval: "0s".to_string(),
+            service_discovery: true,
+            kv_watching: true,
+        };
+
+        let config = ConsulConfig::for_tls_cert_watch(&app);
+        assert!(!config.allow_stale);
+        assert!(config.require_consistent);
     }
 }
