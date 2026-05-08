@@ -320,8 +320,8 @@ fn verify_password(password: &str, hash: &str) -> bool {
     if hash.starts_with("$2") {
         verify(password, hash).unwrap_or(false)
     } else {
-        // Legacy plain text comparison
-        password == hash
+        // Legacy plain text comparison (constant-time to prevent timing attacks)
+        constant_time_eq(password, hash)
     }
 }
 
@@ -839,9 +839,26 @@ async fn admin_auth_middleware(
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
         {
-            let mut sessions = state.sessions.write().await;
-            evict_expired_sessions(&mut sessions);
-            sessions.get(bearer).is_some()
+            // Fast path: read lock for session lookup.
+            let sessions = state.sessions.read().await;
+            if let Some(entry) = sessions.get(bearer) {
+                let still_valid = std::time::Instant::now()
+                    .duration_since(entry.created_at)
+                    .as_secs()
+                    < SESSION_TTL_SECS;
+                drop(sessions);
+
+                if still_valid {
+                    true
+                } else {
+                    // Token expired — acquire write lock to evict and re-check.
+                    let mut sessions = state.sessions.write().await;
+                    evict_expired_sessions(&mut sessions);
+                    sessions.get(bearer).is_some()
+                }
+            } else {
+                false
+            }
         } else {
             false
         }
