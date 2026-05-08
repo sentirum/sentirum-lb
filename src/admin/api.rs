@@ -5,6 +5,7 @@
 //! - `GET /admin/routes` — Route table inspection
 //! - `GET /admin/metrics` — Prometheus metrics
 //! - `GET /admin/config` — Config inspection
+//! - `GET /admin/certs` — Runtime TLS certificate status
 
 use crate::config::Config;
 use crate::proxy::tls::DynamicCertStore;
