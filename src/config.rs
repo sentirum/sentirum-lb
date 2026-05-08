@@ -11,6 +11,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub tls: TlsConfig,
+    #[serde(default)]
+    pub tcp: TcpConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -58,6 +60,18 @@ pub struct ConsulConfig {
     /// Enable Consul KV route watching
     #[serde(default = "default_true")]
     pub kv_watching: bool,
+    /// Only discover routes for these service names (empty = all).
+    /// If non-empty, services not in this list are ignored.
+    #[serde(default)]
+    pub service_whitelist: Vec<String>,
+    /// Never discover routes for these service names.
+    /// Takes precedence over whitelist.
+    #[serde(default)]
+    pub service_blacklist: Vec<String>,
+    /// Enable graceful shutdown (drain connections before exit).
+    #[serde(default = "default_true")]
+    pub graceful_shutdown: bool,
+
 }
 
 fn default_consul_address() -> String {
@@ -77,6 +91,39 @@ fn default_poll_interval() -> String {
 }
 fn default_true() -> bool {
     true
+}
+
+fn default_dns_cache_ttl() -> u64 {
+    30
+}
+
+fn default_dns_negative_cache_ttl() -> u64 {
+    10
+}
+
+fn default_empty_string_vec() -> Vec<String> {
+    Vec::new()
+}
+
+fn default_graceful_shutdown() -> bool {
+    true
+}
+
+
+fn default_circuit_breaker_error_threshold() -> u8 {
+    50
+}
+
+fn default_circuit_breaker_window_size() -> usize {
+    100
+}
+
+fn default_circuit_breaker_recovery_timeout() -> u64 {
+    30
+}
+
+fn default_circuit_breaker_half_open_max() -> usize {
+    3
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -117,6 +164,12 @@ pub struct ProxyConfig {
     /// Upstream connection pool size per thread (Pingora default: 128)
     #[serde(default = "default_pool_size")]
     pub pool_size: usize,
+    /// DNS cache TTL in seconds (0 = disabled).
+    #[serde(default = "default_dns_cache_ttl")]
+    pub dns_cache_ttl: u64,
+    /// DNS negative cache TTL in seconds.
+    #[serde(default = "default_dns_negative_cache_ttl")]
+    pub dns_negative_cache_ttl: u64,
     /// Max concurrent connections per upstream
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
@@ -125,6 +178,22 @@ pub struct ProxyConfig {
     /// headers from the client are trusted. Otherwise they are overwritten.
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
+    /// Enable circuit breaker for upstream failure protection.
+    #[serde(default)]
+    pub circuit_breaker_enabled: bool,
+    /// Error threshold percentage for circuit breaker (0-100).
+    /// When this percentage of requests in the window fail, circuit opens.
+    #[serde(default = "default_circuit_breaker_error_threshold")]
+    pub circuit_breaker_error_threshold: u8,
+    /// Number of requests to track in circuit breaker sliding window.
+    #[serde(default = "default_circuit_breaker_window_size")]
+    pub circuit_breaker_window_size: usize,
+    /// Seconds to stay open before probing recovery.
+    #[serde(default = "default_circuit_breaker_recovery_timeout")]
+    pub circuit_breaker_recovery_timeout: u64,
+    /// Max probe requests in half-open state.
+    #[serde(default = "default_circuit_breaker_half_open_max")]
+    pub circuit_breaker_half_open_max: usize,
 }
 
 impl Default for ProxyConfig {
@@ -142,8 +211,15 @@ impl Default for ProxyConfig {
             upstream_h2_max_streams: default_upstream_h2_max_streams(),
             upstream_h2_ping_interval: String::new(),
             pool_size: default_pool_size(),
+            dns_cache_ttl: default_dns_cache_ttl(),
+            dns_negative_cache_ttl: default_dns_negative_cache_ttl(),
             max_connections: default_max_connections(),
             trusted_proxies: Vec::new(),
+            circuit_breaker_enabled: true,
+            circuit_breaker_error_threshold: default_circuit_breaker_error_threshold(),
+            circuit_breaker_window_size: default_circuit_breaker_window_size(),
+            circuit_breaker_recovery_timeout: default_circuit_breaker_recovery_timeout(),
+            circuit_breaker_half_open_max: default_circuit_breaker_half_open_max(),
         }
     }
 }
@@ -201,6 +277,33 @@ impl Default for LoggingConfig {
     }
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct TcpConfig {
+    /// Fabio-style TCP listener mode: "tcp", "tcp-dynamic", or empty/disabled.
+    #[serde(default)]
+    pub mode: String,
+    /// Fixed TCP listener address when mode="tcp".
+    #[serde(default)]
+    pub listen: String,
+    /// Poll interval for tcp-dynamic listener reconciliation.
+    #[serde(default = "default_tcp_refresh")]
+    pub refresh: String,
+}
+
+impl Default for TcpConfig {
+    fn default() -> Self {
+        Self {
+            mode: String::new(),
+            listen: String::new(),
+            refresh: default_tcp_refresh(),
+        }
+    }
+}
+
+fn default_tcp_refresh() -> String {
+    "5s".to_string()
+}
+
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -208,15 +311,70 @@ fn default_log_format() -> String {
     "json".to_string()
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct TlsConfig {
-    /// Path to TLS certificate (PEM)
+    /// TLS source: "file" or "consul_kv". Empty keeps backwards-compatible auto-detection.
+    #[serde(default)]
+    pub source: String,
+    /// Path to TLS certificate (PEM). Used when source=file.
+    #[serde(default)]
     pub cert_path: String,
-    /// Path to TLS private key (PEM)
+    /// Path to TLS private key (PEM). Used when source=file.
+    #[serde(default)]
     pub key_path: String,
     /// TLS listen address (e.g. ":9443"). Empty = auto-derive from HTTP port +1
     #[serde(default)]
     pub listen: String,
+    /// Consul KV prefix for Fabio-compatible bundled PEM certificates.
+    /// Example: "/fabio/cert" with values like "/fabio/cert/example.com.pem".
+    #[serde(default = "default_tls_consul_cert_prefix")]
+    pub consul_cert_prefix: String,
+    /// If true, only exact/wildcard SNI matches are served. If false, fallback to
+    /// the first certificate in deterministic order when there is no match.
+    #[serde(default)]
+    pub strict_sni: bool,
+    /// If true in consul_kv mode, startup fails unless the initial TLS snapshot
+    /// yields at least one active certificate.
+    #[serde(default)]
+    pub require_initial_snapshot: bool,
+    /// Downstream client certificate auth mode: "", "optional", or "required".
+    #[serde(default)]
+    pub client_auth: String,
+    /// Client CA source: "file" or "consul_kv" when client_auth is enabled.
+    #[serde(default)]
+    pub client_ca_source: String,
+    /// File or directory path containing trusted client CA PEM blocks.
+    #[serde(default)]
+    pub client_ca_path: String,
+    /// Consul KV prefix containing trusted client CA PEM bundles.
+    #[serde(default)]
+    pub client_ca_consul_prefix: String,
+    /// Fabio-compatible CA upgrade CN for self-signed/non-CA client auth certs.
+    #[serde(default)]
+    pub client_ca_upgrade_cn: String,
+}
+
+fn default_tls_consul_cert_prefix() -> String {
+    "/fabio/cert".to_string()
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            source: String::new(),
+            cert_path: String::new(),
+            key_path: String::new(),
+            listen: String::new(),
+            consul_cert_prefix: default_tls_consul_cert_prefix(),
+            strict_sni: false,
+            require_initial_snapshot: false,
+            client_auth: String::new(),
+            client_ca_source: String::new(),
+            client_ca_path: String::new(),
+            client_ca_consul_prefix: String::new(),
+            client_ca_upgrade_cn: String::new(),
+        }
+    }
 }
 
 impl Config {
@@ -297,5 +455,23 @@ mod tests {
         assert!(!proxy.enable_h2c);
         assert_eq!(proxy.upstream_h2_max_streams, 128);
         assert!(proxy.upstream_h2_ping_interval.is_empty());
+    }
+
+    #[test]
+    fn tls_config_defaults_require_initial_snapshot_to_false() {
+        let tls = TlsConfig::default();
+        assert!(!tls.require_initial_snapshot);
+        assert!(tls.client_auth.is_empty());
+        assert!(tls.client_ca_source.is_empty());
+        assert!(tls.client_ca_path.is_empty());
+        assert!(tls.client_ca_consul_prefix.is_empty());
+    }
+
+    #[test]
+    fn tcp_config_defaults_to_disabled_with_fabio_refresh() {
+        let tcp = TcpConfig::default();
+        assert!(tcp.mode.is_empty());
+        assert!(tcp.listen.is_empty());
+        assert_eq!(tcp.refresh, "5s");
     }
 }

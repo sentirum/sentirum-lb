@@ -5,7 +5,7 @@ use crate::config::ConsulConfig as AppConsulConfig;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::{Client, Url};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 /// Consul client configuration
@@ -27,6 +27,12 @@ pub struct ConsulConfig {
     pub require_consistent: bool,
     /// Maximum duration for blocking queries when index is provided
     pub query_wait: String,
+    /// Only discover routes for these service names (empty = all)
+    pub service_whitelist: Vec<String>,
+    /// Never discover routes for these service names
+    pub service_blacklist: Vec<String>,
+    /// Enable graceful shutdown
+    pub graceful_shutdown: bool,
 }
 
 impl std::fmt::Debug for ConsulConfig {
@@ -40,6 +46,9 @@ impl std::fmt::Debug for ConsulConfig {
             .field("allow_stale", &self.allow_stale)
             .field("require_consistent", &self.require_consistent)
             .field("query_wait", &self.query_wait)
+            .field("service_whitelist", &self.service_whitelist)
+            .field("service_blacklist", &self.service_blacklist)
+            .field("graceful_shutdown", &self.graceful_shutdown)
             .finish()
     }
 }
@@ -63,6 +72,9 @@ impl From<&AppConsulConfig> for ConsulConfig {
             } else {
                 cfg.poll_interval.clone()
             },
+            service_whitelist: cfg.service_whitelist.clone(),
+            service_blacklist: cfg.service_blacklist.clone(),
+            graceful_shutdown: cfg.graceful_shutdown,
         }
     }
 }
@@ -78,7 +90,22 @@ impl Default for ConsulConfig {
             allow_stale: true,
             require_consistent: false,
             query_wait: "5m".to_string(),
+            service_whitelist: Vec::new(),
+            service_blacklist: Vec::new(),
+            graceful_shutdown: true,
         }
+    }
+}
+
+impl ConsulConfig {
+    pub fn with_consistent_reads(mut self) -> Self {
+        self.allow_stale = false;
+        self.require_consistent = true;
+        self
+    }
+
+    pub fn for_tls_cert_watch(cfg: &AppConsulConfig) -> Self {
+        Self::from(cfg).with_consistent_reads()
     }
 }
 
@@ -88,6 +115,13 @@ pub struct ConsulClient {
     client: Client,
     config: ConsulConfig,
     base_url: String,
+}
+
+/// A base64-decoded Consul KV entry.
+#[derive(Debug, Clone)]
+pub struct DecodedKvPair {
+    pub key: String,
+    pub value: Vec<u8>,
 }
 
 impl ConsulClient {
@@ -190,13 +224,13 @@ impl ConsulClient {
         Ok(dc.to_string())
     }
 
-    /// Watch Consul KV for route configuration changes (blocking query)
-    /// Returns (value, index) on change
-    pub async fn watch_kv(
+    /// Watch Consul KV for raw entry changes (blocking query)
+    /// Returns (decoded entries, index) on change.
+    pub async fn watch_kv_pairs(
         &self,
         path: &str,
         index: u64,
-    ) -> Result<(Option<String>, u64), ConsulError> {
+    ) -> Result<(Vec<DecodedKvPair>, u64), ConsulError> {
         let url = self.kv_watch_url(path, index)?;
         let mut request = self.client.get(url);
 
@@ -206,7 +240,6 @@ impl ConsulClient {
 
         let response = request.send().await?;
 
-        // Check for Consul index in response headers
         let new_index: u64 = response
             .headers()
             .get("X-Consul-Index")
@@ -222,13 +255,8 @@ impl ConsulClient {
         }
 
         let kv_pairs: Vec<KVPair> = response.json().await?;
+        let mut decoded_pairs = Vec::with_capacity(kv_pairs.len());
 
-        if kv_pairs.is_empty() {
-            return Ok((None, new_index));
-        }
-
-        // Combine all KV values with key separators (like Fabio)
-        let mut parts = Vec::new();
         for kv in kv_pairs {
             let raw_value = kv.Value.unwrap_or_default();
             if raw_value.trim().is_empty() {
@@ -242,16 +270,41 @@ impl ConsulClient {
                     continue;
                 }
             };
-            let decoded_text = match String::from_utf8(decoded) {
+
+            decoded_pairs.push(DecodedKvPair {
+                key: kv.Key,
+                value: decoded,
+            });
+        }
+
+        Ok((decoded_pairs, new_index))
+    }
+
+    /// Watch Consul KV for route configuration changes (blocking query)
+    /// Returns (value, index) on change
+    pub async fn watch_kv(
+        &self,
+        path: &str,
+        index: u64,
+    ) -> Result<(Option<String>, u64), ConsulError> {
+        let (kv_pairs, new_index) = self.watch_kv_pairs(path, index).await?;
+
+        if kv_pairs.is_empty() {
+            return Ok((None, new_index));
+        }
+
+        let mut parts = Vec::new();
+        for kv in kv_pairs {
+            let decoded_text = match String::from_utf8(kv.value) {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!(key = %kv.Key, error = %e, "Failed to UTF-8 decode KV value; skipping");
+                    tracing::warn!(key = %kv.key, error = %e, "Failed to UTF-8 decode KV value; skipping");
                     continue;
                 }
             };
             let trimmed = decoded_text.trim();
             if !trimmed.is_empty() {
-                parts.push(format!("# --- {}\n{}", kv.Key, trimmed));
+                parts.push(format!("# --- {}\n{}", kv.key, trimmed));
             }
         }
 
@@ -262,6 +315,29 @@ impl ConsulClient {
         };
 
         Ok((combined, new_index))
+    }
+
+    /// Watch Consul KV and return a Fabio-compatible basename -> raw PEM map.
+    pub async fn watch_kv_basenames(
+        &self,
+        path: &str,
+        index: u64,
+    ) -> Result<(BTreeMap<String, Vec<u8>>, u64), ConsulError> {
+        let (pairs, new_index) = self.watch_kv_pairs(path, index).await?;
+        let mut entries = BTreeMap::new();
+
+        for pair in pairs {
+            let basename = pair
+                .key
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(pair.key.as_str())
+                .to_string();
+            entries.insert(basename, pair.value);
+        }
+
+        Ok((entries, new_index))
     }
 
     /// Get health checks for all services
@@ -434,10 +510,8 @@ mod tests {
     }
 
     fn make_consistent_client() -> ConsulClient {
-        let mut config = ConsulConfig::default();
-        config.allow_stale = false;
-        config.require_consistent = true;
-        ConsulClient::new(config).expect("client should build")
+        ConsulClient::new(ConsulConfig::default().with_consistent_reads())
+            .expect("client should build")
     }
 
     #[test]
@@ -498,5 +572,26 @@ mod tests {
         assert!(query.contains("keys=true"));
         assert!(!query.contains("stale="));
         assert!(query.contains("consistent=true"));
+    }
+
+    #[test]
+    fn tls_cert_watch_config_forces_consistent_reads() {
+        let app = AppConsulConfig {
+            service_whitelist: Vec::new(),
+            service_blacklist: Vec::new(),
+            graceful_shutdown: true,
+            address: "127.0.0.1:8500".to_string(),
+            scheme: "http".to_string(),
+            token: String::new(),
+            kv_prefix: "/sentirum-lb/routes".to_string(),
+            tag_prefix: "urlprefix-".to_string(),
+            poll_interval: "0s".to_string(),
+            service_discovery: true,
+            kv_watching: true,
+        };
+
+        let config = ConsulConfig::for_tls_cert_watch(&app);
+        assert!(!config.allow_stale);
+        assert!(config.require_consistent);
     }
 }

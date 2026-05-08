@@ -35,27 +35,58 @@ impl ServiceMonitor {
         let mut last_index: u64 = 0;
         let tag_prefix = self.config.tag_prefix.clone();
         let mut backoff_secs: u64 = 1;
+        let mut pending_checks: Option<(Vec<HealthCheck>, u64)> = None;
+        let metrics = crate::metrics::prometheus::global();
+        metrics.set_consul_watcher_backoff_seconds("services", 0);
+        metrics.set_consul_watcher_last_index("services", 0);
 
         loop {
-            match self.client.get_health_checks(last_index).await {
-                Ok((checks, new_index)) => {
-                    backoff_secs = 1;
-                    if new_index != last_index || !checks.is_empty() {
-                        last_index = new_index;
-                        let route_defs = self.process_checks(&checks, &tag_prefix).await;
-                        if updates
-                            .send(RouteUpdate::Services(route_defs))
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!("Consul watcher: channel closed, stopping");
-                            break;
-                        }
+            let (checks, new_index) = if let Some(snapshot) = pending_checks.take() {
+                snapshot
+            } else {
+                match self.client.get_health_checks(last_index).await {
+                    Ok((checks, new_index)) => {
+                        metrics.set_consul_watcher_last_index("services", new_index);
+                        (checks, new_index)
+                    }
+                    Err(e) => {
+                        metrics.record_consul_watcher_error("services");
+                        metrics.set_consul_watcher_backoff_seconds("services", backoff_secs);
+                        tracing::warn!(backoff_secs, error = %e, "Consul health check error; retrying");
+                        let _ = updates.send(RouteUpdate::Error(e.to_string())).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                        backoff_secs = (backoff_secs * 2).min(60);
+                        continue;
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(backoff_secs, error = %e, "Consul health check error; retrying");
-                    let _ = updates.send(RouteUpdate::Error(e.to_string())).await;
+            };
+
+            if new_index == last_index && checks.is_empty() {
+                backoff_secs = 1;
+                metrics.set_consul_watcher_backoff_seconds("services", 0);
+                continue;
+            }
+
+            match self.process_checks(&checks, &tag_prefix).await {
+                Ok(route_defs) => {
+                    backoff_secs = 1;
+                    metrics.set_consul_watcher_backoff_seconds("services", 0);
+                    last_index = new_index;
+                    if updates
+                        .send(RouteUpdate::Services(route_defs))
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!("Consul watcher: channel closed, stopping");
+                        break;
+                    }
+                }
+                Err(error) => {
+                    metrics.record_consul_watcher_error("services");
+                    metrics.set_consul_watcher_backoff_seconds("services", backoff_secs);
+                    tracing::warn!(backoff_secs, error = %error, "Consul service route rebuild failed; preserving previous service routes");
+                    let _ = updates.send(RouteUpdate::Error(error)).await;
+                    pending_checks = Some((checks, new_index));
                     tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
                     backoff_secs = (backoff_secs * 2).min(60);
                 }
@@ -64,7 +95,11 @@ impl ServiceMonitor {
     }
 
     /// Process health checks to determine passing services
-    async fn process_checks(&self, checks: &[HealthCheck], tag_prefix: &str) -> Vec<RouteDef> {
+    async fn process_checks(
+        &self,
+        checks: &[HealthCheck],
+        tag_prefix: &str,
+    ) -> Result<Vec<RouteDef>, String> {
         let relevant_checks: Vec<&HealthCheck> = checks
             .iter()
             .filter(|c| {
@@ -83,8 +118,11 @@ impl ServiceMonitor {
 
         let passing_services = self.passing_service_ids(&relevant_checks);
 
+        // Apply service whitelist/blacklist filter
+        let passing_services = self.filter_services(passing_services);
+
         if passing_services.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         // Concurrent catalog queries (like Fabio's goroutine approach)
@@ -101,6 +139,7 @@ impl ServiceMonitor {
         let catalog_results = futures::future::join_all(fetch_tasks).await;
 
         let mut config = Vec::new();
+        let mut failures = Vec::new();
         for (idx, result) in catalog_results.into_iter().enumerate() {
             let service_name = &service_names[idx];
             let service_ids = passing_services.get(service_name).unwrap();
@@ -135,18 +174,26 @@ impl ServiceMonitor {
                 }
                 Err(e) => {
                     tracing::warn!("Failed to get catalog service {}: {}", service_name, e);
+                    failures.push(format!("{service_name}: {e}"));
                 }
             }
         }
 
         // Sort by path (reverse) for most specific first
+        if !failures.is_empty() {
+            return Err(format!(
+                "catalog lookups failed for {}; preserving previous service routes",
+                failures.join(", ")
+            ));
+        }
+
         config.sort_by(|a, b| {
             let a_path = a.src_path();
             let b_path = b.src_path();
             b_path.cmp(a_path)
         });
 
-        config
+        Ok(config)
     }
 
     /// Get passing service IDs grouped by service name using Fabio-like health aggregation.
@@ -217,6 +264,29 @@ impl ServiceMonitor {
         }
 
         result
+    }
+
+    /// Apply whitelist/blacklist filters to service list
+    fn filter_services(
+        &self,
+        services: HashMap<String, Vec<String>>,
+    ) -> HashMap<String, Vec<String>> {
+        let whitelist = &self.config.service_whitelist;
+        let blacklist = &self.config.service_blacklist;
+
+        // If whitelist is non-empty, only include listed services
+        if !whitelist.is_empty() {
+            services
+                .into_iter()
+                .filter(|(name, _)| whitelist.iter().any(|w| w == name))
+                .collect()
+        } else {
+            // Otherwise, exclude blacklisted services
+            services
+                .into_iter()
+                .filter(|(name, _)| !blacklist.iter().any(|b| b == name))
+                .collect()
+        }
     }
 
     /// Parse a Fabio-style tag like "urlprefix-/api" -> route add.
@@ -306,11 +376,16 @@ impl KVWatcher {
         let mut last_index: u64 = 0;
         let kv_path = self.config.kv_prefix.clone();
         let mut backoff_secs: u64 = 1;
+        let metrics = crate::metrics::prometheus::global();
+        metrics.set_consul_watcher_backoff_seconds("kv", 0);
+        metrics.set_consul_watcher_last_index("kv", 0);
 
         loop {
             match self.client.watch_kv(&kv_path, last_index).await {
                 Ok((value, new_index)) => {
                     backoff_secs = 1;
+                    metrics.set_consul_watcher_backoff_seconds("kv", 0);
+                    metrics.set_consul_watcher_last_index("kv", new_index);
                     if new_index != last_index {
                         last_index = new_index;
                         let update = RouteUpdate::Manual(value.unwrap_or_default());
@@ -322,6 +397,8 @@ impl KVWatcher {
                     }
                 }
                 Err(e) => {
+                    metrics.record_consul_watcher_error("kv");
+                    metrics.set_consul_watcher_backoff_seconds("kv", backoff_secs);
                     tracing::warn!(backoff_secs, error = %e, "Consul KV error; retrying");
                     let _ = updates.send(RouteUpdate::Error(e.to_string())).await;
                     tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
@@ -395,6 +472,9 @@ impl ConsulWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Router, routing::get};
+    use http::StatusCode;
+    use tokio::net::TcpListener;
 
     fn check(
         node: &str,
@@ -542,5 +622,52 @@ mod tests {
 
         let passing = monitor.passing_service_ids(&refs);
         assert!(passing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_checks_preserves_previous_routes_when_catalog_lookup_fails() {
+        let app = Router::new().route(
+            "/v1/catalog/service/{service}",
+            get(
+                |axum::extract::Path(service): axum::extract::Path<String>| async move {
+                    if service == "web" {
+                        (StatusCode::INTERNAL_SERVER_ERROR, "boom")
+                    } else {
+                        (StatusCode::OK, "[]")
+                    }
+                },
+            ),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let monitor = ServiceMonitor {
+            client: Arc::new(
+                ConsulClient::new(ConsulConfig {
+                    address: addr.to_string(),
+                    ..ConsulConfig::default()
+                })
+                .unwrap(),
+            ),
+            config: ConsulConfig::default(),
+        };
+
+        let checks = vec![check(
+            "node-1",
+            "service:web:1",
+            HEALTH_STATUS_PASSING,
+            "web",
+            "svc-1",
+            &["urlprefix-/"],
+        )];
+
+        let error = monitor
+            .process_checks(&checks, "urlprefix-")
+            .await
+            .expect_err("catalog failure should preserve previous routes");
+        assert!(error.contains("web"));
     }
 }
