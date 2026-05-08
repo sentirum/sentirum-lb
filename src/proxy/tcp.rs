@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::route::picker::{Picker, create_picker};
+use crate::route::picker::create_picker;
 use crate::route::registry::ManagedRouteTable;
 use crate::route::table::Table;
 use crate::route::target::Target;
@@ -372,7 +372,16 @@ mod tests {
                 admin_token: String::new(),
                 workers: 0,
             },
-            consul: ConsulConfig::default(),
+            consul: ConsulConfig {
+                address: "127.0.0.1:8500".to_string(),
+                scheme: "http".to_string(),
+                token: String::new(),
+                kv_prefix: "/sentirum-lb/routes".to_string(),
+                tag_prefix: "urlprefix-".to_string(),
+                poll_interval: "0s".to_string(),
+                service_discovery: true,
+                kv_watching: true,
+            },
             proxy: ProxyConfig::default(),
             logging: LoggingConfig::default(),
             tls: TlsConfig::default(),
