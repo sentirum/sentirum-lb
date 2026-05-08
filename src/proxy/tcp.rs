@@ -58,16 +58,18 @@ pub fn resolve_tcp_mode(config: &Config) -> Result<TcpMode, String> {
 pub struct TcpBackgroundService {
     pub route_table: Arc<ManagedRouteTable>,
     pub config: Arc<Config>,
+    pub mode: TcpMode,
+    pub https_fallback_addr: Option<String>,
 }
 
 #[async_trait]
 impl BackgroundService for TcpBackgroundService {
     async fn start(&self, mut shutdown: pingora::server::ShutdownWatch) {
-        match resolve_tcp_mode(&self.config) {
-            Ok(TcpMode::Disabled) => {
+        match self.mode.clone() {
+            TcpMode::Disabled => {
                 tracing::info!("TCP proxy mode disabled, skipping TCP background service");
             }
-            Ok(TcpMode::Tcp { listen }) => {
+            TcpMode::Tcp { listen } => {
                 let port = match parse_listener_port(&listen) {
                     Some(port) => port,
                     None => {
@@ -86,7 +88,7 @@ impl BackgroundService for TcpBackgroundService {
                 )
                 .await;
             }
-            Ok(TcpMode::TcpSni { listen }) => {
+            TcpMode::TcpSni { listen } => {
                 let port = match parse_listener_port(&listen) {
                     Some(port) => port,
                     None => {
@@ -105,7 +107,37 @@ impl BackgroundService for TcpBackgroundService {
                 )
                 .await;
             }
-            Ok(TcpMode::TcpDynamic { refresh }) => {
+            TcpMode::HttpsTcpSni => {
+                let https_fallback_addr = match self.https_fallback_addr.clone() {
+                    Some(addr) => addr,
+                    None => {
+                        tracing::error!("HTTPS+TCP+SNI mode requires an internal HTTPS fallback listener");
+                        return;
+                    }
+                };
+                let public_listen = crate::proxy::tls::tls_listen_addr(
+                    &self.config.server.listen,
+                    &self.config.tls.listen,
+                );
+                let port = match parse_listener_port(&public_listen) {
+                    Some(port) => port,
+                    None => {
+                        tracing::error!(listen = %public_listen, "Invalid TLS listen address for https+tcp+sni mode");
+                        return;
+                    }
+                };
+                tracing::info!(addr = %public_listen, fallback = %https_fallback_addr, "TCP proxy listening (HTTPS+SNI fallthrough)");
+                run_tcp_listener(
+                    public_listen,
+                    port,
+                    TcpListenerMode::HttpsFallback(https_fallback_addr),
+                    self.route_table.clone(),
+                    self.config.clone(),
+                    &mut shutdown,
+                )
+                .await;
+            }
+            TcpMode::TcpDynamic { refresh } => {
                 tracing::info!(refresh_ms = refresh.as_millis(), "TCP proxy listening (dynamic)");
                 run_dynamic_tcp_manager(
                     refresh,
@@ -114,9 +146,6 @@ impl BackgroundService for TcpBackgroundService {
                     &mut shutdown,
                 )
                 .await;
-            }
-            Err(error) => {
-                tracing::error!(%error, "Invalid TCP configuration");
             }
         }
     }
@@ -211,6 +240,7 @@ async fn reconcile_dynamic_listeners(
 enum TcpListenerMode {
     Plain,
     Sni,
+    HttpsFallback(String),
 }
 
 async fn run_tcp_listener(
