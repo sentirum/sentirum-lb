@@ -128,7 +128,6 @@ impl Drop for TestRuntime {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "end-to-end protocol smoke test"]
 async fn protocol_end_to_end_smoke() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
