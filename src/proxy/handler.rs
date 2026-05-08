@@ -13,8 +13,9 @@ use pingora::tls::{hash::MessageDigest, nid::Nid};
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 use std::borrow::Cow;
+use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 /// Parsed CIDR for trusted proxy matching
 #[derive(Debug, Clone)]
@@ -856,7 +857,8 @@ fn append_forwarded_headers(
 }
 
 #[derive(Debug, Clone, Default)]
-struct ClientCertIdentity {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ClientCertIdentity {
     verified: bool,
     serial: Option<String>,
     organization: Option<String>,
@@ -864,6 +866,67 @@ struct ClientCertIdentity {
     common_name: Option<String>,
     subject: Option<String>,
     sha256: Option<String>,
+}
+
+const CLIENT_CERT_IDENTITY_CACHE_CAPACITY: usize = 4096;
+
+static CLIENT_CERT_IDENTITY_CACHE: LazyLock<Mutex<ClientCertIdentityCache>> =
+    LazyLock::new(|| Mutex::new(ClientCertIdentityCache::default()));
+
+#[derive(Default)]
+struct ClientCertIdentityCache {
+    entries: HashMap<String, ClientCertIdentity>,
+    order: VecDeque<String>,
+}
+
+impl ClientCertIdentityCache {
+    fn insert(&mut self, digest_hex: String, identity: ClientCertIdentity) {
+        if self.entries.insert(digest_hex.clone(), identity).is_none() {
+            self.order.push_back(digest_hex.clone());
+        }
+        while self.entries.len() > CLIENT_CERT_IDENTITY_CACHE_CAPACITY {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if oldest != digest_hex {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    fn get(&self, digest_hex: &str) -> Option<ClientCertIdentity> {
+        self.entries.get(digest_hex).cloned()
+    }
+}
+
+pub(crate) fn remember_verified_client_certificate(cert: &pingora::tls::x509::X509Ref) {
+    let Ok(digest_bytes) = cert.digest(MessageDigest::sha256()) else {
+        return;
+    };
+    let digest_hex = hex_lower(digest_bytes.as_ref());
+    let identity = ClientCertIdentity {
+        verified: true,
+        serial: cert.serial_number().to_bn().ok().and_then(|bn| bn.to_hex_str().ok()).map(|v| v.to_string()),
+        organization: first_subject_value(cert, Nid::ORGANIZATIONNAME),
+        organizational_unit: first_subject_value(cert, Nid::ORGANIZATIONALUNITNAME),
+        common_name: first_subject_value(cert, Nid::COMMONNAME),
+        subject: Some(subject_string(cert)),
+        sha256: Some(digest_hex.clone()),
+    };
+    if let Ok(mut cache) = CLIENT_CERT_IDENTITY_CACHE.lock() {
+        cache.insert(digest_hex, identity);
+    }
+}
+
+fn cached_client_certificate_identity(cert_digest: &[u8]) -> Option<ClientCertIdentity> {
+    if cert_digest.is_empty() {
+        return None;
+    }
+    let digest_hex = hex_lower(cert_digest);
+    CLIENT_CERT_IDENTITY_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&digest_hex))
 }
 
 fn append_client_certificate_headers(
@@ -911,10 +974,21 @@ fn client_certificate_identity(session: &Session) -> Option<ClientCertIdentity> 
         sha256: (!digest.cert_digest.is_empty()).then(|| hex_lower(&digest.cert_digest)),
     };
 
+    if let Some(cached) = cached_client_certificate_identity(&digest.cert_digest) {
+        identity.serial = cached.serial.or(identity.serial);
+        identity.organization = cached.organization.or(identity.organization);
+        identity.organizational_unit = cached.organizational_unit;
+        identity.common_name = cached.common_name;
+        identity.subject = cached.subject;
+        identity.sha256 = cached.sha256.or(identity.sha256);
+        identity.verified = cached.verified || identity.verified;
+    }
+
     if let Some(stream) = session.stream()
         && let Some(ssl) = stream.get_ssl()
         && let Some(cert) = ssl.peer_certificate()
     {
+        remember_verified_client_certificate(&cert);
         identity.common_name = first_subject_value(&cert, Nid::COMMONNAME);
         identity.organization = first_subject_value(&cert, Nid::ORGANIZATIONNAME)
             .or(identity.organization);
@@ -931,7 +1005,7 @@ fn client_certificate_identity(session: &Session) -> Option<ClientCertIdentity> 
     Some(identity)
 }
 
-fn first_subject_value(cert: &pingora::tls::x509::X509, nid: Nid) -> Option<String> {
+fn first_subject_value(cert: &pingora::tls::x509::X509Ref, nid: Nid) -> Option<String> {
     cert.subject_name()
         .entries_by_nid(nid)
         .find_map(|entry| entry.data().as_utf8().ok().map(|value| value.to_string()))
@@ -1078,6 +1152,21 @@ fn try_acquire_upstream_slot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_remember_verified_client_certificate_caches_rich_identity() {
+        let cert = rcgen::generate_simple_self_signed(vec!["client.sentirum.test".into()]).unwrap();
+        let cert_pem = cert.cert.pem();
+        let parsed = pingora::tls::x509::X509::from_pem(cert_pem.as_bytes()).unwrap();
+
+        remember_verified_client_certificate(&parsed);
+
+        let digest = parsed.digest(MessageDigest::sha256()).unwrap();
+        let cached = cached_client_certificate_identity(digest.as_ref()).unwrap();
+        assert_eq!(cached.common_name.as_deref(), Some("client.sentirum.test"));
+        assert_eq!(cached.sha256.as_deref(), Some(&hex_lower(digest.as_ref())));
+        assert!(cached.subject.as_deref().is_some_and(|v| v.contains("CN=client.sentirum.test")));
+    }
 
     #[test]
     fn test_host_header_parsing() {
