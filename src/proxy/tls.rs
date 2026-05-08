@@ -1325,6 +1325,7 @@ mod tests {
             consul_cert_prefix: "/fabio/cert".to_string(),
             strict_sni: false,
             require_initial_snapshot: false,
+            ..crate::config::TlsConfig::default()
         };
         assert!(matches!(
             TlsMode::resolve(&config).unwrap(),
@@ -1342,6 +1343,7 @@ mod tests {
             consul_cert_prefix: "/fabio/cert".to_string(),
             strict_sni: true,
             require_initial_snapshot: true,
+            ..crate::config::TlsConfig::default()
         };
         match TlsMode::resolve(&config).unwrap() {
             Some(TlsMode::ConsulKv(consul)) => {
@@ -1370,6 +1372,7 @@ mod tests {
             consul_cert_prefix: "/fabio/cert".to_string(),
             strict_sni: false,
             require_initial_snapshot: false,
+            ..crate::config::TlsConfig::default()
         };
         let result: Option<TlsCertConfig> = (&config).into();
         assert!(result.is_some());
