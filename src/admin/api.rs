@@ -324,6 +324,7 @@ mod tests {
             config: make_test_config(),
             route_table: Arc::new(ManagedRouteTable::new()),
             tls_store: None,
+            client_ca_store: None,
         }
     }
 
