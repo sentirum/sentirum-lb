@@ -5,8 +5,10 @@
 //! - `GET /admin/routes` — Route table inspection
 //! - `GET /admin/metrics` — Prometheus metrics
 //! - `GET /admin/config` — Config inspection
+//! - `GET /admin/certs` — Runtime TLS certificate status
 
 use crate::config::Config;
+use crate::proxy::tls::{DynamicCertStore, DynamicClientCaStore};
 use crate::route::registry::ManagedRouteTable;
 use axum::Router;
 use axum::extract::State;
@@ -21,6 +23,8 @@ use std::sync::Arc;
 pub struct AdminState {
     pub config: Arc<Config>,
     pub route_table: Arc<ManagedRouteTable>,
+    pub tls_store: Option<Arc<DynamicCertStore>>,
+    pub client_ca_store: Option<Arc<DynamicClientCaStore>>,
 }
 
 /// Health check response
@@ -37,7 +41,8 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/health", get(health_handler))
         .route("/admin/routes", get(routes_handler))
         .route("/admin/metrics", get(metrics_handler))
-        .route("/admin/config", get(config_handler));
+        .route("/admin/config", get(config_handler))
+        .route("/admin/certs", get(certs_handler));
 
     if state.config.server.admin_token.is_empty() {
         protected.with_state(state)
@@ -110,7 +115,51 @@ async fn metrics_handler() -> impl axum::response::IntoResponse {
     )
 }
 
+async fn certs_handler(State(state): State<AdminState>) -> axum::Json<serde_json::Value> {
+    let tls_source = match crate::proxy::tls::TlsMode::resolve(&state.config.tls) {
+        Ok(Some(crate::proxy::tls::TlsMode::File(_))) => "file",
+        Ok(Some(crate::proxy::tls::TlsMode::ConsulKv(_))) => "consul_kv",
+        Ok(None) => "disabled",
+        Err(_) => "invalid",
+    };
+
+    let runtime = state.tls_store.as_ref().map(|store| store.status());
+    let client_ca_runtime = state.client_ca_store.as_ref().map(|store| store.status());
+
+    axum::Json(serde_json::json!({
+        "source": tls_source,
+        "strict_sni": state.config.tls.strict_sni,
+        "require_initial_snapshot": state.config.tls.require_initial_snapshot,
+        "consul_cert_prefix": state.config.tls.consul_cert_prefix,
+        "loaded_certificates": runtime.as_ref().map(|s| s.loaded_certificates.clone()).unwrap_or_default(),
+        "certificates": runtime.as_ref().map(|s| s.certificates.clone()).unwrap_or_default(),
+        "default_certificate": runtime.as_ref().and_then(|s| s.default_certificate.clone()),
+        "last_consul_index": runtime.as_ref().map(|s| s.last_consul_index).unwrap_or_default(),
+        "last_reload_unix": runtime.as_ref().and_then(|s| s.last_reload_unix),
+        "last_error": runtime.as_ref().and_then(|s| s.last_error.clone()),
+        "client_auth": {
+            "mode": state.config.tls.client_auth,
+            "ca_source": state.config.tls.client_ca_source,
+            "ca_path": state.config.tls.client_ca_path,
+            "ca_consul_prefix": state.config.tls.client_ca_consul_prefix,
+            "ca_upgrade_cn": state.config.tls.client_ca_upgrade_cn,
+            "loaded_entries": client_ca_runtime.as_ref().map(|s| s.loaded_entries.clone()).unwrap_or_default(),
+            "certificates": client_ca_runtime.as_ref().map(|s| s.certificates.clone()).unwrap_or_default(),
+            "last_consul_index": client_ca_runtime.as_ref().map(|s| s.last_consul_index).unwrap_or_default(),
+            "last_reload_unix": client_ca_runtime.as_ref().and_then(|s| s.last_reload_unix),
+            "last_error": client_ca_runtime.as_ref().and_then(|s| s.last_error.clone()),
+        }
+    }))
+}
+
 async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_json::Value> {
+    let tls_source = match crate::proxy::tls::TlsMode::resolve(&state.config.tls) {
+        Ok(Some(crate::proxy::tls::TlsMode::File(_))) => "file",
+        Ok(Some(crate::proxy::tls::TlsMode::ConsulKv(_))) => "consul_kv",
+        Ok(None) => "disabled",
+        Err(_) => "invalid",
+    };
+
     axum::Json(serde_json::json!({
         "server": {
             "listen": state.config.server.listen,
@@ -136,11 +185,35 @@ async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
             "pool_size": state.config.proxy.pool_size,
             "max_connections": state.config.proxy.max_connections,
         },
+        "tls": {
+            "source": tls_source,
+            "listen": state.config.tls.listen,
+            "strict_sni": state.config.tls.strict_sni,
+            "require_initial_snapshot": state.config.tls.require_initial_snapshot,
+            "cert_path": state.config.tls.cert_path,
+            "key_path": state.config.tls.key_path,
+            "consul_cert_prefix": state.config.tls.consul_cert_prefix,
+            "client_auth": state.config.tls.client_auth,
+            "client_ca_source": state.config.tls.client_ca_source,
+            "client_ca_path": state.config.tls.client_ca_path,
+            "client_ca_consul_prefix": state.config.tls.client_ca_consul_prefix,
+            "client_ca_upgrade_cn": state.config.tls.client_ca_upgrade_cn,
+        },
+        "tcp": {
+            "mode": state.config.tcp.mode,
+            "listen": state.config.tcp.listen,
+            "refresh": state.config.tcp.refresh,
+        },
     }))
 }
 
 /// Run the admin API server using axum
-pub async fn run_admin_server(config: Arc<Config>, route_table: Arc<ManagedRouteTable>) {
+pub async fn run_admin_server(
+    config: Arc<Config>,
+    route_table: Arc<ManagedRouteTable>,
+    tls_store: Option<Arc<DynamicCertStore>>,
+    client_ca_store: Option<Arc<DynamicClientCaStore>>,
+) {
     let addr = config.server.admin_listen.clone();
 
     if config.server.admin_token.is_empty() && !is_loopback_bind(&addr) {
@@ -152,6 +225,8 @@ pub async fn run_admin_server(config: Arc<Config>, route_table: Arc<ManagedRoute
     let state = AdminState {
         config,
         route_table,
+        tls_store,
+        client_ca_store,
     };
     let app = build_router(state);
 
@@ -170,6 +245,21 @@ pub async fn run_admin_server(config: Arc<Config>, route_table: Arc<ManagedRoute
     }
 }
 
+/// Constant-time comparison to prevent timing side-channel attacks on the admin token.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let equal_len = a.len() == b.len();
+    let max_len = a.len().max(b.len());
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    let mut result: u8 = 0;
+    for i in 0..max_len {
+        let a_byte = a_bytes.get(i).copied().unwrap_or(0);
+        let b_byte = b_bytes.get(i).copied().unwrap_or(0);
+        result |= a_byte ^ b_byte;
+    }
+    equal_len && result == 0
+}
+
 async fn admin_auth_middleware(
     State(state): State<AdminState>,
     headers: HeaderMap,
@@ -181,12 +271,12 @@ async fn admin_auth_middleware(
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .map(|value| value == expected)
+        .map(|value| constant_time_eq(value, expected))
         .unwrap_or(false)
         || headers
             .get("x-admin-token")
             .and_then(|value| value.to_str().ok())
-            .map(|value| value == expected)
+            .map(|value| constant_time_eq(value, expected))
             .unwrap_or(false);
 
     if authorized {
@@ -215,7 +305,7 @@ fn is_loopback_bind(addr: &str) -> bool {
 mod tests {
     use super::*;
     use crate::config::*;
-    use axum::body::Body;
+    use axum::body::{Body, to_bytes};
     use http::Request;
     use tower::ServiceExt; // for oneshot()
 
@@ -236,10 +326,14 @@ mod tests {
                 poll_interval: "0s".to_string(),
                 service_discovery: false,
                 kv_watching: false,
+                service_whitelist: Vec::new(),
+                service_blacklist: Vec::new(),
+                graceful_shutdown: true,
             },
             proxy: ProxyConfig::default(),
             logging: LoggingConfig::default(),
             tls: TlsConfig::default(),
+            tcp: TcpConfig::default(),
         })
     }
 
@@ -247,6 +341,8 @@ mod tests {
         AdminState {
             config: make_test_config(),
             route_table: Arc::new(ManagedRouteTable::new()),
+            tls_store: None,
+            client_ca_store: None,
         }
     }
 
@@ -312,6 +408,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_admin_certs() {
+        let state = make_test_state();
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/certs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.get("certificates").is_some());
     }
 
     #[tokio::test]

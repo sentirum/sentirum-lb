@@ -1,8 +1,8 @@
 use crate::route::definition::{RouteCmd, RouteDef};
-use crate::route::target::Target;
+use crate::route::target::{Target, TargetStatsRegistry};
 use arc_swap::ArcSwap;
 use glob::Pattern;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// A route maps a host + path prefix to one or more target backends.
@@ -182,16 +182,31 @@ impl Route {
 
 /// The routing table: maps host -> list of routes.
 /// Routes are sorted by path in reverse order (most specific first).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Table {
     /// host -> sorted routes
     routes: HashMap<String, Vec<Arc<Route>>>,
+    stats_registry: Option<Arc<TargetStatsRegistry>>,
+}
+
+impl Default for Table {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Table {
     pub fn new() -> Self {
         Self {
             routes: HashMap::new(),
+            stats_registry: None,
+        }
+    }
+
+    pub fn with_stats_registry(stats_registry: Arc<TargetStatsRegistry>) -> Self {
+        Self {
+            routes: HashMap::new(),
+            stats_registry: Some(stats_registry),
         }
     }
 
@@ -268,7 +283,8 @@ impl Table {
             parsed_port: None,
             parsed_tls: false,
             parsed_protocol: crate::route::target::UpstreamProtocol::Http,
-            active_connections: std::sync::atomic::AtomicU64::new(0),
+            active_connections: self.active_connections_for(&def.dst),
+            health_tracker: crate::route::target::TargetHealthTracker::new(),
         };
         target.pre_parse();
 
@@ -427,6 +443,24 @@ impl Table {
         table
     }
 
+    pub fn from_definitions_with_stats(
+        defs: &[RouteDef],
+        stats_registry: Arc<TargetStatsRegistry>,
+    ) -> Self {
+        let mut table = Table::with_stats_registry(stats_registry);
+        for def in defs {
+            table.apply(def);
+        }
+        table
+    }
+
+    fn active_connections_for(&self, key: &str) -> Arc<std::sync::atomic::AtomicU64> {
+        self.stats_registry
+            .as_ref()
+            .map(|registry| registry.active_connections_for(key))
+            .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicU64::new(0)))
+    }
+
     /// Get the number of routes in the table.
     pub fn route_count(&self) -> usize {
         self.routes.values().map(|r| r.len()).sum()
@@ -439,6 +473,69 @@ impl Table {
             .flat_map(|r| r.iter())
             .map(|r| r.target_count())
             .sum()
+    }
+
+    pub fn lookup_tcp_route(&self, listen_port: u16) -> Option<&Arc<Route>> {
+        let catch_all = format!(":{listen_port}");
+        if let Some(routes) = self.routes.get(&catch_all)
+            && let Some(route) = routes.iter().find(|route| route_is_tcp(route))
+        {
+            return Some(route);
+        }
+
+        let suffix = format!(":{listen_port}");
+        let mut matched: Option<&Arc<Route>> = None;
+        for (host, routes) in &self.routes {
+            if !host.ends_with(&suffix) {
+                continue;
+            }
+            for route in routes {
+                if !route_is_tcp(route) {
+                    continue;
+                }
+                if matched.is_some() {
+                    tracing::warn!(
+                        listen_port,
+                        "Multiple TCP routes found for port; using first match"
+                    );
+                    break;
+                }
+                matched = Some(route);
+            }
+        }
+
+        matched
+    }
+
+    pub fn lookup_tcp_route_for_local_addr(&self, local_addr: &str) -> Option<&Arc<Route>> {
+        if let Some(routes) = self.routes.get(local_addr)
+            && let Some(route) = routes.iter().find(|route| route_is_tcp(route))
+        {
+            return Some(route);
+        }
+
+        parse_listener_port(local_addr).and_then(|port| self.lookup_tcp_route(port))
+    }
+
+    pub fn lookup_tcp_sni_route(&self, host: &str) -> Option<&Arc<Route>> {
+        self.routes
+            .get(&host.to_ascii_lowercase())?
+            .iter()
+            .find(|route| route.path == "/" && route_is_tcp(route))
+    }
+
+    pub fn tcp_listener_ports(&self) -> Vec<u16> {
+        let mut ports = BTreeSet::new();
+        for (host, routes) in &self.routes {
+            if !routes.iter().all(route_is_tcp) {
+                continue;
+            }
+
+            if let Some(port) = parse_listener_port(host) {
+                ports.insert(port);
+            }
+        }
+        ports.into_iter().collect()
     }
 
     /// Get all hosts in the table.
@@ -460,12 +557,15 @@ impl Table {
 /// Thread-safe routing table using ArcSwap for lock-free reads.
 pub struct RouteTable {
     inner: ArcSwap<Table>,
+    stats_registry: Arc<TargetStatsRegistry>,
 }
 
 impl RouteTable {
     pub fn new() -> Self {
+        let stats_registry = Arc::new(TargetStatsRegistry::new());
         Self {
-            inner: ArcSwap::from(Arc::new(Table::new())),
+            inner: ArcSwap::from(Arc::new(Table::with_stats_registry(stats_registry.clone()))),
+            stats_registry,
         }
     }
 
@@ -492,9 +592,21 @@ impl RouteTable {
 
     /// Apply definitions and swap the table.
     pub fn apply_and_swap(&self, defs: &[RouteDef]) {
-        let table = Table::from_definitions(defs);
+        let table = Table::from_definitions_with_stats(defs, self.stats_registry.clone());
         self.swap(table);
     }
+
+    pub fn stats_registry(&self) -> Arc<TargetStatsRegistry> {
+        self.stats_registry.clone()
+    }
+}
+
+fn route_is_tcp(route: &Arc<Route>) -> bool {
+    !route.targets.is_empty() && route.targets.iter().all(|target| target.is_tcp())
+}
+
+fn parse_listener_port(host: &str) -> Option<u16> {
+    host.rsplit(':').next()?.parse().ok()
 }
 
 fn starts_with_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
@@ -519,7 +631,7 @@ mod tests {
             url: url.to_string(),
             fixed_weight,
             weight,
-            active_connections: std::sync::atomic::AtomicU64::new(0),
+            active_connections: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             ..Default::default()
         };
         t.pre_parse();
