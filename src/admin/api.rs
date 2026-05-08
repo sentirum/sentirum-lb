@@ -922,6 +922,7 @@ mod tests {
                 listen: ":9999".to_string(),
                 admin_listen: "127.0.0.1:9998".to_string(),
                 admin_token: String::new(),
+                admin_users: vec![],
                 workers: 0,
             },
             consul: ConsulConfig {
