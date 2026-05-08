@@ -155,6 +155,66 @@ mod tests {
     }
 
     #[test]
+    fn round_robin_with_weighted_targets() {
+        use crate::route::table::Route;
+
+        // Simulate production: 2 targets with equal weights → 1000 w_targets slots
+        let mut route = Route::new("host.com".to_string(), "/".to_string());
+        route.add_target(Target::new("svc-a".into(), "http://10.0.0.1:80/".into()));
+        route.add_target(Target::new("svc-b".into(), "http://10.0.0.2:80/".into()));
+        route.compute_weights();
+
+        assert_eq!(route.targets.len(), 2);
+        assert_eq!(route.w_targets.len(), 1000);
+
+        let counter = AtomicU64::new(0);
+        let picker = RoundRobinPicker;
+
+        let mut counts = std::collections::HashMap::new();
+        for _ in 0..200 {
+            let picked = picker.pick(&route.targets, &route.w_targets, &counter).unwrap();
+            *counts.entry(picked.url.clone()).or_insert(0) += 1;
+        }
+
+        // Both targets must receive traffic (50% each ±10%)
+        assert_eq!(counts.len(), 2, "Round-robin must distribute across both targets, got: {:?}", counts);
+        for (url, count) in &counts {
+            assert!(*count >= 80 && *count <= 120,
+                "Target {} should get ~100 picks, got {}", url, count);
+        }
+    }
+
+    #[test]
+    fn round_robin_with_unequal_weights() {
+        use crate::route::table::Route;
+
+        let mut route = Route::new("host.com".to_string(), "/".to_string());
+        let mut t1 = Target::new("heavy".into(), "http://10.0.0.1:80/".into());
+        t1.fixed_weight = 0.9;
+        let mut t2 = Target::new("light".into(), "http://10.0.0.2:80/".into());
+        t2.fixed_weight = 0.1;
+        route.add_target(t1);
+        route.add_target(t2);
+        route.compute_weights();
+
+        let counter = AtomicU64::new(0);
+        let picker = RoundRobinPicker;
+
+        let mut counts = std::collections::HashMap::new();
+        for _ in 0..1000 {
+            let picked = picker.pick(&route.targets, &route.w_targets, &counter).unwrap();
+            *counts.entry(picked.url.clone()).or_insert(0) += 1;
+        }
+
+        // Both targets must receive traffic, heavy ~900, light ~100
+        assert_eq!(counts.len(), 2, "Both targets must get traffic: {:?}", counts);
+        let heavy = counts.get("http://10.0.0.1:80/").unwrap();
+        let light = counts.get("http://10.0.0.2:80/").unwrap();
+        assert!(*heavy >= 850, "heavy target should get ~900 picks, got {}", heavy);
+        assert!(*light >= 50, "light target should get ~100 picks, got {}", light);
+    }
+
+    #[test]
     fn round_robin_three_targets() {
         let targets = make_targets(3);
         let w_targets = targets.clone();
