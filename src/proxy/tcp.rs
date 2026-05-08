@@ -299,6 +299,7 @@ async fn run_tcp_listener_with_watch(
 
                 let route_table = route_table.clone();
                 let config = config.clone();
+                let mode = mode.clone();
                 tokio::spawn(async move {
                     let result = match mode {
                         TcpListenerMode::Plain => {
@@ -370,7 +371,7 @@ async fn handle_tcp_sni_connection(
 }
 
 async fn handle_https_tcp_sni_connection(
-    downstream: TcpStream,
+    mut downstream: TcpStream,
     route_table: Arc<ManagedRouteTable>,
     config: Arc<Config>,
     https_fallback_addr: &str,
