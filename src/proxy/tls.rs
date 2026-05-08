@@ -584,7 +584,7 @@ impl ClientCaSnapshot {
     }
 }
 
-struct LoadedCertificate {
+pub struct LoadedCertificate {
     entry_name: String,
     leaf: X509,
     chain: Vec<X509>,
