@@ -1,0 +1,18 @@
+# Static routes for local testing
+# ssrfskipverify=true needed because Docker network uses RFC1918 addresses
+
+# Web app — two backends for round-robin
+route add web-blue myhost.com/ http://upstream-web-blue:8080/ opts "ssrfskipverify=true"
+route add web-green myhost.com/ http://upstream-web-green:8081/ opts "ssrfskipverify=true"
+
+# API — single backend
+route add api myhost.com/api/ http://upstream-api:9090/ opts "ssrfskipverify=true"
+
+# Static — with path strip
+route add static static.example.com/ http://upstream-static:3000/ opts "strip=/static ssrfskipverify=true"
+
+# Catch-all for no-host routes
+route add catchall / http://upstream-web-blue:8080/ opts "ssrfskipverify=true"
+
+# TCP proxy — route port 9222 to NATS
+route add nats :9222 tcp://nats:4222 opts "ssrfskipverify=true proto=tcp"

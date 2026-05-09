@@ -80,7 +80,7 @@ impl ManagedRouteTable {
         });
         let mut registry = (**self.registry.load()).clone();
         registry.set_static(mark_sources(defs.to_vec(), RouteSource::Static));
-        self.rebuild_and_swap(&registry);
+        self.rebuild_and_swap(&registry, "static");
     }
 
     /// Update KV routes
@@ -91,7 +91,7 @@ impl ManagedRouteTable {
         });
         let mut registry = (**self.registry.load()).clone();
         registry.update_kv(mark_sources(defs, RouteSource::ConsulKv));
-        self.rebuild_and_swap(&registry);
+        self.rebuild_and_swap(&registry, "kv");
     }
 
     /// Update service routes
@@ -102,23 +102,39 @@ impl ManagedRouteTable {
         });
         let mut registry = (**self.registry.load()).clone();
         registry.update_services(mark_sources(defs, RouteSource::ConsulService));
-        self.rebuild_and_swap(&registry);
+        self.rebuild_and_swap(&registry, "service");
     }
 
     /// Rebuild table from registry and atomically swap
-    fn rebuild_and_swap(&self, registry: &RouteRegistry) {
+    fn rebuild_and_swap(&self, registry: &RouteRegistry, source: &str) {
         let all_defs = registry.get_all();
-        let table = Table::from_definitions(&all_defs);
+        let table = Table::from_definitions_with_stats(
+            &all_defs,
+            self.inner.stats_registry(),
+            self.inner.cb_config(),
+        );
         let route_count = table.route_count();
         let target_count = table.target_count();
         self.registry.store(Arc::new(registry.clone()));
         self.inner.swap(table);
+        crate::metrics::prometheus::global().record_route_reload(source);
         tracing::info!(
             route_count,
             target_count,
+            source,
             is_empty = registry.is_empty(),
             "Route table updated"
         );
+    }
+
+    /// Create a new managed route table with circuit breaker configuration.
+    pub fn new_with_cb_config(cb_config: crate::route::target::CircuitBreakerConfig) -> Self {
+        let route_table = RouteTable::new().with_cb_config(cb_config);
+        Self {
+            inner: route_table,
+            registry: ArcSwap::from(Arc::new(RouteRegistry::new())),
+            update_lock: Mutex::new(()),
+        }
     }
 
     /// Get current snapshot of the routing table (for hot path)
@@ -152,6 +168,7 @@ fn mark_sources(defs: Vec<RouteDef>, source: RouteSource) -> Vec<RouteDef> {
 mod tests {
     use super::*;
     use crate::route::definition::{RouteCmd, RouteDef};
+    use crate::route::picker::{LeastConnectionsPicker, Picker};
     use std::collections::HashMap;
 
     fn def(service: &str, src: &str, dst: &str) -> RouteDef {
@@ -199,5 +216,67 @@ mod tests {
                 .is_some()
         );
         assert!(snapshot.lookup_route("", "/api/users", "prefix").is_some());
+    }
+
+    #[test]
+    fn preserves_active_connection_counters_across_rebuilds() {
+        let table = ManagedRouteTable::new();
+        table.update_services(vec![def("svc-a", "/", "http://10.0.0.1:8080/")]);
+
+        let first_snapshot = table.get();
+        let first_route = first_snapshot.lookup_route("", "/", "prefix").unwrap();
+        let first_target = first_route.targets[0].clone();
+        first_target
+            .active_connections
+            .store(7, std::sync::atomic::Ordering::Relaxed);
+
+        table.update_services(vec![def("svc-a", "/", "http://10.0.0.1:8080/")]);
+
+        let second_snapshot = table.get();
+        let second_route = second_snapshot.lookup_route("", "/", "prefix").unwrap();
+        let second_target = second_route.targets[0].clone();
+
+        assert_eq!(
+            second_target
+                .active_connections
+                .load(std::sync::atomic::Ordering::Relaxed),
+            7
+        );
+    }
+
+    #[test]
+    fn least_connections_picker_uses_preserved_counters_after_rebuild() {
+        let table = ManagedRouteTable::new();
+        table.update_services(vec![
+            def("svc-a", "/", "http://10.0.0.1:8080/"),
+            def("svc-b", "/", "http://10.0.0.2:8080/"),
+        ]);
+
+        let first_snapshot = table.get();
+        let first_route = first_snapshot.lookup_route("", "/", "prefix").unwrap();
+        first_route.targets[0]
+            .active_connections
+            .store(10, std::sync::atomic::Ordering::Relaxed);
+        first_route.targets[1]
+            .active_connections
+            .store(2, std::sync::atomic::Ordering::Relaxed);
+
+        table.update_services(vec![
+            def("svc-a", "/", "http://10.0.0.1:8080/"),
+            def("svc-b", "/", "http://10.0.0.2:8080/"),
+        ]);
+
+        let second_snapshot = table.get();
+        let second_route = second_snapshot.lookup_route("", "/", "prefix").unwrap();
+        let picker = LeastConnectionsPicker;
+        let picked = picker
+            .pick(
+                &second_route.targets,
+                &second_route.w_targets,
+                &second_route.rr_counter,
+            )
+            .unwrap();
+
+        assert_eq!(picked.url, "http://10.0.0.2:8080/");
     }
 }

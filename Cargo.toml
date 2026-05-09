@@ -1,17 +1,22 @@
 [package]
 name = "sentirum-lb"
-version = "0.1.0"
+version = "1.2.0"
 edition = "2024"
 description = "High-performance Rust-based load balancer with Consul KV integration, inspired by Fabio"
 license = "MIT"
 
 [dependencies]
 # Proxy framework (pingora umbrella crate re-exports everything)
-pingora = { version = "0.5", features = ["proxy", "lb", "rustls"] }
+pingora = { version = "0.5", features = ["proxy", "lb", "openssl"] }
 pingora-http = "0.5"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+# Auth
+bcrypt = "0.15"
+async-stream = "0.3"
 
 # HTTP client (Consul API)
 reqwest = { version = "0.12", features = ["rustls-tls", "json"] }
@@ -58,10 +63,18 @@ base64 = "0.21"
 
 # Random number generation (for RandomPicker)
 rand = { version = "0.8", features = ["small_rng"] }
+
+# Fast mutex (for circuit breaker state)
+parking_lot = "0.12"
+
+# Concurrent hash map (for DNS cache)
+dashmap = "5"
+
 axum = "0.8.8"
 tower = "0.5.3"
 http = "1"
 rustls = { version = "0.23", features = ["ring"] }
+time = "0.3"
 
 [build-dependencies]
 protoc-bin-vendored = "3"

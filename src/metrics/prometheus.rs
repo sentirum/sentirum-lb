@@ -3,9 +3,8 @@
 //! Tracks request latency histogram, request counter, active connections gauge,
 //! and route-level metrics for observability.
 
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-// keep for future use with per-route metrics
-use std::time::Instant;
 
 /// Global metrics instance
 static METRICS: std::sync::OnceLock<Metrics> = std::sync::OnceLock::new();
@@ -13,6 +12,54 @@ static METRICS: std::sync::OnceLock<Metrics> = std::sync::OnceLock::new();
 /// Get the global metrics instance
 pub fn global() -> &'static Metrics {
     METRICS.get_or_init(Metrics::new)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateExpiryMetric {
+    pub entry: String,
+    pub cn: String,
+    pub not_after_unix: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ProcessMetricsSnapshot {
+    available: bool,
+    resident_memory_bytes: u64,
+    virtual_memory_bytes: u64,
+    open_fds: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn parse_proc_status_value_bytes(status: &str, key: &str) -> Option<u64> {
+    status.lines().find_map(|line| {
+        let rest = line.strip_prefix(key)?.trim();
+        let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+        Some(kb * 1024)
+    })
+}
+
+fn collect_process_metrics() -> ProcessMetricsSnapshot {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok();
+        let open_fds = std::fs::read_dir("/proc/self/fd")
+            .ok()
+            .map(|entries| entries.filter_map(Result::ok).count() as u64)
+            .unwrap_or(0);
+
+        if let Some(status) = status {
+            return ProcessMetricsSnapshot {
+                available: true,
+                resident_memory_bytes: parse_proc_status_value_bytes(&status, "VmRSS:")
+                    .unwrap_or(0),
+                virtual_memory_bytes: parse_proc_status_value_bytes(&status, "VmSize:")
+                    .unwrap_or(0),
+                open_fds,
+            };
+        }
+    }
+
+    ProcessMetricsSnapshot::default()
 }
 
 /// Core metrics for the load balancer
@@ -23,8 +70,6 @@ pub struct Metrics {
     pub requests_total: AtomicU64,
     /// Total requests that resulted in an error
     pub requests_error_total: AtomicU64,
-    /// Total bytes sent to downstream
-    pub bytes_sent_total: AtomicU64,
     /// Total bytes received from upstream
     pub bytes_received_total: AtomicU64,
     /// Total gRPC requests processed
@@ -33,6 +78,41 @@ pub struct Metrics {
     pub grpc_web_requests_total: AtomicU64,
     /// Total WebSocket requests processed
     pub websocket_requests_total: AtomicU64,
+    /// Total successful TLS cert reloads
+    pub cert_reload_total: AtomicU64,
+    /// Total failed TLS cert reloads
+    pub cert_reload_errors_total: AtomicU64,
+    /// TLS reload skips due to oversize entries
+    pub cert_reload_skipped_oversize_total: AtomicU64,
+    /// TLS reload skips due to invalid entries
+    pub cert_reload_skipped_invalid_total: AtomicU64,
+    /// TLS reload skips due to empty snapshots
+    pub cert_reload_skipped_empty_total: AtomicU64,
+    /// Static route reloads
+    pub route_reload_total_static: AtomicU64,
+    /// KV route reloads
+    pub route_reload_total_kv: AtomicU64,
+    /// Service route reloads
+    pub route_reload_total_service: AtomicU64,
+    /// Consul watcher errors
+    pub consul_watcher_errors_total_services: AtomicU64,
+    pub consul_watcher_errors_total_kv: AtomicU64,
+    pub consul_watcher_errors_total_tls: AtomicU64,
+    pub consul_watcher_errors_total_client_ca: AtomicU64,
+    /// Circuit breaker opens
+    pub circuit_breaker_open_total: AtomicU64,
+    /// Circuit breaker reopens (from half-open)
+    pub circuit_breaker_reopen_total: AtomicU64,
+    /// Circuit breaker closes (recovery)
+    pub circuit_breaker_close_total: AtomicU64,
+    /// Circuit breaker fast-fail responses (503 when open)
+    pub circuit_breaker_fastfail_total: AtomicU64,
+    /// DNS cache hits
+    pub dns_cache_hits_total: AtomicU64,
+    /// DNS cache misses
+    pub dns_cache_misses_total: AtomicU64,
+    /// DNS cache negatives (NXDOMAIN)
+    pub dns_cache_negatives_total: AtomicU64,
 
     // --- Gauges ---
     /// Currently active connections
@@ -41,6 +121,20 @@ pub struct Metrics {
     pub route_count: AtomicI64,
     /// Number of target backends
     pub target_count: AtomicI64,
+    /// Current watcher backoff seconds
+    pub consul_watcher_backoff_seconds_services: AtomicU64,
+    pub consul_watcher_backoff_seconds_kv: AtomicU64,
+    pub consul_watcher_backoff_seconds_tls: AtomicU64,
+    pub consul_watcher_backoff_seconds_client_ca: AtomicU64,
+    /// Last seen Consul index per watcher
+    pub consul_watcher_last_index_services: AtomicU64,
+    pub consul_watcher_last_index_kv: AtomicU64,
+    pub consul_watcher_last_index_tls: AtomicU64,
+    pub consul_watcher_last_index_client_ca: AtomicU64,
+    /// Oldest loaded certificate expiry timestamp
+    pub cert_min_expiry_unix_seconds: AtomicU64,
+    /// Per-certificate expiry details
+    pub cert_expiry_entries: RwLock<Vec<CertificateExpiryMetric>>,
 
     // --- Histograms (simplified as buckets) ---
     /// Request latency tracking (microseconds)
@@ -71,14 +165,42 @@ impl Metrics {
         Self {
             requests_total: AtomicU64::new(0),
             requests_error_total: AtomicU64::new(0),
-            bytes_sent_total: AtomicU64::new(0),
             bytes_received_total: AtomicU64::new(0),
             grpc_requests_total: AtomicU64::new(0),
             grpc_web_requests_total: AtomicU64::new(0),
             websocket_requests_total: AtomicU64::new(0),
+            cert_reload_total: AtomicU64::new(0),
+            cert_reload_errors_total: AtomicU64::new(0),
+            cert_reload_skipped_oversize_total: AtomicU64::new(0),
+            cert_reload_skipped_invalid_total: AtomicU64::new(0),
+            cert_reload_skipped_empty_total: AtomicU64::new(0),
+            route_reload_total_static: AtomicU64::new(0),
+            route_reload_total_kv: AtomicU64::new(0),
+            route_reload_total_service: AtomicU64::new(0),
+            consul_watcher_errors_total_services: AtomicU64::new(0),
+            consul_watcher_errors_total_kv: AtomicU64::new(0),
+            consul_watcher_errors_total_tls: AtomicU64::new(0),
+            consul_watcher_errors_total_client_ca: AtomicU64::new(0),
+            circuit_breaker_open_total: AtomicU64::new(0),
+            circuit_breaker_reopen_total: AtomicU64::new(0),
+            circuit_breaker_close_total: AtomicU64::new(0),
+            circuit_breaker_fastfail_total: AtomicU64::new(0),
+            dns_cache_hits_total: AtomicU64::new(0),
+            dns_cache_misses_total: AtomicU64::new(0),
+            dns_cache_negatives_total: AtomicU64::new(0),
             active_connections: AtomicI64::new(0),
             route_count: AtomicI64::new(0),
             target_count: AtomicI64::new(0),
+            consul_watcher_backoff_seconds_services: AtomicU64::new(0),
+            consul_watcher_backoff_seconds_kv: AtomicU64::new(0),
+            consul_watcher_backoff_seconds_tls: AtomicU64::new(0),
+            consul_watcher_backoff_seconds_client_ca: AtomicU64::new(0),
+            consul_watcher_last_index_services: AtomicU64::new(0),
+            consul_watcher_last_index_kv: AtomicU64::new(0),
+            consul_watcher_last_index_tls: AtomicU64::new(0),
+            consul_watcher_last_index_client_ca: AtomicU64::new(0),
+            cert_min_expiry_unix_seconds: AtomicU64::new(0),
+            cert_expiry_entries: RwLock::new(Vec::new()),
             latency_bucket_1ms: AtomicU64::new(0),
             latency_bucket_5ms: AtomicU64::new(0),
             latency_bucket_10ms: AtomicU64::new(0),
@@ -162,6 +284,129 @@ impl Metrics {
         }
     }
 
+    pub fn record_cert_reload_success(&self) {
+        self.cert_reload_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_cert_reload_error(&self) {
+        self.cert_reload_errors_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_cert_reload_skipped(&self, reason: &str) {
+        match reason {
+            "oversize" => {
+                self.cert_reload_skipped_oversize_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "empty" => {
+                self.cert_reload_skipped_empty_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                self.cert_reload_skipped_invalid_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn record_route_reload(&self, source: &str) {
+        match source {
+            "static" => {
+                self.route_reload_total_static
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "kv" => {
+                self.route_reload_total_kv.fetch_add(1, Ordering::Relaxed);
+            }
+            "service" => {
+                self.route_reload_total_service
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_consul_watcher_backoff_seconds(&self, watcher: &str, seconds: u64) {
+        match watcher {
+            "services" => {
+                self.consul_watcher_backoff_seconds_services
+                    .store(seconds, Ordering::Relaxed);
+            }
+            "kv" => {
+                self.consul_watcher_backoff_seconds_kv
+                    .store(seconds, Ordering::Relaxed);
+            }
+            "tls" => {
+                self.consul_watcher_backoff_seconds_tls
+                    .store(seconds, Ordering::Relaxed);
+            }
+            "client_ca" => {
+                self.consul_watcher_backoff_seconds_client_ca
+                    .store(seconds, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_consul_watcher_last_index(&self, watcher: &str, index: u64) {
+        match watcher {
+            "services" => {
+                self.consul_watcher_last_index_services
+                    .store(index, Ordering::Relaxed);
+            }
+            "kv" => {
+                self.consul_watcher_last_index_kv
+                    .store(index, Ordering::Relaxed);
+            }
+            "tls" => {
+                self.consul_watcher_last_index_tls
+                    .store(index, Ordering::Relaxed);
+            }
+            "client_ca" => {
+                self.consul_watcher_last_index_client_ca
+                    .store(index, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn record_consul_watcher_error(&self, watcher: &str) {
+        match watcher {
+            "services" => {
+                self.consul_watcher_errors_total_services
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "kv" => {
+                self.consul_watcher_errors_total_kv
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "tls" => {
+                self.consul_watcher_errors_total_tls
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "client_ca" => {
+                self.consul_watcher_errors_total_client_ca
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_cert_expiry_entries(&self, entries: Vec<CertificateExpiryMetric>) {
+        let min_expiry = entries
+            .iter()
+            .map(|entry| entry.not_after_unix)
+            .min()
+            .unwrap_or(0);
+        self.cert_min_expiry_unix_seconds
+            .store(min_expiry, Ordering::Relaxed);
+        *self
+            .cert_expiry_entries
+            .write()
+            .expect("cert expiry entries poisoned") = entries;
+    }
+
     /// Increment active connections
     pub fn connect(&self) {
         self.active_connections.fetch_add(1, Ordering::Relaxed);
@@ -172,6 +417,12 @@ impl Metrics {
         self.active_connections.fetch_sub(1, Ordering::Relaxed);
     }
 
+    /// Record bytes transferred
+    pub fn record_bytes(&self, upstream_response_bytes: usize) {
+        self.bytes_received_total
+            .fetch_add(upstream_response_bytes as u64, Ordering::Relaxed);
+    }
+
     /// Generate Prometheus text exposition format
     pub fn render(&self) -> String {
         let requests_total = self.requests_total.load(Ordering::Relaxed);
@@ -179,15 +430,71 @@ impl Metrics {
         let active_connections = self.active_connections.load(Ordering::Relaxed);
         let route_count = self.route_count.load(Ordering::Relaxed);
         let target_count = self.target_count.load(Ordering::Relaxed);
-        let bytes_sent = self.bytes_sent_total.load(Ordering::Relaxed);
         let bytes_received = self.bytes_received_total.load(Ordering::Relaxed);
         let grpc_requests_total = self.grpc_requests_total.load(Ordering::Relaxed);
         let grpc_web_requests_total = self.grpc_web_requests_total.load(Ordering::Relaxed);
         let websocket_requests_total = self.websocket_requests_total.load(Ordering::Relaxed);
+        let cert_reload_total = self.cert_reload_total.load(Ordering::Relaxed);
+        let cert_reload_errors_total = self.cert_reload_errors_total.load(Ordering::Relaxed);
+        let cert_reload_skipped_oversize_total = self
+            .cert_reload_skipped_oversize_total
+            .load(Ordering::Relaxed);
+        let cert_reload_skipped_invalid_total = self
+            .cert_reload_skipped_invalid_total
+            .load(Ordering::Relaxed);
+        let cert_reload_skipped_empty_total =
+            self.cert_reload_skipped_empty_total.load(Ordering::Relaxed);
+        let route_reload_total_static = self.route_reload_total_static.load(Ordering::Relaxed);
+        let route_reload_total_kv = self.route_reload_total_kv.load(Ordering::Relaxed);
+        let route_reload_total_service = self.route_reload_total_service.load(Ordering::Relaxed);
+        let watcher_backoff_services = self
+            .consul_watcher_backoff_seconds_services
+            .load(Ordering::Relaxed);
+        let watcher_backoff_kv = self
+            .consul_watcher_backoff_seconds_kv
+            .load(Ordering::Relaxed);
+        let watcher_backoff_tls = self
+            .consul_watcher_backoff_seconds_tls
+            .load(Ordering::Relaxed);
+        let watcher_backoff_client_ca = self
+            .consul_watcher_backoff_seconds_client_ca
+            .load(Ordering::Relaxed);
+        let watcher_last_index_services = self
+            .consul_watcher_last_index_services
+            .load(Ordering::Relaxed);
+        let watcher_last_index_kv = self.consul_watcher_last_index_kv.load(Ordering::Relaxed);
+        let watcher_last_index_tls = self.consul_watcher_last_index_tls.load(Ordering::Relaxed);
+        let watcher_last_index_client_ca = self
+            .consul_watcher_last_index_client_ca
+            .load(Ordering::Relaxed);
+        let watcher_errors_services = self
+            .consul_watcher_errors_total_services
+            .load(Ordering::Relaxed);
+        let watcher_errors_kv = self.consul_watcher_errors_total_kv.load(Ordering::Relaxed);
+        let watcher_errors_tls = self.consul_watcher_errors_total_tls.load(Ordering::Relaxed);
+        let watcher_errors_client_ca = self
+            .consul_watcher_errors_total_client_ca
+            .load(Ordering::Relaxed);
+        let cert_min_expiry_unix_seconds =
+            self.cert_min_expiry_unix_seconds.load(Ordering::Relaxed);
+        let cert_expiry_metrics = self
+            .cert_expiry_entries
+            .read()
+            .expect("cert expiry entries poisoned")
+            .iter()
+            .map(|entry| {
+                format!(
+                    "sentirum_lb_cert_expiry_unix_seconds{{entry=\"{}\",cn=\"{}\"}} {}\n",
+                    entry.entry, entry.cn, entry.not_after_unix
+                )
+            })
+            .collect::<String>();
         let status_2xx = self.status_2xx.load(Ordering::Relaxed);
         let status_3xx = self.status_3xx.load(Ordering::Relaxed);
         let status_4xx = self.status_4xx.load(Ordering::Relaxed);
         let status_5xx = self.status_5xx.load(Ordering::Relaxed);
+        let process = collect_process_metrics();
+        let process_metrics_available = if process.available { 1 } else { 0 };
 
         let b_1ms = self.latency_bucket_1ms.load(Ordering::Relaxed);
         let b_5ms = b_1ms + self.latency_bucket_5ms.load(Ordering::Relaxed);
@@ -223,11 +530,7 @@ sentirum_lb_route_count {route_count}
 # TYPE sentirum_lb_target_count gauge
 sentirum_lb_target_count {target_count}
 
-# HELP sentirum_lb_bytes_sent_total Total bytes sent to downstream
-# TYPE sentirum_lb_bytes_sent_total counter
-sentirum_lb_bytes_sent_total {bytes_sent}
-
-# HELP sentirum_lb_bytes_received_total Total bytes received from upstream
+# HELP sentirum_lb_bytes_received_total Total response bytes received from upstream
 # TYPE sentirum_lb_bytes_received_total counter
 sentirum_lb_bytes_received_total {bytes_received}
 
@@ -242,6 +545,70 @@ sentirum_lb_grpc_web_requests_total {grpc_web_requests_total}
 # HELP sentirum_lb_websocket_requests_total Total WebSocket requests processed
 # TYPE sentirum_lb_websocket_requests_total counter
 sentirum_lb_websocket_requests_total {websocket_requests_total}
+
+# HELP sentirum_lb_cert_reload_total Total successful TLS certificate reloads
+# TYPE sentirum_lb_cert_reload_total counter
+sentirum_lb_cert_reload_total {cert_reload_total}
+
+# HELP sentirum_lb_cert_reload_errors_total Total failed TLS certificate reloads
+# TYPE sentirum_lb_cert_reload_errors_total counter
+sentirum_lb_cert_reload_errors_total {cert_reload_errors_total}
+
+# HELP sentirum_lb_cert_reload_skipped_total TLS certificate reload skips by reason
+# TYPE sentirum_lb_cert_reload_skipped_total counter
+sentirum_lb_cert_reload_skipped_total{{reason="oversize"}} {cert_reload_skipped_oversize_total}
+sentirum_lb_cert_reload_skipped_total{{reason="invalid"}} {cert_reload_skipped_invalid_total}
+sentirum_lb_cert_reload_skipped_total{{reason="empty"}} {cert_reload_skipped_empty_total}
+
+# HELP sentirum_lb_route_reload_total Route table rebuilds by source
+# TYPE sentirum_lb_route_reload_total counter
+sentirum_lb_route_reload_total{{source="static"}} {route_reload_total_static}
+sentirum_lb_route_reload_total{{source="kv"}} {route_reload_total_kv}
+sentirum_lb_route_reload_total{{source="service"}} {route_reload_total_service}
+
+# HELP sentirum_lb_consul_watcher_backoff_seconds Current Consul watcher backoff in seconds
+# TYPE sentirum_lb_consul_watcher_backoff_seconds gauge
+sentirum_lb_consul_watcher_backoff_seconds{{watcher="services"}} {watcher_backoff_services}
+sentirum_lb_consul_watcher_backoff_seconds{{watcher="kv"}} {watcher_backoff_kv}
+sentirum_lb_consul_watcher_backoff_seconds{{watcher="tls"}} {watcher_backoff_tls}
+sentirum_lb_consul_watcher_backoff_seconds{{watcher="client_ca"}} {watcher_backoff_client_ca}
+
+# HELP sentirum_lb_consul_watcher_last_index Last observed Consul index per watcher
+# TYPE sentirum_lb_consul_watcher_last_index gauge
+sentirum_lb_consul_watcher_last_index{{watcher="services"}} {watcher_last_index_services}
+sentirum_lb_consul_watcher_last_index{{watcher="kv"}} {watcher_last_index_kv}
+sentirum_lb_consul_watcher_last_index{{watcher="tls"}} {watcher_last_index_tls}
+sentirum_lb_consul_watcher_last_index{{watcher="client_ca"}} {watcher_last_index_client_ca}
+
+# HELP sentirum_lb_consul_watcher_errors_total Consul watcher errors by watcher
+# TYPE sentirum_lb_consul_watcher_errors_total counter
+sentirum_lb_consul_watcher_errors_total{{watcher="services"}} {watcher_errors_services}
+sentirum_lb_consul_watcher_errors_total{{watcher="kv"}} {watcher_errors_kv}
+sentirum_lb_consul_watcher_errors_total{{watcher="tls"}} {watcher_errors_tls}
+sentirum_lb_consul_watcher_errors_total{{watcher="client_ca"}} {watcher_errors_client_ca}
+
+# HELP sentirum_lb_cert_min_expiry_unix_seconds Oldest loaded certificate expiry timestamp
+# TYPE sentirum_lb_cert_min_expiry_unix_seconds gauge
+sentirum_lb_cert_min_expiry_unix_seconds {cert_min_expiry_unix_seconds}
+
+# HELP sentirum_lb_cert_expiry_unix_seconds Per-certificate expiry timestamp
+# TYPE sentirum_lb_cert_expiry_unix_seconds gauge
+{cert_expiry_metrics}
+# HELP sentirum_lb_process_metrics_available Process-level memory and FD metrics availability (Linux /proc based)
+# TYPE sentirum_lb_process_metrics_available gauge
+sentirum_lb_process_metrics_available {process_metrics_available}
+
+# HELP sentirum_lb_process_resident_memory_bytes Resident memory size in bytes
+# TYPE sentirum_lb_process_resident_memory_bytes gauge
+sentirum_lb_process_resident_memory_bytes {resident_memory_bytes}
+
+# HELP sentirum_lb_process_virtual_memory_bytes Virtual memory size in bytes
+# TYPE sentirum_lb_process_virtual_memory_bytes gauge
+sentirum_lb_process_virtual_memory_bytes {virtual_memory_bytes}
+
+# HELP sentirum_lb_process_open_fds Number of open file descriptors
+# TYPE sentirum_lb_process_open_fds gauge
+sentirum_lb_process_open_fds {open_fds}
 
 # HELP sentirum_lb_response_status_total Response status codes
 # TYPE sentirum_lb_response_status_total counter
@@ -271,38 +638,37 @@ sentirum_lb_request_duration_seconds_count {count}
             grpc_requests_total = grpc_requests_total,
             grpc_web_requests_total = grpc_web_requests_total,
             websocket_requests_total = websocket_requests_total,
+            cert_reload_total = cert_reload_total,
+            cert_reload_errors_total = cert_reload_errors_total,
+            cert_reload_skipped_oversize_total = cert_reload_skipped_oversize_total,
+            cert_reload_skipped_invalid_total = cert_reload_skipped_invalid_total,
+            cert_reload_skipped_empty_total = cert_reload_skipped_empty_total,
+            route_reload_total_static = route_reload_total_static,
+            route_reload_total_kv = route_reload_total_kv,
+            route_reload_total_service = route_reload_total_service,
+            watcher_backoff_services = watcher_backoff_services,
+            watcher_backoff_kv = watcher_backoff_kv,
+            watcher_backoff_tls = watcher_backoff_tls,
+            watcher_backoff_client_ca = watcher_backoff_client_ca,
+            watcher_last_index_services = watcher_last_index_services,
+            watcher_last_index_kv = watcher_last_index_kv,
+            watcher_last_index_tls = watcher_last_index_tls,
+            watcher_last_index_client_ca = watcher_last_index_client_ca,
+            watcher_errors_services = watcher_errors_services,
+            watcher_errors_kv = watcher_errors_kv,
+            watcher_errors_tls = watcher_errors_tls,
+            watcher_errors_client_ca = watcher_errors_client_ca,
+            cert_min_expiry_unix_seconds = cert_min_expiry_unix_seconds,
+            cert_expiry_metrics = cert_expiry_metrics,
+            process_metrics_available = process_metrics_available,
+            resident_memory_bytes = process.resident_memory_bytes,
+            virtual_memory_bytes = process.virtual_memory_bytes,
+            open_fds = process.open_fds,
         )
     }
 }
 
-/// RAII guard that tracks request timing
-pub struct RequestTimer {
-    start: Instant,
-}
 
-impl Default for RequestTimer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl RequestTimer {
-    pub fn new() -> Self {
-        let metrics = global();
-        metrics.connect();
-        Self {
-            start: Instant::now(),
-        }
-    }
-
-    /// Complete the request and record metrics
-    pub fn complete(self, status: u16) {
-        let elapsed = self.start.elapsed().as_micros() as u64;
-        let metrics = global();
-        metrics.record_request(status, elapsed);
-        metrics.disconnect();
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -346,6 +712,20 @@ mod tests {
         let metrics = Metrics::new();
         metrics.record_protocol_request(true, true, true);
         metrics.record_request(200, 5000);
+        metrics.record_cert_reload_success();
+        metrics.record_cert_reload_error();
+        metrics.record_cert_reload_skipped("oversize");
+        metrics.record_cert_reload_skipped("invalid");
+        metrics.record_cert_reload_skipped("empty");
+        metrics.record_route_reload("service");
+        metrics.set_consul_watcher_backoff_seconds("tls", 8);
+        metrics.set_consul_watcher_last_index("tls", 42);
+        metrics.record_consul_watcher_error("tls");
+        metrics.set_cert_expiry_entries(vec![CertificateExpiryMetric {
+            entry: "example.com.pem".to_string(),
+            cn: "example.com".to_string(),
+            not_after_unix: 1_700_000_000,
+        }]);
         let output = metrics.render();
         assert!(output.contains("sentirum_lb_requests_total 1"));
         assert!(output.contains("sentirum_lb_request_duration_seconds_bucket"));
@@ -367,6 +747,17 @@ mod tests {
         assert!(output.contains("sentirum_lb_grpc_requests_total 1"));
         assert!(output.contains("sentirum_lb_grpc_web_requests_total 1"));
         assert!(output.contains("sentirum_lb_websocket_requests_total 1"));
+        assert!(output.contains("sentirum_lb_process_resident_memory_bytes"));
+        assert!(output.contains("sentirum_lb_process_open_fds"));
+        assert!(output.contains("sentirum_lb_cert_reload_total 1"));
+        assert!(output.contains("sentirum_lb_cert_reload_errors_total 1"));
+        assert!(output.contains("sentirum_lb_cert_reload_skipped_total{reason=\"oversize\"} 1"));
+        assert!(output.contains("sentirum_lb_route_reload_total{source=\"service\"} 1"));
+        assert!(output.contains("sentirum_lb_consul_watcher_backoff_seconds{watcher=\"tls\"} 8"));
+        assert!(output.contains("sentirum_lb_consul_watcher_last_index{watcher=\"tls\"} 42"));
+        assert!(output.contains("sentirum_lb_consul_watcher_errors_total{watcher=\"tls\"} 1"));
+        assert!(output.contains("sentirum_lb_cert_min_expiry_unix_seconds 1700000000"));
+        assert!(output.contains("sentirum_lb_cert_expiry_unix_seconds{entry=\"example.com.pem\",cn=\"example.com\"} 1700000000"));
     }
 
     #[test]
@@ -377,6 +768,36 @@ mod tests {
         assert_eq!(metrics.grpc_requests_total.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.grpc_web_requests_total.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.websocket_requests_total.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_cert_expiry_entries_updates_min_expiry() {
+        let metrics = Metrics::new();
+        metrics.set_cert_expiry_entries(vec![
+            CertificateExpiryMetric {
+                entry: "b.pem".to_string(),
+                cn: "b.example.com".to_string(),
+                not_after_unix: 200,
+            },
+            CertificateExpiryMetric {
+                entry: "a.pem".to_string(),
+                cn: "a.example.com".to_string(),
+                not_after_unix: 100,
+            },
+        ]);
+
+        assert_eq!(
+            metrics.cert_min_expiry_unix_seconds.load(Ordering::Relaxed),
+            100
+        );
+        assert_eq!(
+            metrics
+                .cert_expiry_entries
+                .read()
+                .expect("cert expiry entries poisoned")
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -396,5 +817,20 @@ mod tests {
         assert_eq!(metrics.latency_bucket_25ms.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.latency_bucket_100ms.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.latency_bucket_5s.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_proc_status_value_bytes() {
+        let status = "Name:\tsentirum-lb\nVmSize:\t  2048 kB\nVmRSS:\t  1024 kB\n";
+        assert_eq!(
+            parse_proc_status_value_bytes(status, "VmRSS:"),
+            Some(1_048_576)
+        );
+        assert_eq!(
+            parse_proc_status_value_bytes(status, "VmSize:"),
+            Some(2_097_152)
+        );
+        assert_eq!(parse_proc_status_value_bytes(status, "VmData:"), None);
     }
 }

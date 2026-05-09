@@ -2,6 +2,9 @@ use crate::route::definition::RouteSource;
 use pingora::protocols::tls::ALPN;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum UpstreamProtocol {
@@ -62,6 +65,548 @@ impl UpstreamProtocol {
     }
 }
 
+/// Circuit breaker state machine
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub enum CircuitState {
+    /// Normal operation — requests flow through
+    #[default]
+    Closed,
+    /// Circuit is open — requests fail fast with 503
+    Open,
+    /// Probing recovery — limited requests allowed
+    HalfOpen,
+}
+
+/// Record of a circuit breaker state transition
+#[derive(Debug, Clone, Serialize)]
+pub struct CircuitTransition {
+    pub from: CircuitState,
+    pub to: CircuitState,
+    pub timestamp_ms: u64,
+}
+
+
+/// Immutable circuit breaker configuration
+#[derive(Debug, Clone, Serialize)]
+pub struct CircuitBreakerConfig {
+    /// Error threshold percentage (e.g., 50 = 50%)
+    pub error_threshold: u8,
+    /// Number of requests to track in the sliding window
+    pub window_size: usize,
+    /// Seconds to stay open before probing recovery
+    pub recovery_timeout_secs: u64,
+    /// Max probe requests in half-open state
+    pub half_open_max_requests: usize,
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            error_threshold: 50,
+            window_size: 100,
+            recovery_timeout_secs: 30,
+            half_open_max_requests: 3,
+        }
+    }
+}
+
+/// Circuit breaker for per-target failure protection.
+    /// Uses a sliding window of N requests to track error rate.
+    /// When error_threshold % of requests in the window fail, the circuit opens.
+    /// After recovery_timeout, the circuit enters half-open and allows N probe requests.
+    /// All probes succeed → circuit closes. Any probe fails → circuit reopens.
+#[derive(Debug)]
+pub struct CircuitBreaker {
+    /// Current circuit state (Arc-shared so clones preserve history across route rebuilds)
+    state: Arc<parking_lot::Mutex<CircuitInner>>,
+    /// Configuration (shared, read-only after init)
+    config: CircuitBreakerConfig,
+}
+
+#[derive(Debug)]
+struct CircuitInner {
+    state: CircuitState,
+    /// Sliding window: success (false) / error (true) per request
+    window: std::collections::VecDeque<bool>,
+    /// Time when circuit last transitioned to Open
+    opened_at_ms: u64,
+    /// Number of probe requests sent in half-open state
+    half_open_requests: usize,
+    /// Number of successful probe requests in half-open state
+    half_open_successes: usize,
+    /// History of recent state transitions (ring buffer, max 20)
+    history: Vec<CircuitTransition>,
+}
+
+impl CircuitBreaker {
+    /// Create a new circuit breaker with default config
+    pub fn new() -> Self {
+        Self::with_config(CircuitBreakerConfig::default())
+    }
+
+    /// Create a new circuit breaker with custom config
+    pub fn with_config(config: CircuitBreakerConfig) -> Self {
+        Self {
+            state: Arc::new(parking_lot::Mutex::new(CircuitInner {
+                state: CircuitState::Closed,
+                window: std::collections::VecDeque::with_capacity(config.window_size),
+                opened_at_ms: 0,
+                half_open_requests: 0,
+                half_open_successes: 0,
+                history: Vec::with_capacity(20),
+            })),
+            config,
+        }
+    }
+
+    /// Returns true if the circuit allows a request to proceed.
+    /// If false, the caller should return 503 immediately.
+    pub fn allow_request(&self) -> bool {
+        let mut inner = self.state.lock();
+        let now_ms = Self::now_ms();
+
+        match inner.state {
+            CircuitState::Closed => true,
+            CircuitState::Open => {
+                let elapsed = now_ms.saturating_sub(inner.opened_at_ms);
+                let recovery_ms = self.config.recovery_timeout_secs * 1000;
+                if elapsed >= recovery_ms {
+                    let from = inner.state;
+                    inner.state = CircuitState::HalfOpen;
+                    Self::record_transition(&mut inner, from, CircuitState::HalfOpen);
+                    inner.half_open_requests = 0;
+                    inner.half_open_successes = 0;
+                    tracing::info!(
+                        recovery_timeout = self.config.recovery_timeout_secs,
+                        "Circuit breaker transitioning to half-open"
+                    );
+                    true
+                } else {
+                    false
+                }
+            }
+            CircuitState::HalfOpen => {
+                inner.half_open_requests += 1;
+                inner.half_open_requests <= self.config.half_open_max_requests
+            }
+        }
+    }
+
+    /// Record a successful request
+    pub fn record_success(&self) {
+        let mut inner = self.state.lock();
+        match inner.state {
+            CircuitState::Closed => {
+                Self::push_window(&mut inner, false, self.config.window_size);
+            }
+            CircuitState::HalfOpen => {
+                inner.half_open_successes += 1;
+                if inner.half_open_successes >= self.config.half_open_max_requests {
+                    // All probes succeeded → close the circuit
+                    let from = inner.state;
+                    inner.state = CircuitState::Closed;
+                    Self::record_transition(&mut inner, from, CircuitState::Closed);
+                    inner.window.clear();
+                    tracing::info!(
+                        successes = inner.half_open_successes,
+                        "Circuit breaker closed after successful recovery probes"
+                    );
+                }
+            }
+            CircuitState::Open => {
+                // Success while open shouldn't happen (requests are blocked),
+                // but handle gracefully in case of race.
+            }
+        }
+    }
+
+    /// Record a failed request (5xx, timeout, connection error)
+    pub fn record_error(&self) {
+        let mut inner = self.state.lock();
+        match inner.state {
+            CircuitState::Closed => {
+                Self::push_window(&mut inner, true, self.config.window_size);
+                let error_count = inner.window.iter().filter(|&&e| e).count();
+                let threshold = self.config.window_size * self.config.error_threshold as usize / 100;
+                if error_count >= threshold && inner.window.len() >= self.config.window_size {
+                    let from = inner.state;
+                    inner.state = CircuitState::Open;
+                    Self::record_transition(&mut inner, from, CircuitState::Open);
+                    inner.opened_at_ms = Self::now_ms();
+                    tracing::warn!(
+                        error_rate = format!("{:.1}%", 100.0 * error_count as f64 / self.config.window_size as f64),
+                        error_count,
+                        window_size = self.config.window_size,
+                        threshold = threshold,
+                        "Circuit breaker OPENED"
+                    );
+                }
+            }
+            CircuitState::HalfOpen => {
+                // Any error in half-open → reopen immediately
+                let from = inner.state;
+                inner.state = CircuitState::Open;
+                Self::record_transition(&mut inner, from, CircuitState::Open);
+                inner.opened_at_ms = Self::now_ms();
+                tracing::warn!("Circuit breaker REOPENED — probe failed");
+            }
+            CircuitState::Open => {
+                // Already open, refresh the timer on errors
+                inner.opened_at_ms = Self::now_ms();
+            }
+        }
+    }
+
+    /// Get current circuit state (for metrics/admin)
+    pub fn current_state(&self) -> CircuitState {
+        self.state.lock().state
+    }
+
+    fn push_window(inner: &mut CircuitInner, is_error: bool, window_size: usize) {
+        if inner.window.len() >= window_size {
+            inner.window.pop_front();
+        }
+        inner.window.push_back(is_error);
+    }
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    fn record_transition(inner: &mut CircuitInner, from: CircuitState, to: CircuitState) {
+        if inner.history.len() >= 20 {
+            inner.history.remove(0);
+        }
+        inner.history.push(CircuitTransition {
+            from,
+            to,
+            timestamp_ms: Self::now_ms(),
+        });
+    }
+
+    /// Get the history of recent state transitions (for admin/metrics)
+    pub fn transition_history(&self) -> Vec<CircuitTransition> {
+        self.state.lock().history.clone()
+    }
+}
+
+/// Clone preserves the shared state via Arc so that route-table rebuilds
+/// do not reset circuit-breaker history.
+impl Clone for CircuitBreaker {
+    fn clone(&self) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            config: self.config.clone(),
+        }
+    }
+}
+
+ impl Default for CircuitBreaker {
+     fn default() -> Self {
+         Self::new()
+     }
+ }
+
+/// Per-target health tracker (circuit breaker wrapper)
+#[derive(Debug, Clone)]
+pub struct TargetHealthTracker {
+    circuit_breaker: CircuitBreaker,
+}
+
+impl TargetHealthTracker {
+    pub fn new() -> Self {
+        Self {
+            circuit_breaker: CircuitBreaker::new(),
+        }
+    }
+
+    pub fn with_config(config: CircuitBreakerConfig) -> Self {
+        Self {
+            circuit_breaker: CircuitBreaker::with_config(config),
+        }
+    }
+
+    pub fn circuit_breaker(&self) -> &CircuitBreaker {
+        &self.circuit_breaker
+    }
+}
+
+impl Default for TargetHealthTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// DNS Cache (shared global instance)
+// ============================================================================
+
+/// Global DNS cache instance
+static DNS_CACHE: std::sync::OnceLock<DnsCache> = std::sync::OnceLock::new();
+
+/// Get the global DNS cache
+pub fn global_dns_cache() -> &'static DnsCache {
+    DNS_CACHE.get_or_init(DnsCache::new)
+}
+
+/// DNS cache entry with TTL and expiration
+#[derive(Debug, Clone)]
+struct DnsCacheEntry {
+    /// Resolved IP addresses
+    addrs: Vec<SocketAddr>,
+    /// Expiration timestamp (milliseconds since epoch)
+    expires_at_ms: u64,
+    /// Whether this was a negative lookup (NXDOMAIN)
+    negative: bool,
+}
+
+/// Thread-safe DNS cache with TTL-based expiration
+#[derive(Debug)]
+pub struct DnsCache {
+    inner: dashmap::DashMap<String, DnsCacheEntry>,
+    /// Default TTL in seconds
+    default_ttl_secs: AtomicU64,
+    /// Negative cache TTL in seconds
+    negative_ttl_secs: AtomicU64,
+    /// Metrics reference
+    hits: std::sync::atomic::AtomicU64,
+    misses: std::sync::atomic::AtomicU64,
+    negatives: std::sync::atomic::AtomicU64,
+}
+
+/// Maximum number of entries in the DNS cache before eviction kicks in.
+const DNS_CACHE_MAX_ENTRIES: usize = 10_000;
+
+impl DnsCache {
+    pub fn new() -> Self {
+        Self {
+            inner: dashmap::DashMap::new(),
+            default_ttl_secs: AtomicU64::new(30),
+            negative_ttl_secs: AtomicU64::new(10),
+            hits: std::sync::atomic::AtomicU64::new(0),
+            misses: std::sync::atomic::AtomicU64::new(0),
+            negatives: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    pub fn with_ttl(default_ttl_secs: u64, negative_ttl_secs: u64) -> Self {
+        Self {
+            inner: dashmap::DashMap::new(),
+            default_ttl_secs: AtomicU64::new(default_ttl_secs),
+            negative_ttl_secs: AtomicU64::new(negative_ttl_secs),
+            hits: std::sync::atomic::AtomicU64::new(0),
+            misses: std::sync::atomic::AtomicU64::new(0),
+            negatives: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Set the TTL values (thread-safe, can be called after OnceLock init)
+    pub fn set_ttl(&self, default_secs: u64, negative_secs: u64) {
+        self.default_ttl_secs.store(default_secs, Ordering::Relaxed);
+        self.negative_ttl_secs.store(negative_secs, Ordering::Relaxed);
+    }
+
+    /// Lookup a cached DNS entry
+    pub fn lookup(&self, host: &str) -> Option<Vec<SocketAddr>> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        // Check expiry in a separate scope so the read guard is dropped before
+        // the mutable remove() call — holding both on the same DashMap shard deadlocks.
+        let expired = self
+            .inner
+            .get(host)
+            .is_some_and(|e| now_ms >= e.expires_at_ms);
+        if expired {
+            self.inner.remove(host);
+            self.misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return None;
+        }
+
+        let entry = self.inner.get(host)?;
+
+        if entry.negative {
+            self.negatives.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return None;
+        }
+
+        self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(entry.addrs.clone())
+    }
+
+    /// Store a positive DNS lookup result
+    pub fn store(&self, host: String, addrs: Vec<SocketAddr>) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let entry = DnsCacheEntry {
+            addrs,
+            expires_at_ms: now_ms + (self.default_ttl_secs.load(Ordering::Relaxed) * 1000),
+            negative: false,
+        };
+
+        self.inner.insert(host, entry);
+        self.evict_if_over_capacity(now_ms);
+    }
+
+    /// Store a negative DNS lookup result (NXDOMAIN)
+    pub fn store_negative(&self, host: String) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let entry = DnsCacheEntry {
+            addrs: Vec::new(),
+            expires_at_ms: now_ms + (self.negative_ttl_secs.load(Ordering::Relaxed) * 1000),
+            negative: true,
+        };
+
+        self.inner.insert(host, entry);
+        self.evict_if_over_capacity(now_ms);
+    }
+
+    /// Evict entries when the cache exceeds DNS_CACHE_MAX_ENTRIES.
+    /// First removes expired entries (lazy TTL cleanup). If still over capacity,
+    /// removes the oldest entries by expiration time.
+    fn evict_if_over_capacity(&self, now_ms: u64) {
+        if self.inner.len() <= DNS_CACHE_MAX_ENTRIES {
+            return;
+        }
+
+        // Phase 1: Remove expired entries
+        let expired_keys: Vec<String> = self
+            .inner
+            .iter()
+            .filter(|e| now_ms >= e.expires_at_ms)
+            .map(|e| e.key().clone())
+            .collect();
+        for key in expired_keys {
+            self.inner.remove(&key);
+        }
+
+        if self.inner.len() <= DNS_CACHE_MAX_ENTRIES {
+            return;
+        }
+
+        // Phase 2: Remove oldest entries by expires_at_ms until under capacity
+        let mut entries: Vec<(String, u64)> = self
+            .inner
+            .iter()
+            .map(|e| (e.key().clone(), e.expires_at_ms))
+            .collect();
+        entries.sort_by_key(|(_, exp)| *exp);
+
+        let to_remove = self.inner.len() - DNS_CACHE_MAX_ENTRIES;
+        for (key, _) in entries.into_iter().take(to_remove) {
+            self.inner.remove(&key);
+        }
+    }
+
+    /// Clear all cached entries
+    pub fn clear(&self) {
+        self.inner.clear();
+    }
+
+    /// Get cache statistics
+    pub fn stats(&self) -> DnsCacheStats {
+        DnsCacheStats {
+            entries: self.inner.len() as u64,
+            hits: self.hits.load(std::sync::atomic::Ordering::Relaxed),
+            misses: self.misses.load(std::sync::atomic::Ordering::Relaxed),
+            negatives: self.negatives.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+
+    /// Get all cached entries with expiration info (for admin API).
+    pub fn entries(&self) -> Vec<DnsCacheEntryView> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        
+        self.inner.iter()
+            .map(|entry| {
+                let ttl_remaining_ms = entry.expires_at_ms.saturating_sub(now_ms);
+                DnsCacheEntryView {
+                    host: entry.key().clone(),
+                    addrs: entry.addrs.iter().map(|a| a.to_string()).collect(),
+                    ttl_remaining_secs: ttl_remaining_ms as i64 / 1000,
+                    is_negative: entry.negative,
+                }
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DnsCacheEntryView {
+    pub host: String,
+    pub addrs: Vec<String>,
+    pub ttl_remaining_secs: i64,
+    pub is_negative: bool,
+}
+
+impl Default for DnsCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// DNS cache statistics
+#[derive(Debug, Clone, Default)]
+pub struct DnsCacheStats {
+    pub entries: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub negatives: u64,
+}
+
+impl std::fmt::Display for DnsCacheStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "entries={} hits={} misses={} negatives={}",
+            self.entries, self.hits, self.misses, self.negatives
+        )
+    }
+}
+
+
+#[derive(Debug, Default)]
+pub struct TargetStatsRegistry {
+    active_connections: Mutex<HashMap<String, Weak<AtomicU64>>>,
+}
+
+impl TargetStatsRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn active_connections_for(&self, key: &str) -> Arc<AtomicU64> {
+        let mut entries = self.active_connections.lock().unwrap_or_else(|e| {
+            tracing::warn!("Target stats registry lock was poisoned; recovering");
+            e.into_inner()
+        });
+
+        if let Some(counter) = entries.get(key).and_then(Weak::upgrade) {
+            return counter;
+        }
+
+        let counter = Arc::new(AtomicU64::new(0));
+        entries.insert(key.to_string(), Arc::downgrade(&counter));
+        counter
+    }
+}
+
 /// A target backend for a route.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Target {
@@ -100,10 +645,14 @@ pub struct Target {
     pub parsed_protocol: UpstreamProtocol,
     /// Active connection count for least-connections picker
     #[serde(skip)]
-    pub active_connections: std::sync::atomic::AtomicU64,
+    pub active_connections: Arc<AtomicU64>,
+    /// Circuit breaker for upstream failure protection
+    #[serde(skip)]
+    pub health_tracker: TargetHealthTracker,
+    #[serde(skip)]
+    pub stats: Arc<TargetStats>,
 }
 
-// Manual Clone impl because AtomicU64 doesn't impl Clone
 impl Clone for Target {
     fn clone(&self) -> Self {
         Self {
@@ -118,8 +667,9 @@ impl Clone for Target {
             parsed_port: self.parsed_port,
             parsed_tls: self.parsed_tls,
             parsed_protocol: self.parsed_protocol,
-            // Reset active connections on clone (fresh snapshot)
-            active_connections: std::sync::atomic::AtomicU64::new(0),
+            active_connections: Arc::clone(&self.active_connections),
+            health_tracker: self.health_tracker.clone(),
+            stats: Arc::clone(&self.stats),
         }
     }
 }
@@ -138,7 +688,9 @@ impl Default for Target {
             parsed_port: None,
             parsed_tls: false,
             parsed_protocol: UpstreamProtocol::Http,
-            active_connections: std::sync::atomic::AtomicU64::new(0),
+            active_connections: Arc::new(AtomicU64::new(0)),
+            health_tracker: TargetHealthTracker::new(),
+            stats: Arc::new(TargetStats::default()),
         }
     }
 }
@@ -149,6 +701,21 @@ impl Target {
         let mut target = Self {
             service,
             url,
+            ..Default::default()
+        };
+        target.pre_parse();
+        target
+    }
+
+    pub fn with_active_connections(
+        service: String,
+        url: String,
+        active_connections: Arc<AtomicU64>,
+    ) -> Self {
+        let mut target = Self {
+            service,
+            url,
+            active_connections,
             ..Default::default()
         };
         target.pre_parse();
@@ -217,6 +784,128 @@ impl Target {
         )
     }
 
+    pub fn try_acquire_connection_slot(&self, max_connections: u64) -> bool {
+        if max_connections == 0 {
+            self.active_connections.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+
+        let mut current = self.active_connections.load(Ordering::Relaxed);
+        loop {
+            if current >= max_connections {
+                return false;
+            }
+            match self.active_connections.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    pub fn release_connection_slot(&self) {
+        self.active_connections.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub async fn resolve_upstream_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        if !self.is_host_safe() && !self.ssrf_skip_verify() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "blocked private/reserved upstream target {}",
+                    self.upstream_host()
+                ),
+            ));
+        }
+
+        let host = self.upstream_host();
+        let port = self.upstream_port();
+        let cache_key = format!("{host}:{port}");
+
+        // Try DNS cache first
+        let cache = global_dns_cache();
+        if let Some(addrs) = cache.lookup(&cache_key)
+            && let Some(addr) = addrs.first()
+        {
+            tracing::trace!(host, port, "DNS cache hit");
+            if !self.ssrf_skip_verify()
+                && (is_ip_always_blocked(&addr.ip())
+                    || (!self.source_allows_private_upstreams() && is_ip_rfc1918(&addr.ip())))
+            {
+                // Stale cached address fails SSRF check — evict and re-resolve
+                cache.inner.remove(&cache_key);
+                tracing::warn!(host, port, addr = %addr, "DNS cache hit failed SSRF check, re-resolving");
+            } else {
+                return Ok(*addr);
+            }
+        }
+
+        let addr_str = if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        };
+
+        // DNS lookup
+        let mut addrs = match tokio::net::lookup_host(&addr_str).await {
+            Ok(addrs) => addrs,
+            Err(e) => {
+                // Store negative result
+                cache.store_negative(cache_key.clone());
+                tracing::warn!(host, port, error = %e, "DNS lookup failed, storing negative result");
+                return Err(e);
+            }
+        };
+
+        let resolved = addrs.next().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("no upstream IP addresses found for {host}:{port}"),
+            )
+        })?;
+
+        if !self.ssrf_skip_verify()
+            && (is_ip_always_blocked(&resolved.ip())
+                || (!self.source_allows_private_upstreams() && is_ip_rfc1918(&resolved.ip())))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "blocked upstream target during resolution {} -> {}",
+                    host,
+                    resolved.ip()
+                ),
+            ));
+        }
+
+
+        // Cache ALL addresses, filtering out any that fail SSRF checks.
+        // This prevents a blocked IP from hiding in the multi-A-record tail
+        // and being served on a subsequent cache hit.
+        let mut addr_list = vec![resolved];
+        for addr in addrs {
+            if !self.ssrf_skip_verify()
+                && (is_ip_always_blocked(&addr.ip())
+                    || (!self.source_allows_private_upstreams() && is_ip_rfc1918(&addr.ip())))
+            {
+                tracing::debug!(
+                    host,
+                    addr = %addr,
+                    "Filtered blocked IP from DNS multi-record response"
+                );
+                continue;
+            }
+            addr_list.push(addr);
+        }
+        cache.store(cache_key, addr_list);
+
+        Ok(resolved)
+    }
+
     /// Get the upstream host (pre-parsed, no allocation)
     pub fn upstream_host(&self) -> &str {
         self.parsed_host
@@ -276,6 +965,14 @@ impl Target {
         self.parsed_protocol == UpstreamProtocol::Tcp
     }
 
+    /// Whether to prepend a PROXY protocol v1 header on upstream TCP connects.
+    pub fn proxy_proto(&self) -> bool {
+        self.opts
+            .get("pxyproto")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+    }
+
     /// Whether this is an HTTPS upstream target.
     pub fn is_https(&self) -> bool {
         self.parsed_protocol == UpstreamProtocol::Https
@@ -322,10 +1019,21 @@ pub fn is_ip_rfc1918(ip: &std::net::IpAddr) -> bool {
 pub fn is_ip_always_blocked(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_link_local() || v4.is_broadcast() || v4.is_unspecified()
+            if v4.is_loopback() || v4.is_link_local() || v4.is_broadcast() || v4.is_unspecified() || v4.is_multicast() {
+                return true;
+            }
+            let octets = v4.octets();
+            // CGNAT / Shared address space (100.64.0.0/10, RFC 6598)
+            let is_cgnat = octets[0] == 100 && (octets[1] & 0xC0) == 0x40;
+            // Documentation / benchmark ranges (RFC 5737 / RFC 2544)
+            let is_documentation = (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+                || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)); // RFC 2544 benchmarking (198.18.0.0/15)
+            is_cgnat || is_documentation
         }
         std::net::IpAddr::V6(v6) => {
-            v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local()
+            v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local() || v6.is_multicast()
         }
     }
 }
@@ -419,6 +1127,14 @@ mod tests {
     }
 
     #[test]
+    fn test_proxy_proto_opt() {
+        let mut t = Target::new("svc".into(), "tcp://10.0.0.1:4222".into());
+        assert!(!t.proxy_proto());
+        t.opts.insert("pxyproto".to_string(), "true".to_string());
+        assert!(t.proxy_proto());
+    }
+
+    #[test]
     fn test_grpcs_targets_use_tls_and_require_http2() {
         let t = Target::new("svc".into(), "grpcs://api.example.com/".into());
         assert!(t.upstream_tls());
@@ -451,5 +1167,272 @@ mod tests {
         let t = Target::new("svc".into(), "wss://api.example.com/socket".into());
         assert_eq!(t.preferred_alpn().get_max_http_version(), 1);
         assert_eq!(t.preferred_alpn().get_min_http_version(), 1);
+    }
+
+    // === Circuit Breaker Tests ===
+
+    #[test]
+    fn test_circuit_breaker_default_state_is_closed() {
+        let cb = CircuitBreaker::new();
+        assert_eq!(cb.current_state(), CircuitState::Closed);
+        assert!(cb.allow_request());
+    }
+
+    #[test]
+    fn test_circuit_breaker_opens_after_error_threshold() {
+        let config = CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 10,
+            recovery_timeout_secs: 30,
+            half_open_max_requests: 3,
+        };
+        let cb = CircuitBreaker::with_config(config);
+
+        // First 5 requests succeed
+        for _ in 0..5 {
+            cb.record_success();
+        }
+        assert_eq!(cb.current_state(), CircuitState::Closed);
+        assert!(cb.allow_request());
+
+        // Next 5 requests fail (50% error rate)
+        for _ in 0..5 {
+            cb.record_error();
+        }
+        assert_eq!(cb.current_state(), CircuitState::Open);
+        assert!(!cb.allow_request());
+    }
+
+    #[test]
+    fn test_circuit_breaker_half_open_after_timeout() {
+        let config = CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 10,
+            recovery_timeout_secs: 0, // Immediate transition
+            half_open_max_requests: 3,
+        };
+        let cb = CircuitBreaker::with_config(config);
+
+        // Open the circuit
+        for _ in 0..5 {
+            cb.record_success();
+        }
+        for _ in 0..5 {
+            cb.record_error();
+        }
+        assert_eq!(cb.current_state(), CircuitState::Open);
+
+        // With 0s timeout, next allow_request transitions to half-open
+        assert!(cb.allow_request());
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+    }
+
+    #[test]
+    fn test_circuit_breaker_closes_after_successful_probes() {
+        let config = CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 10,
+            recovery_timeout_secs: 0,
+            half_open_max_requests: 3,
+        };
+        let cb = CircuitBreaker::with_config(config);
+
+        // Open the circuit
+        for _ in 0..5 {
+            cb.record_success();
+        }
+        for _ in 0..5 {
+            cb.record_error();
+        }
+        assert_eq!(cb.current_state(), CircuitState::Open);
+
+        // Transition to half-open
+        assert!(cb.allow_request());
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+
+        // First two successes: circuit stays half-open
+        cb.record_success();
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen, "Should stay half-open after 1 success");
+        cb.record_success();
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen, "Should stay half-open after 2 successes");
+
+        // Third success: circuit closes
+        cb.record_success();
+        assert_eq!(cb.current_state(), CircuitState::Closed, "Should close after 3 successes");
+    }
+
+    #[test]
+    fn test_circuit_breaker_reopens_on_error_in_half_open() {
+        let config = CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 10,
+            recovery_timeout_secs: 0,
+            half_open_max_requests: 3,
+        };
+        let cb = CircuitBreaker::with_config(config);
+
+        // Open the circuit
+        for _ in 0..5 {
+            cb.record_success();
+        }
+        for _ in 0..5 {
+            cb.record_error();
+        }
+        assert_eq!(cb.current_state(), CircuitState::Open);
+
+        // Transition to half-open
+        assert!(cb.allow_request());
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+
+        // Any error reopens the circuit
+        cb.record_error();
+        assert_eq!(cb.current_state(), CircuitState::Open);
+    }
+
+    #[test]
+    fn test_circuit_breaker_closes_on_first_success_when_max_is_one() {
+        let config = CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 10,
+            recovery_timeout_secs: 0,
+            half_open_max_requests: 1,
+        };
+        let cb = CircuitBreaker::with_config(config);
+
+        // Open the circuit
+        for _ in 0..5 {
+            cb.record_success();
+        }
+        for _ in 0..5 {
+            cb.record_error();
+        }
+        assert_eq!(cb.current_state(), CircuitState::Open);
+
+        // Transition to half-open
+        assert!(cb.allow_request());
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+
+        // With max=1, first success closes
+        cb.record_success();
+        assert_eq!(cb.current_state(), CircuitState::Closed);
+    }
+
+    // === SSRF IP range tests ===
+
+    #[test]
+    fn test_ssrf_blocks_multicast_ipv4() {
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(224, 0, 0, 1));
+        assert!(is_ip_always_blocked(&ip));
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(239, 255, 255, 255));
+        assert!(is_ip_always_blocked(&ip));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_multicast_ipv6() {
+        let ip = std::net::IpAddr::V6(std::net::Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 1));
+        assert!(is_ip_always_blocked(&ip));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_cgnat() {
+        // 100.64.0.0/10 range (RFC 6598)
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(100, 64, 0, 1));
+        assert!(is_ip_always_blocked(&ip));
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(100, 127, 255, 255));
+        assert!(is_ip_always_blocked(&ip));
+    }
+
+    #[test]
+    fn test_ssrf_allows_100_not_in_cgnat() {
+        // 100.0.0.1 is NOT in CGNAT range (100.64.0.0/10)
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(100, 0, 0, 1));
+        assert!(!is_ip_always_blocked(&ip));
+        // 100.128.0.1 is also NOT in CGNAT range
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(100, 128, 0, 1));
+        assert!(!is_ip_always_blocked(&ip));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_documentation_ranges() {
+        // RFC 5737 documentation ranges
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1));
+        assert!(is_ip_always_blocked(&ip));
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 1));
+        assert!(is_ip_always_blocked(&ip));
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 1));
+        assert!(is_ip_always_blocked(&ip));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_benchmark_range() {
+        // RFC 2544 benchmarking (198.18.0.0/15)
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 18, 0, 1));
+        assert!(is_ip_always_blocked(&ip));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_benchmark_range_upper() {
+        // 198.19.x.x is also in RFC 2544 benchmarking range
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 19, 255, 1));
+        assert!(is_ip_always_blocked(&ip));
+    }
+
+    #[test]
+    fn test_dns_cache_eviction_enforced() {
+        let cache = DnsCache::with_ttl(300, 10);
+        // Fill beyond DNS_CACHE_MAX_ENTRIES
+        for i in 0..(DNS_CACHE_MAX_ENTRIES + 50) {
+            let hi = (i / 256) % 256;
+            let lo = i % 256;
+            let addr: SocketAddr = format!("10.0.{hi}.{lo}:80").parse().unwrap();
+            cache.store(format!("host-{i}"), vec![addr]);
+        }
+        assert!(
+            cache.inner.len() <= DNS_CACHE_MAX_ENTRIES,
+            "cache should be capped at DNS_CACHE_MAX_ENTRIES, got {}",
+            cache.inner.len()
+        );
+    }
+}
+
+// Per-target statistics for admin dashboard and Prometheus labels.
+#[derive(Debug, Default)]
+pub struct TargetStats {
+    pub requests_total: AtomicU64,
+    pub errors_total: AtomicU64,
+    pub latency_sum_us: AtomicU64,
+    pub bytes_total: AtomicU64,
+    pub last_access: AtomicU64, // Unix timestamp
+}
+
+impl TargetStats {
+    pub fn record_request(&self, latency_us: u64, bytes: usize, is_error: bool) {
+        self.requests_total.fetch_add(1, Ordering::Relaxed);
+        if is_error {
+            self.errors_total.fetch_add(1, Ordering::Relaxed);
+        }
+        self.latency_sum_us.fetch_add(latency_us, Ordering::Relaxed);
+        self.bytes_total.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.last_access.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            Ordering::Relaxed
+        );
+    }
+    
+    pub fn error_rate(&self) -> f64 {
+        let total = self.requests_total.load(Ordering::Relaxed);
+        if total == 0 { return 0.0; }
+        let errors = self.errors_total.load(Ordering::Relaxed);
+        (errors as f64 / total as f64) * 100.0
+    }
+    
+    pub fn avg_latency_us(&self) -> u64 {
+        let total = self.requests_total.load(Ordering::Relaxed);
+        if total == 0 { return 0; }
+        let sum = self.latency_sum_us.load(Ordering::Relaxed);
+        sum / total
     }
 }

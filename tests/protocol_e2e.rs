@@ -128,7 +128,6 @@ impl Drop for TestRuntime {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "end-to-end protocol smoke test"]
 async fn protocol_end_to_end_smoke() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -352,8 +351,8 @@ listen = "127.0.0.1:{tls_port}"
         .arg(&config_path)
         .arg("--routes")
         .arg(&routes_path)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
 

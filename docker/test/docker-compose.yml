@@ -1,0 +1,68 @@
+version: "3.8"
+
+services:
+  consul:
+    image: hashicorp/consul:1.19
+    command: agent -dev -client=0.0.0.0 -log-level=warn
+    ports:
+      - "8500:8500"
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  upstream-web-blue:
+    image: hashicorp/http-echo:0.2.3
+    entrypoint: ["/http-echo"]
+    command: ["-text", "{\"service\":\"web-blue\",\"port\":8080}", "-listen", ":8080"]
+
+  upstream-web-green:
+    image: hashicorp/http-echo:0.2.3
+    entrypoint: ["/http-echo"]
+    command: ["-text", "{\"service\":\"web-green\",\"port\":8081}", "-listen", ":8081"]
+
+  upstream-api:
+    image: hashicorp/http-echo:0.2.3
+    entrypoint: ["/http-echo"]
+    command: ["-text", "{\"service\":\"api\",\"port\":9090}", "-listen", ":9090"]
+
+  upstream-static:
+    image: hashicorp/http-echo:0.2.3
+    entrypoint: ["/http-echo"]
+    command: ["-text", "{\"service\":\"static\",\"port\":3000}", "-listen", ":3000"]
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["--jetstream", "--store_dir", "/data", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
+  sentirum-lb:
+    build:
+      context: ../..
+      dockerfile: docker/test/Dockerfile
+    command: >
+      --config /app/config.toml
+      --routes /app/routes.txt
+    ports:
+      - "9999:9999"
+      - "9998:9998"
+      - "9222:9222"
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - ./routes.txt:/app/routes.txt:ro
+    depends_on:
+      consul:
+        condition: service_healthy
+      upstream-web-blue:
+        condition: service_started
+      upstream-web-green:
+        condition: service_started
+      upstream-api:
+        condition: service_started
+      upstream-static:
+        condition: service_started
+      nats:
+        condition: service_started

@@ -25,7 +25,7 @@ This file gives coding agents and contributors a fast map of the repository and 
 - `src/route/`
   - `parser.rs`: Fabio-style route command parsing
   - `definition.rs`: route command model
-  - `target.rs`: upstream target model and SSRF helpers
+  - `target.rs`: upstream target model, SSRF helpers, circuit breaker, and DNS cache
   - `table.rs`: immutable route table snapshots and matchers
   - `registry.rs`: merge static, KV, and service-discovery routes safely
   - `picker.rs`: balancing strategies
@@ -36,7 +36,8 @@ This file gives coding agents and contributors a fast map of the repository and 
 
 - `src/admin/api.rs`
   - operational inspection endpoints
-
+  - `/admin` redirect to `/admin/` (trailing slash)
+  - SSE URL percent-decode for session token auth
 - `src/metrics/prometheus.rs`
   - in-process counters/gauges/histogram buckets
 
@@ -51,6 +52,9 @@ This file gives coding agents and contributors a fast map of the repository and 
   - static file routes
   - Consul KV routes
   - Consul service routes
+- Circuit breaker is per-target: each `Target` has its own `health_tracker` with independent state
+- DNS cache is a global singleton: `global_dns_cache()` returns a shared `DnsCache` instance
+- Service filtering (whitelist/blacklist) applies to service discovery but not KV routes
 
 ## Configuration expectations
 
@@ -59,6 +63,8 @@ These config values are live and should stay wired unless intentionally redesign
 - `server.admin_token`
 - `server.workers`
 - `consul.poll_interval`
+- `consul.service_whitelist`
+- `consul.service_blacklist`
 - `proxy.strategy`
 - `proxy.matcher`
 - `proxy.request_id_header`
@@ -72,15 +78,26 @@ These config values are live and should stay wired unless intentionally redesign
 - `proxy.upstream_h2_ping_interval`
 - `proxy.pool_size`
 - `proxy.max_connections`
+- `proxy.circuit_breaker_enabled`
+- `proxy.circuit_breaker_error_threshold`
+- `proxy.circuit_breaker_window_size`
+- `proxy.circuit_breaker_recovery_timeout`
+- `proxy.circuit_breaker_half_open_max`
+- `proxy.dns_cache_ttl`
+- `proxy.dns_negative_cache_ttl`
 - `tls.cert_path`
 - `tls.key_path`
 - `tls.listen`
+- `consul.graceful_shutdown`
 
 If you introduce a new config field, wire it into runtime behavior and cover it with tests when practical.
 
 ## Route and proxy semantics
 
 - No-match responses use `proxy.no_route_status`
+- Circuit breaker: when `proxy.circuit_breaker_enabled` is true, failing upstream targets are temporarily bypassed with 503; when a picked target has an open circuit breaker, the proxy attempts to find a healthy fallback on the same route before returning 503
+- Circuit breaker states: Closed → Open (on error threshold) → HalfOpen (after recovery_timeout) → Closed (on probe success)
+- DNS cache: `proxy.dns_cache_ttl` controls positive cache TTL (default 30s); `proxy.dns_negative_cache_ttl` controls negative cache TTL (default 10s)
 - `iprefix` is case-insensitive prefix matching
 - `glob` uses the `glob` crate pattern support
 - `strip` happens before `prepend`
@@ -139,8 +156,10 @@ If you change user-facing behavior, also update:
 
 ## Known non-goals / placeholders
 
-- Raw TCP proxy mode is not finished yet
-- Avoid documenting TCP proxy support as production-ready unless it is actually implemented
+- Raw TCP proxy mode supports plain TCP, TCP+SNI routing, dynamic listeners, and PROXY protocol v1; production-tested with NATS protocol (INFO, PING/PONG, CONNECT/SUB/PUB/UNSUB, queue groups, 50KB payloads, 20 concurrent connections)
+- Active health checking (probing) is not implemented — passive health checking via circuit breaker only
+- Per-route rate limiting is not implemented — `max_connections` provides basic per-target enforcement
+- OCSP stapling is not explicitly configured (may be handled by rustls defaults)
 
 ## Commit hygiene
 

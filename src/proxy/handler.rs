@@ -10,10 +10,22 @@ use pingora::modules::http::{
 };
 use pingora::prelude::*;
 use pingora::proxy::{ProxyHttp, Session};
+#[cfg(test)]
+use pingora::tls::hash::MessageDigest;
 use pingora::upstreams::peer::HttpPeer;
-use std::borrow::Cow;
 use std::net::IpAddr;
 use std::sync::Arc;
+
+mod client_cert;
+mod forwarded;
+mod protocol;
+mod rewrite;
+
+pub(crate) use client_cert::remember_verified_client_certificate;
+use client_cert::*;
+use forwarded::*;
+use protocol::*;
+use rewrite::*;
 
 /// Parsed CIDR for trusted proxy matching
 #[derive(Debug, Clone)]
@@ -95,6 +107,10 @@ pub struct ProxyCtx {
     pub is_grpc_web: bool,
     /// Whether downstream request is a WebSocket upgrade.
     pub is_websocket: bool,
+    /// Approximate number of response bytes received from upstream.
+    /// (Tracked via upstream_response_body_filter; downstream bytes are not
+    /// directly observable in Pingora's ProxyHttp trait.)
+    pub upstream_response_bytes: usize,
 }
 
 pub struct SentirumProxy {
@@ -147,9 +163,34 @@ impl SentirumProxy {
         if let Some(route) = table.lookup_route(host, path, &self.matcher)
             && !route.w_targets.is_empty()
         {
-            return self
-                .picker
-                .pick(&route.targets, &route.w_targets, &route.rr_counter);
+            let cb_enabled = self.config.proxy.circuit_breaker_enabled;
+
+            // Primary pick from picker
+            if let Some(target) = self.picker.pick(&route.targets, &route.w_targets, &route.rr_counter) {
+                if !cb_enabled || target.health_tracker.circuit_breaker().allow_request() {
+                    return Some(target);
+                }
+
+                // Picker chose a CB-open target; try to find a healthy alternative.
+                // Scan all targets to find a healthy fallback.
+                let mut best_fallback: Option<std::sync::Arc<crate::route::target::Target>> = None;
+                for t in &route.targets {
+                    if t.url == target.url { continue; } // skip the one picker already chose
+                    if !t.health_tracker.circuit_breaker().allow_request() { continue; }
+                    best_fallback = Some(Arc::clone(t));
+                    break;
+                }
+                if best_fallback.is_some() {
+                    tracing::debug!(
+                        host,
+                        path,
+                        skipped_url = %target.url,
+                        fallback_url = %best_fallback.as_ref().unwrap().url,
+                        "Circuit breaker open on picked target; using fallback"
+                    );
+                }
+                return best_fallback.or(Some(target));
+            }
         }
 
         None
@@ -169,6 +210,7 @@ impl ProxyHttp for SentirumProxy {
             is_grpc: false,
             is_grpc_web: false,
             is_websocket: false,
+            upstream_response_bytes: 0,
         }
     }
 
@@ -254,18 +296,23 @@ impl ProxyHttp for SentirumProxy {
 
         tracing::debug!(host, path, target_url = %target.url, "Route found");
 
-        // SSRF protection: block private/loopback IPs unless explicitly allowed
-        if !target.is_host_safe() && !target.ssrf_skip_verify() {
+        // Circuit breaker check — fail fast if circuit is open
+        if self.config.proxy.circuit_breaker_enabled
+            && !target.health_tracker.circuit_breaker().allow_request()
+        {
             tracing::warn!(
-                host = target.upstream_host(),
+                host,
+                path,
+                target_url = %target.url,
                 service = %target.service,
-                "Blocked upstream target: private/reserved IP (SSRF protection)"
+                state = ?target.health_tracker.circuit_breaker().current_state(),
+                "Circuit breaker OPEN — failing fast with 503"
             );
-            return Err(Error::new(ErrorType::HTTPStatus(403)));
+            return Err(Error::new(ErrorType::HTTPStatus(503)));
         }
 
         // Store target in context for upstream_request_filter (avoids double lookup)
-        if !try_acquire_upstream_slot(&target, self.config.proxy.max_connections) {
+        if !target.try_acquire_connection_slot(self.config.proxy.max_connections as u64) {
             tracing::warn!(
                 host,
                 path,
@@ -273,6 +320,11 @@ impl ProxyHttp for SentirumProxy {
                 max_connections = self.config.proxy.max_connections,
                 "Upstream concurrency limit reached"
             );
+            // Resolve the consumed circuit breaker probe slot so the breaker
+            // doesn't get stuck in half-open when the connection limit is hit.
+            if self.config.proxy.circuit_breaker_enabled {
+                target.health_tracker.circuit_breaker().record_error();
+            }
             return Err(Error::new(ErrorType::HTTPStatus(503)));
         }
 
@@ -280,43 +332,24 @@ impl ProxyHttp for SentirumProxy {
 
         let host = target.upstream_host();
         let port = target.upstream_port();
-
-        // Perform async DNS resolution to prevent DNS rebinding attacks and check the actual IP
-        let addr_str = if host.contains(':') {
-            format!("[{}]:{}", host, port)
-        } else {
-            format!("{}:{}", host, port)
-        };
-        let mut addrs = match tokio::net::lookup_host(&addr_str).await {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::warn!(host, port, error = %e, "DNS resolution failed");
+        let resolved_addr = match target.resolve_upstream_addr().await {
+            Ok(addr) => addr,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                tracing::warn!(
+                    host,
+                    port,
+                    service = %target.service,
+                    source = ?target.source,
+                    error = %error,
+                    "Blocked upstream target during resolution (SSRF protection)"
+                );
+                return Err(Error::new(ErrorType::HTTPStatus(403)));
+            }
+            Err(error) => {
+                tracing::warn!(host, port, error = %error, "DNS resolution failed");
                 return Err(Error::new(ErrorType::ConnectNoRoute));
             }
         };
-
-        let resolved_addr = match addrs.next() {
-            Some(a) => a,
-            None => {
-                tracing::warn!(host, port, "No IP addresses found for host");
-                return Err(Error::new(ErrorType::ConnectNoRoute));
-            }
-        };
-
-        if !target.ssrf_skip_verify()
-            && (crate::route::target::is_ip_always_blocked(&resolved_addr.ip())
-                || (!target.source_allows_private_upstreams()
-                    && crate::route::target::is_ip_rfc1918(&resolved_addr.ip())))
-        {
-            tracing::warn!(
-                host = host,
-                resolved_ip = %resolved_addr.ip(),
-                service = %target.service,
-                source = ?target.source,
-                "Blocked upstream target during resolution (SSRF protection)"
-            );
-            return Err(Error::new(ErrorType::HTTPStatus(403)));
-        }
 
         // Use pre-parsed URL fields (no per-request URL parsing!)
         let mut peer = HttpPeer::new(resolved_addr, target.upstream_tls(), host.to_string());
@@ -371,18 +404,38 @@ impl ProxyHttp for SentirumProxy {
             .request_start
             .map(|s| s.elapsed().as_micros() as u64)
             .unwrap_or(0);
-        crate::metrics::prometheus::global().record_protocol_request(
+        let metrics = crate::metrics::prometheus::global();
+        metrics.record_protocol_request(
             ctx.is_grpc,
             ctx.is_grpc_web,
             ctx.is_websocket,
         );
-        crate::metrics::prometheus::global().record_request(status, latency_us);
-        crate::metrics::prometheus::global().disconnect();
+        metrics.record_request(status, latency_us);
+        metrics.record_bytes(ctx.upstream_response_bytes);
+        metrics.disconnect();
 
         if let Some(target) = &ctx.picked_target {
-            target
-                .active_connections
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            target.release_connection_slot();
+
+            // Record circuit breaker success/error based on status and error type
+            if self.config.proxy.circuit_breaker_enabled {
+                let should_record_error = status >= 500
+                    || matches!(e, Some(err) if err.etype() == &ErrorType::ConnectTimedout)
+                    || matches!(e, Some(err) if err.etype() == &ErrorType::ConnectRefused)
+                    || matches!(e, Some(err) if err.etype() == &ErrorType::ConnectNoRoute);
+                // Record per-target stats
+                let is_error = status >= 500
+                    || matches!(e, Some(err) if err.etype() == &ErrorType::ConnectTimedout)
+                    || matches!(e, Some(err) if err.etype() == &ErrorType::ConnectRefused)
+                    || matches!(e, Some(err) if err.etype() == &ErrorType::ConnectNoRoute);
+                target.stats.record_request(latency_us, ctx.upstream_response_bytes, is_error);
+                
+                if should_record_error {
+                    target.health_tracker.circuit_breaker().record_error();
+                } else {
+                    target.health_tracker.circuit_breaker().record_success();
+                }
+            }
         }
 
         tracing::info!(
@@ -441,6 +494,7 @@ impl ProxyHttp for SentirumProxy {
             peer_addr.as_deref(),
             &self.trusted_proxies,
         )?;
+        append_client_certificate_headers(session, upstream_request)?;
 
         // Use stored target from upstream_peer (no double lookup!)
         if let Some(target) = &ctx.picked_target {
@@ -467,6 +521,19 @@ impl ProxyHttp for SentirumProxy {
         // Store response status for access logging
         ctx.response_status = upstream_response.status.as_u16();
         upstream_response.insert_header("X-Served-By", "sentirum-lb")?;
+        Ok(())
+    }
+
+    fn upstream_response_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<bytes::Bytes>,
+        _end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<()> {
+        if let Some(data) = body {
+            ctx.upstream_response_bytes += data.len();
+        }
         Ok(())
     }
 
@@ -595,378 +662,41 @@ impl ProxyHttp for SentirumProxy {
     }
 }
 
-/// Extract host and path from session's request header.
-/// Returns borrowed &str to avoid allocations in the hot path.
-fn extract_host_path(session: &Session) -> (&str, &str) {
-    let header = session.req_header();
-    let host = parse_host_from_header(header);
-    let path = header.uri.path();
-    (host, path)
-}
-
-/// Parse host from Host header, stripping port.
-/// Parses the hostname from a Host header, stripping any port suffix.
-///
-/// Handles all forms correctly:
-/// - `example.com:8080`  → `example.com`
-/// - `localhost:8080`    → `localhost`  (dotless hostname with port)
-/// - `my-service:80`     → `my-service`
-/// - `[::1]:8080`        → `::1`        (IPv6 literal)
-/// - `example.com`       → `example.com` (no port)
-/// - `localhost`         → `localhost`
-fn parse_host_from_header(header: &pingora_http::RequestHeader) -> &str {
-    let host_header = header
-        .headers
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    if let Some(bracket_end) = host_header.find("]:") {
-        // IPv6 literal: `[::1]:8080` → `::1`
-        &host_header[1..bracket_end]
-    } else if let Some(colon_pos) = host_header.rfind(':') {
-        // Check if the part after the last `:` is a valid port number AND
-        // the part before it does not contain another `:` (which would mean
-        // it's a bare IPv6 address like `::1` rather than `host:port`).
-        let before_colon = &host_header[..colon_pos];
-        let after_colon = &host_header[colon_pos + 1..];
-        if !before_colon.contains(':') && after_colon.parse::<u16>().is_ok() {
-            before_colon
-        } else {
-            // Either a bare IPv6 address (multiple colons) or no valid port.
-            host_header
-        }
-    } else {
-        host_header
-    }
-}
-
-fn is_websocket_upgrade(header: &pingora_http::RequestHeader) -> bool {
-    header
-        .headers
-        .get("upgrade")
-        .map(|value| value.as_bytes().eq_ignore_ascii_case(b"websocket"))
-        .unwrap_or(false)
-}
-
-fn is_grpc_content_type(content_type: &str) -> bool {
-    let content_type = content_type.trim();
-    content_type.len() >= "application/grpc".len()
-        && content_type[.."application/grpc".len()].eq_ignore_ascii_case("application/grpc")
-}
-
-fn is_grpc_web_content_type(content_type: &str) -> bool {
-    let content_type = content_type.trim();
-    content_type.len() >= "application/grpc-web".len()
-        && content_type[.."application/grpc-web".len()].eq_ignore_ascii_case("application/grpc-web")
-}
-
-fn is_grpc_request(header: &pingora_http::RequestHeader) -> bool {
-    header
-        .headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(is_grpc_content_type)
-        .unwrap_or(false)
-}
-
-fn is_grpc_web_request(header: &pingora_http::RequestHeader) -> bool {
-    header
-        .headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(is_grpc_web_content_type)
-        .unwrap_or(false)
-}
-
-async fn write_grpc_error_response(
-    session: &mut Session,
-    http_status: u16,
-    message: &str,
-) -> pingora::Result<String> {
-    let mut resp =
-        ResponseHeader::build(200, None).or_else(|_| ResponseHeader::build(500, None))?;
-    resp.insert_header("Content-Type", "application/grpc")?;
-    resp.insert_header("X-Served-By", "sentirum-lb")?;
-    resp.insert_header("grpc-status", grpc_status_for_http_status(http_status))?;
-    resp.insert_header("grpc-message", sanitize_grpc_message(message))?;
-    session.write_response_header(Box::new(resp), true).await?;
-    Ok(String::new())
-}
-
-fn sni_hostname(authority: &str) -> &str {
-    if authority.starts_with('[') {
-        if let Some(end) = authority.find(']') {
-            &authority[1..end]
-        } else {
-            authority
-        }
-    } else if let Some(host) = authority.strip_prefix("http://") {
-        host.split(':').next().unwrap_or(host)
-    } else if let Some(host) = authority.strip_prefix("https://") {
-        host.split(':').next().unwrap_or(host)
-    } else {
-        authority.split(':').next().unwrap_or(authority)
-    }
-}
-
-fn grpc_status_for_http_status(status: u16) -> &'static str {
-    match status {
-        400 => "3",
-        401 => "16",
-        403 => "7",
-        404 => "12",
-        408 => "4",
-        429 => "8",
-        499 => "1",
-        500 => "13",
-        501 => "12",
-        502 => "14",
-        503 => "14",
-        504 => "4",
-        _ => "2",
-    }
-}
-
-fn sanitize_grpc_message(message: &str) -> String {
-    let sanitized: String = message
-        .chars()
-        .map(|c| {
-            if c.is_ascii_control() && c != ' ' {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect();
-
-    let mut encoded = String::with_capacity(sanitized.len());
-    for &b in sanitized.as_bytes() {
-        match b {
-            b' ' => encoded.push(' '),
-            0x21..=0x7E if b != b'%' => encoded.push(b as char),
-            _ => {
-                const HEX: &[u8; 16] = b"0123456789ABCDEF";
-                encoded.push('%');
-                encoded.push(HEX[(b >> 4) as usize] as char);
-                encoded.push(HEX[(b & 0x0F) as usize] as char);
-            }
-        }
-    }
-
-    encoded
-}
-
-fn configure_peer_options(
-    peer: &mut HttpPeer,
-    target: &crate::route::target::Target,
-    config: &Config,
-) {
-    peer.options.connection_timeout = Some(Config::parse_duration(&config.proxy.connect_timeout));
-    peer.options.read_timeout = Some(Config::parse_duration(&config.proxy.read_timeout));
-    peer.options.write_timeout = Some(Config::parse_duration(&config.proxy.write_timeout));
-    peer.options.idle_timeout = Some(Config::parse_duration(&config.proxy.idle_timeout));
-    peer.options.alpn = target.preferred_alpn();
-
-    if target.requires_http2() {
-        peer.options.max_h2_streams = config.proxy.upstream_h2_max_streams.max(1);
-        peer.options.h2_ping_interval =
-            Config::parse_optional_duration(&config.proxy.upstream_h2_ping_interval);
-    }
-
-    if target.upstream_tls() {
-        let authority = target.host_override().unwrap_or(target.upstream_host());
-        peer.sni = sni_hostname(authority).to_string();
-        if target.tls_skip_verify() {
-            // NOTE: Pingora's rustls upstream connector does not currently provide
-            // a complete verification-bypass path for self-signed upstream TLS.
-            // Keep setting this for compatibility with connector implementations
-            // that honor it, but prefer trusted/internal CA certificates in docs
-            // and tests for grpcs/wss upstreams.
-            peer.options.verify_cert = false;
-        }
-    }
-}
-
-fn append_forwarded_headers(
-    downstream_request: &pingora_http::RequestHeader,
-    upstream_request: &mut pingora_http::RequestHeader,
-    downstream_is_tls: bool,
-    peer_addr: Option<&str>,
-    trusted_proxies: &[CidrRange],
-) -> pingora::Result<()> {
-    let host = downstream_request
-        .headers
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    let peer_ip = peer_addr.unwrap_or_default();
-    let trusted = is_trusted_proxy(peer_ip, trusted_proxies);
-
-    // X-Forwarded-For:
-    // - Trusted proxy: preserve client chain, append peer IP
-    // - Untrusted: overwrite with peer IP only (prevents spoofing)
-    let forwarded_for = if trusted {
-        match downstream_request
-            .headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-        {
-            Some(existing) if !peer_ip.is_empty() => format!("{existing}, {peer_ip}"),
-            Some(existing) => existing.to_string(),
-            None => peer_ip.to_string(),
-        }
-    } else {
-        peer_ip.to_string()
-    };
-
-    if !forwarded_for.is_empty() {
-        upstream_request.insert_header("X-Forwarded-For", &forwarded_for)?;
-    }
-
-    // CF-Connecting-IP: only forward from trusted proxies (e.g. Cloudflare)
-    if trusted
-        && let Some(cf_ip) = downstream_request
-            .headers
-            .get("cf-connecting-ip")
-            .and_then(|v| v.to_str().ok())
-    {
-        upstream_request.insert_header("CF-Connecting-IP", cf_ip)?;
-    }
-
-    if !host.is_empty() {
-        upstream_request.insert_header("X-Forwarded-Host", host)?;
-    }
-
-    // X-Forwarded-Proto: only trust from trusted proxies
-    let scheme = if trusted {
-        downstream_request
-            .headers
-            .get("x-forwarded-proto")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or(if downstream_is_tls { "https" } else { "http" })
-    } else {
-        if downstream_is_tls { "https" } else { "http" }
-    };
-    upstream_request.insert_header("X-Forwarded-Proto", scheme)?;
-    Ok(())
-}
-
-fn rewrite_upstream_uri(
-    uri: &http::Uri,
-    target: &crate::route::target::Target,
-) -> Option<http::Uri> {
-    let mut path = uri.path().to_string();
-
-    if let Some(strip) = target.strip_path()
-        && let Some(new_path) = strip_path_prefix(&path, strip)
-    {
-        path = new_path.into_owned();
-    }
-
-    if let Some(prepend) = target.prepend_path() {
-        path = prepend_path_prefix(prepend, &path);
-    }
-
-    if target.is_grpc() && !is_valid_grpc_path(&path) {
-        return Some(uri.clone());
-    }
-
-    let rewritten = match uri.query() {
-        Some(query) => format!("{path}?{query}"),
-        None => path,
-    };
-
-    rewritten.parse().ok()
-}
-
-fn is_valid_grpc_path(path: &str) -> bool {
-    let mut parts = path.split('/').filter(|segment| !segment.is_empty());
-    matches!(
-        (parts.next(), parts.next(), parts.next()),
-        (Some(service), Some(method), None) if !service.is_empty() && !method.is_empty()
-    )
-}
-
-fn strip_path_prefix<'a>(path: &'a str, strip: &str) -> Option<Cow<'a, str>> {
-    let stripped = path.strip_prefix(strip)?;
-    if stripped.is_empty() {
-        Some(Cow::Borrowed("/"))
-    } else if stripped.starts_with('/') {
-        Some(Cow::Borrowed(stripped))
-    } else {
-        Some(Cow::Owned(format!("/{}", stripped)))
-    }
-}
-
-fn prepend_path_prefix(prefix: &str, path: &str) -> String {
-    let trimmed_prefix = prefix.trim_end_matches('/');
-    let trimmed_path = path.trim_start_matches('/');
-
-    match (trimmed_prefix.is_empty(), trimmed_path.is_empty()) {
-        (true, true) => "/".to_string(),
-        (true, false) => format!("/{}", trimmed_path),
-        (false, true) => {
-            if trimmed_prefix.starts_with('/') {
-                format!("{}/", trimmed_prefix)
-            } else {
-                format!("/{}/", trimmed_prefix)
-            }
-        }
-        (false, false) => {
-            if trimmed_prefix.starts_with('/') {
-                format!("{}/{}", trimmed_prefix, trimmed_path)
-            } else {
-                format!("/{}/{}", trimmed_prefix, trimmed_path)
-            }
-        }
-    }
-}
-
-fn status_message(status: u16) -> &'static str {
-    http::StatusCode::from_u16(status)
-        .ok()
-        .and_then(|code| code.canonical_reason())
-        .unwrap_or("Request Failed")
-}
-
-fn try_acquire_upstream_slot(
-    target: &crate::route::target::Target,
-    max_connections: usize,
-) -> bool {
-    if max_connections == 0 {
-        target
-            .active_connections
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return true;
-    }
-
-    let limit = max_connections as u64;
-    let mut current = target
-        .active_connections
-        .load(std::sync::atomic::Ordering::Relaxed);
-
-    loop {
-        if current >= limit {
-            return false;
-        }
-
-        match target.active_connections.compare_exchange_weak(
-            current,
-            current + 1,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Relaxed,
-        ) {
-            Ok(_) => return true,
-            Err(observed) => current = observed,
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_remember_verified_client_certificate_caches_rich_identity() {
+        let mut params =
+            rcgen::CertificateParams::new(vec!["client.sentirum.test".into()]).unwrap();
+        params.distinguished_name = {
+            let mut dn = rcgen::DistinguishedName::new();
+            dn.push(rcgen::DnType::CommonName, "client.sentirum.test");
+            dn
+        };
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        let cert_pem = cert.pem();
+        let parsed = pingora::tls::x509::X509::from_pem(cert_pem.as_bytes()).unwrap();
+
+        remember_verified_client_certificate(&parsed);
+
+        let digest = parsed.digest(MessageDigest::sha256()).unwrap();
+        let cached = cached_client_certificate_identity(digest.as_ref()).unwrap();
+        assert_eq!(cached.common_name.as_deref(), Some("client.sentirum.test"));
+        assert_eq!(
+            cached.sha256.as_deref(),
+            Some(hex_lower(digest.as_ref()).as_str())
+        );
+        assert!(
+            cached
+                .subject
+                .as_deref()
+                .is_some_and(|v| v.contains("CN=client.sentirum.test"))
+        );
+    }
 
     #[test]
     fn test_host_header_parsing() {
@@ -998,6 +728,19 @@ mod tests {
             let result = parse_host_from_header(&header);
             assert_eq!(result, *expected, "Failed for Host: {}", input);
         }
+    }
+
+    #[test]
+    fn test_client_cert_identity_cache_evicts_oldest() {
+        let mut cache = ClientCertIdentityCache::default();
+        cache.insert("a".to_string(), ClientCertIdentity::default());
+        cache.insert("b".to_string(), ClientCertIdentity::default());
+        assert_eq!(cache.order.front().map(String::as_str), Some("a"));
+        assert_eq!(cache.order.back().map(String::as_str), Some("b"));
+        // Verify get returns cached entry without O(n) reorder
+        assert!(cache.get("a").is_some());
+        // Order should NOT change on get (no LRU touch)
+        assert_eq!(cache.order.front().map(String::as_str), Some("a"));
     }
 
     #[test]
@@ -1241,8 +984,8 @@ mod tests {
     fn test_try_acquire_upstream_slot_enforces_limit() {
         let target = crate::route::target::Target::new("svc".into(), "http://example.com".into());
 
-        assert!(try_acquire_upstream_slot(&target, 1));
-        assert!(!try_acquire_upstream_slot(&target, 1));
+        assert!(target.try_acquire_connection_slot(1));
+        assert!(!target.try_acquire_connection_slot(1));
         assert_eq!(
             target
                 .active_connections
@@ -1258,6 +1001,7 @@ mod tests {
                 listen: ":9999".into(),
                 admin_listen: "127.0.0.1:9998".into(),
                 admin_token: String::new(),
+                admin_users: vec![],
                 workers: 0,
             },
             consul: crate::config::ConsulConfig {
@@ -1269,6 +1013,10 @@ mod tests {
                 poll_interval: "0s".into(),
                 service_discovery: true,
                 kv_watching: true,
+                service_whitelist: Vec::new(),
+                service_blacklist: Vec::new(),
+                graceful_shutdown: true,
+                include_warning: false,
             },
             proxy: crate::config::ProxyConfig {
                 upstream_h2_max_streams: 64,
@@ -1277,6 +1025,7 @@ mod tests {
             },
             logging: crate::config::LoggingConfig::default(),
             tls: crate::config::TlsConfig::default(),
+            tcp: crate::config::TcpConfig::default(),
         });
         let target =
             crate::route::target::Target::new("svc".into(), "grpcs://example.com/service".into());
@@ -1300,6 +1049,7 @@ mod tests {
                 listen: ":9999".into(),
                 admin_listen: "127.0.0.1:9998".into(),
                 admin_token: String::new(),
+                admin_users: vec![],
                 workers: 0,
             },
             consul: crate::config::ConsulConfig {
@@ -1311,10 +1061,15 @@ mod tests {
                 poll_interval: "0s".into(),
                 service_discovery: true,
                 kv_watching: true,
+                service_whitelist: Vec::new(),
+                service_blacklist: Vec::new(),
+                graceful_shutdown: true,
+                include_warning: false,
             },
             proxy: crate::config::ProxyConfig::default(),
             logging: crate::config::LoggingConfig::default(),
             tls: crate::config::TlsConfig::default(),
+            tcp: crate::config::TcpConfig::default(),
         });
         let mut target =
             crate::route::target::Target::new("svc".into(), "wss://example.com/socket".into());
@@ -1337,6 +1092,7 @@ mod tests {
                 listen: ":9999".into(),
                 admin_listen: "127.0.0.1:9998".into(),
                 admin_token: String::new(),
+                admin_users: vec![],
                 workers: 0,
             },
             consul: crate::config::ConsulConfig {
@@ -1348,10 +1104,15 @@ mod tests {
                 poll_interval: "0s".into(),
                 service_discovery: true,
                 kv_watching: true,
+                service_whitelist: Vec::new(),
+                service_blacklist: Vec::new(),
+                graceful_shutdown: true,
+                include_warning: false,
             },
             proxy: crate::config::ProxyConfig::default(),
             logging: crate::config::LoggingConfig::default(),
             tls: crate::config::TlsConfig::default(),
+            tcp: crate::config::TcpConfig::default(),
         });
         let mut target =
             crate::route::target::Target::new("svc".into(), "grpcs://example.com/service".into());

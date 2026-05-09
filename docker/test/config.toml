@@ -1,0 +1,57 @@
+# Sentirum LB — local test configuration
+[server]
+listen = "0.0.0.0:9999"
+admin_listen = "0.0.0.0:9998"
+admin_token = "admin123"
+workers = 2
+
+# Admin users for dashboard
+[[server.admin_users]]
+username = "admin"
+password = "admin123"
+
+[[server.admin_users]]
+username = "viewer"
+password = "viewer123"
+
+[consul]
+address = "consul:8500"
+scheme = "http"
+kv_prefix = "/sentirum-lb/routes"
+tag_prefix = "urlprefix-"
+poll_interval = "0s"
+service_discovery = true
+kv_watching = true
+
+[proxy]
+strategy = "round-robin"
+matcher = "prefix"
+request_id_header = "X-Request-ID"
+no_route_status = 404
+connect_timeout = "3s"
+read_timeout = "10s"
+write_timeout = "10s"
+idle_timeout = "30s"
+enable_h2c = false
+pool_size = 64
+max_connections = 1000
+circuit_breaker_enabled = true
+circuit_breaker_error_threshold = 50
+circuit_breaker_window_size = 20
+circuit_breaker_recovery_timeout = 10
+circuit_breaker_half_open_max = 3
+dns_cache_ttl = 10
+dns_negative_cache_ttl = 5
+
+[logging]
+level = "debug"
+format = "text"
+
+[tls]
+source = ""
+listen = ""
+
+[tcp]
+mode = "tcp"
+listen = "0.0.0.0:9222"
+refresh = "2s"
