@@ -4,7 +4,7 @@ set -uo pipefail
 
 LB="http://localhost:9999"
 ADMIN="http://localhost:9998"
-TOKEN="test-token"
+TOKEN="admin123"
 PASS=0
 FAIL=0
 
