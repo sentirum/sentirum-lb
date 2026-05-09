@@ -38,6 +38,9 @@ pub struct ServerConfig {
     /// Number of worker threads (0 = auto)
     #[serde(default)]
     pub workers: usize,
+    /// Graceful connection drain timeout on shutdown.
+    #[serde(default = "default_drain_timeout")]
+    pub drain_timeout: String,
 }
 
 fn default_admin_listen() -> String {
@@ -50,6 +53,10 @@ fn default_admin_token() -> String {
 
 fn default_admin_users() -> Vec<AdminUser> {
     Vec::new()
+}
+
+fn default_drain_timeout() -> String {
+    "30s".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -210,6 +217,24 @@ pub struct ProxyConfig {
     /// Max probe requests in half-open state.
     #[serde(default = "default_circuit_breaker_half_open_max")]
     pub circuit_breaker_half_open_max: usize,
+    /// Health check interval (e.g., "15s"). 0 = disabled.
+    #[serde(default = "default_health_check_interval")]
+    pub health_check_interval: String,
+    /// Health check timeout.
+    #[serde(default = "default_health_check_timeout")]
+    pub health_check_timeout: String,
+    /// Consecutive failures to remove target from pool.
+    #[serde(default = "default_health_check_fall")]
+    pub health_check_fall: usize,
+    /// Consecutive successes to add target back to pool.
+    #[serde(default = "default_health_check_rise")]
+    pub health_check_rise: usize,
+    /// Rate limit per target (0 = unlimited).
+    #[serde(default)]
+    pub rate_limit_per_target: usize,
+    /// Rate limit burst allowance.
+    #[serde(default = "default_rate_limit_burst")]
+    pub rate_limit_burst: usize,
 }
 
 impl Default for ProxyConfig {
@@ -236,6 +261,12 @@ impl Default for ProxyConfig {
             circuit_breaker_window_size: default_circuit_breaker_window_size(),
             circuit_breaker_recovery_timeout: default_circuit_breaker_recovery_timeout(),
             circuit_breaker_half_open_max: default_circuit_breaker_half_open_max(),
+            health_check_interval: default_health_check_interval(),
+            health_check_timeout: default_health_check_timeout(),
+            health_check_fall: default_health_check_fall(),
+            health_check_rise: default_health_check_rise(),
+            rate_limit_per_target: 0,
+            rate_limit_burst: default_rate_limit_burst(),
         }
     }
 }
@@ -272,6 +303,26 @@ fn default_pool_size() -> usize {
 }
 fn default_max_connections() -> usize {
     10000
+}
+
+fn default_health_check_interval() -> String {
+    "15s".to_string()
+}
+
+fn default_health_check_timeout() -> String {
+    "5s".to_string()
+}
+
+fn default_health_check_fall() -> usize {
+    3
+}
+
+fn default_health_check_rise() -> usize {
+    2
+}
+
+fn default_rate_limit_burst() -> usize {
+    100
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -437,6 +488,141 @@ impl Config {
             Duration::ZERO
         })
     }
+
+    /// Validate configuration and return errors as a combined message.
+    /// Returns None if valid, Some(String) with error description if invalid.
+    pub fn validate(&self) -> Option<String> {
+        let mut errors = Vec::new();
+
+        // Validate circuit breaker threshold (0-100)
+        if self.proxy.circuit_breaker_error_threshold > 100 {
+            errors.push(format!(
+                "circuit_breaker_error_threshold must be 0-100, got {}",
+                self.proxy.circuit_breaker_error_threshold
+            ));
+        }
+
+        // Validate circuit breaker window size
+        if self.proxy.circuit_breaker_window_size == 0 {
+            errors.push("circuit_breaker_window_size must be > 0".to_string());
+        }
+
+        // Validate circuit breaker recovery timeout
+        if self.proxy.circuit_breaker_recovery_timeout == 0 {
+            errors.push("circuit_breaker_recovery_timeout must be > 0".to_string());
+        }
+
+        // Validate circuit breaker half-open max
+        if self.proxy.circuit_breaker_half_open_max == 0 {
+            errors.push("circuit_breaker_half_open_max must be > 0".to_string());
+        }
+
+        // Validate DNS cache TTL
+        if self.proxy.dns_cache_ttl > 3600 {
+            errors.push(format!(
+                "dns_cache_ttl should be <= 3600 (1 hour), got {} seconds",
+                self.proxy.dns_cache_ttl
+            ));
+        }
+
+        // Validate DNS negative cache TTL
+        if self.proxy.dns_negative_cache_ttl > 300 {
+            errors.push(format!(
+                "dns_negative_cache_ttl should be <= 300 (5 min), got {} seconds",
+                self.proxy.dns_negative_cache_ttl
+            ));
+        }
+
+        // Validate trusted_proxies CIDR format
+        for cidr in &self.proxy.trusted_proxies {
+            if let Err(e) = validate_cidr(cidr) {
+                errors.push(format!("Invalid CIDR '{}': {}", cidr, e));
+            }
+        }
+
+        // Validate admin token length (security warning)
+        if self.server.admin_token.len() > 0 && self.server.admin_token.len() < 16 {
+            tracing::warn!(
+                "admin_token is {} characters, recommend >= 16 for security",
+                self.server.admin_token.len()
+            );
+        }
+
+        // Validate TLS cert path when source=file
+        if self.tls.source == "file" {
+            if self.tls.cert_path.is_empty() {
+                errors.push("tls.cert_path required when tls.source='file'".to_string());
+            }
+            if self.tls.key_path.is_empty() {
+                errors.push("tls.key_path required when tls.source='file'".to_string());
+            }
+        }
+
+        // Validate consul_cert_prefix format
+        if !self.tls.consul_cert_prefix.is_empty() && !self.tls.consul_cert_prefix.starts_with('/') {
+            errors.push("tls.consul_cert_prefix must start with '/'".to_string());
+        }
+
+        // Validate client_auth values
+        if !self.tls.client_auth.is_empty()
+            && self.tls.client_auth != "optional"
+            && self.tls.client_auth != "required" {
+            errors.push("tls.client_auth must be 'optional', 'required', or empty".to_string());
+        }
+
+        // Validate workers
+        if self.server.workers > 256 {
+            errors.push(format!(
+                "workers should be <= 256, got {} (consider 0 for auto)",
+                self.server.workers
+            ));
+        }
+
+        // Validate upstream_h2_max_streams
+        if self.proxy.upstream_h2_max_streams > 1000 {
+            errors.push(format!(
+                "upstream_h2_max_streams should be <= 1000, got {}",
+                self.proxy.upstream_h2_max_streams
+            ));
+        }
+
+        if errors.is_empty() {
+            None
+        } else {
+            Some(errors.join("; "))
+        }
+    }
+}
+
+fn validate_cidr(cidr: &str) -> Result<(), String> {
+    let cidr = cidr.trim();
+    if cidr.is_empty() {
+        return Err("empty CIDR".to_string());
+    }
+
+    let (ip, prefix_str) = cidr.split_once('/')
+        .ok_or_else(|| format!("CIDR '{}' missing '/' separator", cidr))?;
+
+    // Validate IP part
+    ip.parse::<std::net::IpAddr>()
+        .map_err(|e| format!("invalid IP '{}': {}", ip, e))?;
+
+    // Validate prefix
+    let prefix: u8 = prefix_str.parse()
+        .map_err(|_| format!("prefix '{}' not a number", prefix_str))?;
+
+    // Check prefix range for the IP family
+    let ip_is_v4 = ip.contains('.') && !ip.contains(':');
+    let max_prefix = if ip_is_v4 { 32 } else { 128 };
+
+    if prefix > max_prefix {
+        return Err(format!(
+            "prefix {} > {} for {}",
+            prefix, max_prefix, if ip_is_v4 { "IPv4" } else { "IPv6" }
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -489,5 +675,117 @@ mod tests {
         assert!(tcp.mode.is_empty());
         assert!(tcp.listen.is_empty());
         assert_eq!(tcp.refresh, "5s");
+    }
+
+    #[test]
+    fn proxy_config_health_check_defaults() {
+        let proxy = ProxyConfig::default();
+        assert_eq!(proxy.health_check_interval, "15s");
+        assert_eq!(proxy.health_check_timeout, "5s");
+        assert_eq!(proxy.health_check_fall, 3);
+        assert_eq!(proxy.health_check_rise, 2);
+    }
+
+    #[test]
+    fn proxy_config_rate_limit_defaults() {
+        let proxy = ProxyConfig::default();
+        assert_eq!(proxy.rate_limit_per_target, 0);
+        assert_eq!(proxy.rate_limit_burst, 100);
+    }
+
+    #[test]
+    fn server_config_drain_timeout_default() {
+        let toml_str = r#"
+listen = ":9999"
+admin_listen = "127.0.0.1:9998"
+admin_token = ""
+admin_users = []
+workers = 0
+drain_timeout = "30s"
+"#;
+        let server: ServerConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(server.drain_timeout, "30s");
+    }
+
+    #[test]
+    fn validate_cidr_rejects_invalid() {
+        // Empty CIDR
+        assert!(validate_cidr("").is_err());
+        // Missing prefix
+        assert!(validate_cidr("192.168.1.1").is_err());
+        // Invalid prefix
+        assert!(validate_cidr("192.168.1.1/33").is_err());
+        // Invalid IP
+        assert!(validate_cidr("not.an.ip/24").is_err());
+    }
+
+    #[test]
+    fn validate_cidr_accepts_valid() {
+        assert!(validate_cidr("192.168.1.0/24").is_ok());
+        assert!(validate_cidr("10.0.0.0/8").is_ok());
+        assert!(validate_cidr("172.16.0.0/12").is_ok());
+        assert!(validate_cidr("127.0.0.1/32").is_ok());
+        assert!(validate_cidr("::1/128").is_ok());
+        assert!(validate_cidr("2001:db8::/32").is_ok());
+    }
+
+    #[test]
+    fn config_validate_rejects_invalid_settings() {
+        // Use toml parsing or construct manually
+        let toml_str = r#"
+[server]
+listen = ":9999"
+admin_listen = "127.0.0.1:9998"
+admin_token = ""
+admin_users = []
+workers = 0
+drain_timeout = "30s"
+
+[consul]
+address = "127.0.0.1:8500"
+services = []
+tags = []
+"#
+        .to_string();
+
+        let mut config: Config = toml::from_str(&toml_str).unwrap();
+        config.proxy.circuit_breaker_error_threshold = 150;  // > 100
+        assert!(config.validate().is_some());
+
+        let mut config: Config = toml::from_str(&toml_str).unwrap();
+        config.proxy.circuit_breaker_window_size = 0;  // must be > 0
+        assert!(config.validate().is_some());
+
+        let mut config: Config = toml::from_str(&toml_str).unwrap();
+        config.proxy.trusted_proxies = vec!["invalid-cidr".to_string()];
+        assert!(config.validate().is_some());
+
+        let mut config: Config = toml::from_str(&toml_str).unwrap();
+        config.tls.source = "file".to_string();
+        config.tls.cert_path = "".to_string();
+        config.tls.key_path = "".to_string();
+        assert!(config.validate().is_some());
+    }
+
+    #[test]
+    fn config_validate_accepts_valid_settings() {
+        let toml_str = r#"
+[server]
+listen = ":9999"
+admin_listen = "127.0.0.1:9998"
+admin_token = "averysecuretoken123456789"
+admin_users = []
+workers = 0
+drain_timeout = "30s"
+
+[consul]
+address = "127.0.0.1:8500"
+services = []
+tags = []
+"#
+        .to_string();
+
+        let config: Config = toml::from_str(&toml_str).unwrap();
+        assert!(config.validate().is_none());
     }
 }

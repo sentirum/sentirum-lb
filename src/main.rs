@@ -338,6 +338,7 @@ fn main() {
             admin_token: String::new(),
             admin_users: vec![],
             workers: 0,
+            drain_timeout: "30s".to_string(),
         };
         let consul = sentirum_lb::config::ConsulConfig {
             address: args
@@ -378,12 +379,20 @@ fn main() {
     if let Some(listen) = &args.listen {
         config.server.listen = listen.clone();
     }
+
     if let Some(consul) = &args.consul {
         config.consul.address = consul.clone();
     }
     if let Some(log_level) = &args.log_level {
         config.logging.level = log_level.clone();
     }
+
+    // Validate configuration
+    if let Some(validation_error) = config.validate() {
+        eprintln!("Config validation failed: {}", validation_error);
+        std::process::exit(1);
+    }
+
 
     // Initialize logging
     init_logging(&config);

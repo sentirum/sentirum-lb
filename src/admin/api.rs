@@ -6,6 +6,7 @@
 //! - `GET /admin/routes` — Route table inspection
 //! - `GET /admin/metrics` — Prometheus metrics
 //! - `GET /admin/config` — Config inspection
+//! - `PUT /admin/config` — Update runtime configuration (hot-reload)
 //! - `GET /admin/certs` — Runtime TLS certificate status
 //! - `GET /admin/logs` — Recent log entries (JSON)
 //! - `GET /admin/logs/stream` — Live log stream (SSE)
@@ -20,7 +21,7 @@ use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::Response;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use futures::stream::Stream;
 use tokio_stream::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,63 @@ const LOGIN_MAX_ATTEMPTS: u32 = 5;
 /// Login rate-limit window in seconds.
 const LOGIN_WINDOW_SECS: u64 = 60;
 
+/// Request body for config update (partial update - only specified fields are applied)
+#[derive(Deserialize)]
+pub struct ConfigUpdateRequest {
+    #[serde(default)]
+    pub proxy: Option<ProxyConfigUpdate>,
+    #[serde(default)]
+    pub logging: Option<LoggingConfigUpdate>,
+}
+
+#[derive(Deserialize)]
+pub struct ProxyConfigUpdate {
+    #[serde(default)]
+    pub strategy: Option<String>,
+    #[serde(default)]
+    pub matcher: Option<String>,
+    #[serde(default)]
+    pub connect_timeout: Option<String>,
+    #[serde(default)]
+    pub read_timeout: Option<String>,
+    #[serde(default)]
+    pub write_timeout: Option<String>,
+    #[serde(default)]
+    pub idle_timeout: Option<String>,
+    #[serde(default)]
+    pub pool_size: Option<usize>,
+    #[serde(default)]
+    pub max_connections: Option<usize>,
+    #[serde(default)]
+    pub circuit_breaker_error_threshold: Option<u8>,
+    #[serde(default)]
+    pub circuit_breaker_window_size: Option<usize>,
+    #[serde(default)]
+    pub circuit_breaker_recovery_timeout: Option<u64>,
+    #[serde(default)]
+    pub circuit_breaker_half_open_max: Option<usize>,
+    #[serde(default)]
+    pub health_check_interval: Option<String>,
+    #[serde(default)]
+    pub health_check_timeout: Option<String>,
+    #[serde(default)]
+    pub health_check_fall: Option<usize>,
+    #[serde(default)]
+    pub health_check_rise: Option<usize>,
+    #[serde(default)]
+    pub rate_limit_per_target: Option<usize>,
+    #[serde(default)]
+    pub rate_limit_burst: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub struct LoggingConfigUpdate {
+    #[serde(default)]
+    pub level: Option<String>,
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
 
 /// Session entry with creation timestamp for TTL eviction.
 pub struct SessionEntry {
@@ -56,7 +114,7 @@ pub struct SessionEntry {
 /// Shared state for admin API handlers
 #[derive(Clone)]
 pub struct AdminState {
-    pub config: Arc<Config>,
+    pub config: Arc<RwLock<Config>>,
     pub route_table: Arc<ManagedRouteTable>,
     pub tls_store: Option<Arc<DynamicCertStore>>,
     pub client_ca_store: Option<Arc<DynamicClientCaStore>>,
@@ -143,6 +201,7 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/routes", get(routes_handler))
         .route("/admin/metrics", get(metrics_handler))
         .route("/admin/config", get(config_handler))
+        .route("/admin/config", put(config_update_handler))
         .route("/admin/certs", get(certs_handler))
         .route("/admin/logs", get(logs_handler))
         .route("/admin/targets", get(targets_handler))
@@ -153,7 +212,11 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/logs/stream", get(logs_stream_handler))
         .route("/admin/metrics/stream", get(metrics_stream_handler));
 
-    if state.config.server.admin_token.is_empty() && state.config.server.admin_users.is_empty() {
+    let no_auth = {
+        let config = state.config.try_read().expect("config lock");
+        config.server.admin_token.is_empty() && config.server.admin_users.is_empty()
+    };
+    if no_auth {
         public.merge(protected).with_state(state)
     } else {
         public.with_state(state.clone())
@@ -200,16 +263,17 @@ async fn login_handler(
     }
 
     // Check against configured users (with bcrypt verification)
-    let valid = state.config.server.admin_users.iter()
+    let config = state.config.read().await;
+    let valid = config.server.admin_users.iter()
         .any(|u| u.username == req.username && verify_password(&req.password, &u.password));
     
     // Also check legacy admin_token for backwards compat (constant-time)
-    let legacy_valid = !state.config.server.admin_token.is_empty() &&
-        constant_time_eq(&req.password, &state.config.server.admin_token);
+    let legacy_valid = !config.server.admin_token.is_empty() &&
+        constant_time_eq(&req.password, &config.server.admin_token);
     
     if valid || legacy_valid {
         let user = if valid {
-            state.config.server.admin_users.iter()
+            config.server.admin_users.iter()
                 .find(|u| u.username == req.username)
                 .map(|u| u.username.clone())
                 .unwrap_or(req.username.clone())
@@ -442,7 +506,8 @@ async fn metrics_handler() -> impl axum::response::IntoResponse {
 }
 
 async fn certs_handler(State(state): State<AdminState>) -> axum::Json<serde_json::Value> {
-    let tls_source = match crate::proxy::tls::TlsMode::resolve(&state.config.tls) {
+    let config = state.config.read().await;
+    let tls_source = match crate::proxy::tls::TlsMode::resolve(&config.tls) {
         Ok(Some(crate::proxy::tls::TlsMode::File(_))) => "file",
         Ok(Some(crate::proxy::tls::TlsMode::ConsulKv(_))) => "consul_kv",
         Ok(None) => "disabled",
@@ -454,9 +519,9 @@ async fn certs_handler(State(state): State<AdminState>) -> axum::Json<serde_json
 
     axum::Json(serde_json::json!({
         "source": tls_source,
-        "strict_sni": state.config.tls.strict_sni,
-        "require_initial_snapshot": state.config.tls.require_initial_snapshot,
-        "consul_cert_prefix": state.config.tls.consul_cert_prefix,
+        "strict_sni": config.tls.strict_sni,
+        "require_initial_snapshot": config.tls.require_initial_snapshot,
+        "consul_cert_prefix": config.tls.consul_cert_prefix,
         "loaded_certificates": runtime.as_ref().map(|s| s.loaded_certificates.clone()).unwrap_or_default(),
         "certificates": runtime.as_ref().map(|s| s.certificates.clone()).unwrap_or_default(),
         "default_certificate": runtime.as_ref().and_then(|s| s.default_certificate.clone()),
@@ -464,11 +529,11 @@ async fn certs_handler(State(state): State<AdminState>) -> axum::Json<serde_json
         "last_reload_unix": runtime.as_ref().and_then(|s| s.last_reload_unix),
         "last_error": runtime.as_ref().and_then(|s| s.last_error.clone()),
         "client_auth": {
-            "mode": state.config.tls.client_auth,
-            "ca_source": state.config.tls.client_ca_source,
-            "ca_path": state.config.tls.client_ca_path,
-            "ca_consul_prefix": state.config.tls.client_ca_consul_prefix,
-            "ca_upgrade_cn": state.config.tls.client_ca_upgrade_cn,
+            "mode": config.tls.client_auth,
+            "ca_source": config.tls.client_ca_source,
+            "ca_path": config.tls.client_ca_path,
+            "ca_consul_prefix": config.tls.client_ca_consul_prefix,
+            "ca_upgrade_cn": config.tls.client_ca_upgrade_cn,
             "loaded_entries": client_ca_runtime.as_ref().map(|s| s.loaded_entries.clone()).unwrap_or_default(),
             "certificates": client_ca_runtime.as_ref().map(|s| s.certificates.clone()).unwrap_or_default(),
             "last_consul_index": client_ca_runtime.as_ref().map(|s| s.last_consul_index).unwrap_or_default(),
@@ -479,7 +544,8 @@ async fn certs_handler(State(state): State<AdminState>) -> axum::Json<serde_json
 }
 
 async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_json::Value> {
-    let tls_source = match crate::proxy::tls::TlsMode::resolve(&state.config.tls) {
+    let config = state.config.read().await;
+    let tls_source = match crate::proxy::tls::TlsMode::resolve(&config.tls) {
         Ok(Some(crate::proxy::tls::TlsMode::File(_))) => "file",
         Ok(Some(crate::proxy::tls::TlsMode::ConsulKv(_))) => "consul_kv",
         Ok(None) => "disabled",
@@ -488,51 +554,164 @@ async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
 
     axum::Json(serde_json::json!({
         "server": {
-            "listen": state.config.server.listen,
-            "admin_listen": state.config.server.admin_listen,
-            "workers": state.config.server.workers,
+            "listen": config.server.listen,
+            "admin_listen": config.server.admin_listen,
+            "workers": config.server.workers,
         },
         "consul": {
-            "address": state.config.consul.address,
-            "scheme": state.config.consul.scheme,
-            "kv_prefix": state.config.consul.kv_prefix,
-            "tag_prefix": state.config.consul.tag_prefix,
+            "address": config.consul.address,
+            "scheme": config.consul.scheme,
+            "kv_prefix": config.consul.kv_prefix,
+            "tag_prefix": config.consul.tag_prefix,
         },
         "proxy": {
-            "strategy": state.config.proxy.strategy,
-            "matcher": state.config.proxy.matcher,
-            "connect_timeout": state.config.proxy.connect_timeout,
-            "read_timeout": state.config.proxy.read_timeout,
-            "write_timeout": state.config.proxy.write_timeout,
-            "idle_timeout": state.config.proxy.idle_timeout,
-            "enable_h2c": state.config.proxy.enable_h2c,
-            "upstream_h2_max_streams": state.config.proxy.upstream_h2_max_streams,
-            "upstream_h2_ping_interval": state.config.proxy.upstream_h2_ping_interval,
-            "pool_size": state.config.proxy.pool_size,
-            "max_connections": state.config.proxy.max_connections,
+            "strategy": config.proxy.strategy,
+            "matcher": config.proxy.matcher,
+            "connect_timeout": config.proxy.connect_timeout,
+            "read_timeout": config.proxy.read_timeout,
+            "write_timeout": config.proxy.write_timeout,
+            "idle_timeout": config.proxy.idle_timeout,
+            "enable_h2c": config.proxy.enable_h2c,
+            "upstream_h2_max_streams": config.proxy.upstream_h2_max_streams,
+            "upstream_h2_ping_interval": config.proxy.upstream_h2_ping_interval,
+            "pool_size": config.proxy.pool_size,
+            "max_connections": config.proxy.max_connections,
         },
         "tls": {
             "source": tls_source,
-            "listen": state.config.tls.listen,
-            "strict_sni": state.config.tls.strict_sni,
-            "require_initial_snapshot": state.config.tls.require_initial_snapshot,
-            "cert_path": state.config.tls.cert_path,
-            "key_path": state.config.tls.key_path,
-            "consul_cert_prefix": state.config.tls.consul_cert_prefix,
-            "client_auth": state.config.tls.client_auth,
-            "client_ca_source": state.config.tls.client_ca_source,
-            "client_ca_path": state.config.tls.client_ca_path,
-            "client_ca_consul_prefix": state.config.tls.client_ca_consul_prefix,
-            "client_ca_upgrade_cn": state.config.tls.client_ca_upgrade_cn,
+            "listen": config.tls.listen,
+            "strict_sni": config.tls.strict_sni,
+            "require_initial_snapshot": config.tls.require_initial_snapshot,
+            "cert_path": config.tls.cert_path,
+            "key_path": config.tls.key_path,
+            "consul_cert_prefix": config.tls.consul_cert_prefix,
+            "client_auth": config.tls.client_auth,
+            "client_ca_source": config.tls.client_ca_source,
+            "client_ca_path": config.tls.client_ca_path,
+            "client_ca_consul_prefix": config.tls.client_ca_consul_prefix,
+            "client_ca_upgrade_cn": config.tls.client_ca_upgrade_cn,
         },
         "tcp": {
-            "mode": state.config.tcp.mode,
-            "listen": state.config.tcp.listen,
-            "refresh": state.config.tcp.refresh,
+            "mode": config.tcp.mode,
+            "listen": config.tcp.listen,
+            "refresh": config.tcp.refresh,
         },
     }))
 }
 
+
+/// PUT /admin/config - Update runtime configuration
+async fn config_update_handler(
+    State(state): State<AdminState>,
+    Json(update): Json<ConfigUpdateRequest>,
+) -> axum::Json<serde_json::Value> {
+    let mut new_proxy;
+    let mut new_logging;
+    let temp_config;
+    {
+        let config = state.config.read().await;
+        new_proxy = config.proxy.clone();
+        new_logging = config.logging.clone();
+
+        // Apply proxy updates
+        if let Some(proxy) = &update.proxy {
+            if let Some(v) = &proxy.strategy {
+                new_proxy.strategy = v.clone();
+            }
+            if let Some(v) = &proxy.matcher {
+                new_proxy.matcher = v.clone();
+            }
+            if let Some(v) = &proxy.connect_timeout {
+                new_proxy.connect_timeout = v.clone();
+            }
+            if let Some(v) = &proxy.read_timeout {
+                new_proxy.read_timeout = v.clone();
+            }
+            if let Some(v) = &proxy.write_timeout {
+                new_proxy.write_timeout = v.clone();
+            }
+            if let Some(v) = &proxy.idle_timeout {
+                new_proxy.idle_timeout = v.clone();
+            }
+            if let Some(v) = proxy.pool_size {
+                new_proxy.pool_size = v;
+            }
+            if let Some(v) = proxy.max_connections {
+                new_proxy.max_connections = v;
+            }
+            if let Some(v) = proxy.circuit_breaker_error_threshold {
+                new_proxy.circuit_breaker_error_threshold = v;
+            }
+            if let Some(v) = proxy.circuit_breaker_window_size {
+                new_proxy.circuit_breaker_window_size = v;
+            }
+            if let Some(v) = proxy.circuit_breaker_recovery_timeout {
+                new_proxy.circuit_breaker_recovery_timeout = v;
+            }
+            if let Some(v) = proxy.circuit_breaker_half_open_max {
+                new_proxy.circuit_breaker_half_open_max = v;
+            }
+            if let Some(v) = &proxy.health_check_interval {
+                new_proxy.health_check_interval = v.clone();
+            }
+            if let Some(v) = &proxy.health_check_timeout {
+                new_proxy.health_check_timeout = v.clone();
+            }
+            if let Some(v) = proxy.health_check_fall {
+                new_proxy.health_check_fall = v;
+            }
+            if let Some(v) = proxy.health_check_rise {
+                new_proxy.health_check_rise = v;
+            }
+            if let Some(v) = proxy.rate_limit_per_target {
+                new_proxy.rate_limit_per_target = v;
+            }
+            if let Some(v) = proxy.rate_limit_burst {
+                new_proxy.rate_limit_burst = v;
+            }
+        }
+
+        // Apply logging updates
+        if let Some(logging) = &update.logging {
+            if let Some(v) = &logging.level {
+                new_logging.level = v.clone();
+            }
+            if let Some(v) = &logging.format {
+                new_logging.format = v.clone();
+            }
+        }
+
+        // Create a temporary config for validation
+        temp_config = Config {
+            server: config.server.clone(),
+            consul: config.consul.clone(),
+            proxy: new_proxy.clone(),
+            logging: new_logging.clone(),
+            tls: config.tls.clone(),
+            tcp: config.tcp.clone(),
+        };
+    }
+
+    // Validate outside the read lock
+    if let Some(validation_error) = temp_config.validate() {
+        return axum::Json(serde_json::json!({
+            "success": false,
+            "error": format!("Validation failed: {}", validation_error),
+        }));
+    }
+
+    // Apply under write lock
+    {
+        let mut config = state.config.write().await;
+        config.proxy = new_proxy;
+        config.logging = new_logging;
+    }
+
+    axum::Json(serde_json::json!({
+        "success": true,
+        "message": "Configuration updated successfully",
+    }))
+}
 
 
 use crate::route::target::global_dns_cache;
@@ -908,6 +1087,7 @@ pub async fn run_admin_server(
     }
 
     let auth_enabled = !config.server.admin_token.is_empty() || !config.server.admin_users.is_empty();
+    let config = Arc::new(RwLock::new((*config).clone()));
     let state = AdminState {
         config,
         route_table,
@@ -978,22 +1158,24 @@ async fn admin_auth_middleware(
 ) -> Result<Response, (StatusCode, axum::Json<serde_json::Value>)> {
     // Path A: static admin_token via Bearer or X-Admin-Token header.
     // Only valid when admin_token is actually configured (non-empty).
-    let expected = state.config.server.admin_token.as_str();
+    let config = state.config.read().await;
+    let expected = config.server.admin_token.clone();
     let token_auth = if !expected.is_empty() {
         headers
             .get(AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
-            .map(|value| constant_time_eq(value, expected))
+            .map(|value| constant_time_eq(value, &expected))
             .unwrap_or(false)
         || headers
             .get("x-admin-token")
             .and_then(|value| value.to_str().ok())
-            .map(|value| constant_time_eq(value, expected))
+            .map(|value| constant_time_eq(value, &expected))
             .unwrap_or(false)
     } else {
         false
     };
+    drop(config);
 
 
     // Path B: session-based auth — Bearer token lookup in session store.
@@ -1044,7 +1226,7 @@ async fn admin_auth_middleware(
             })
             .map(|token| {
                 // Check against admin_token (constant-time).
-                let matches_admin = !expected.is_empty() && constant_time_eq(&token, expected);
+                let matches_admin = !expected.is_empty() && constant_time_eq(&token, &expected);
                 if matches_admin {
                     return true;
                 }
@@ -1128,14 +1310,15 @@ mod tests {
     use http::Request;
     use tower::ServiceExt; // for oneshot()
 
-    fn make_test_config() -> Arc<Config> {
-        Arc::new(Config {
+    fn make_test_config() -> Arc<RwLock<Config>> {
+        Arc::new(RwLock::new(Config {
             server: ServerConfig {
                 listen: ":9999".to_string(),
                 admin_listen: "127.0.0.1:9998".to_string(),
                 admin_token: String::new(),
                 admin_users: vec![],
                 workers: 0,
+                drain_timeout: "30s".to_string(),
             },
             consul: ConsulConfig {
                 address: "127.0.0.1:8500".to_string(),
@@ -1155,7 +1338,7 @@ mod tests {
             logging: LoggingConfig::default(),
             tls: TlsConfig::default(),
             tcp: TcpConfig::default(),
-        })
+        }))
     }
 
     fn make_test_state() -> AdminState {
@@ -1172,13 +1355,14 @@ mod tests {
 
     fn make_authed_test_state(admin_token: &str, admin_users: Vec<AdminUser>) -> AdminState {
         AdminState {
-            config: Arc::new(Config {
+            config: Arc::new(RwLock::new(Config {
                 server: ServerConfig {
                     listen: ":9999".to_string(),
                     admin_listen: "127.0.0.1:9998".to_string(),
                     admin_token: admin_token.to_string(),
                     admin_users,
                     workers: 0,
+                drain_timeout: "30s".to_string(),
                 },
                 consul: ConsulConfig {
                     address: "127.0.0.1:8500".to_string(),
@@ -1198,7 +1382,7 @@ mod tests {
                 logging: LoggingConfig::default(),
                 tls: TlsConfig::default(),
                 tcp: TcpConfig::default(),
-            }),
+            })),
             route_table: Arc::new(ManagedRouteTable::new()),
             tls_store: None,
             client_ca_store: None,
@@ -1393,7 +1577,7 @@ mod tests {
     #[tokio::test]
     async fn test_admin_requires_token_when_configured() {
         let mut state = make_test_state();
-        Arc::make_mut(&mut state.config).server.admin_token = "secret".to_string();
+        state.config.try_write().expect("config lock").server.admin_token = "secret".to_string();
         let app = build_router(state);
         let response = app
             .oneshot(
@@ -1410,7 +1594,7 @@ mod tests {
     #[tokio::test]
     async fn test_admin_accepts_bearer_token() {
         let mut state = make_test_state();
-        Arc::make_mut(&mut state.config).server.admin_token = "secret".to_string();
+        state.config.try_write().expect("config lock").server.admin_token = "secret".to_string();
         let app = build_router(state);
         let response = app
             .oneshot(

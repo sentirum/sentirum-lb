@@ -1,9 +1,10 @@
 use crate::route::definition::RouteSource;
 use pingora::protocols::tls::ALPN;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use parking_lot::Mutex as ParkingMutex;
 use std::sync::{Arc, Mutex, Weak};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -115,28 +116,44 @@ impl Default for CircuitBreakerConfig {
     /// When error_threshold % of requests in the window fail, the circuit opens.
     /// After recovery_timeout, the circuit enters half-open and allows N probe requests.
     /// All probes succeed → circuit closes. Any probe fails → circuit reopens.
-#[derive(Debug)]
-pub struct CircuitBreaker {
-    /// Current circuit state (Arc-shared so clones preserve history across route rebuilds)
-    state: Arc<parking_lot::Mutex<CircuitInner>>,
-    /// Configuration (shared, read-only after init)
-    config: CircuitBreakerConfig,
-}
+
+
+
+/// Atomic circuit breaker for high-concurrency hot paths.
+/// Uses atomic operations instead of Mutex for the fast path (allow_request).
+/// Only uses Mutex for window modifications (record_success/error).
+///
+/// State encoding in a single u8:
+///   bits 0-1: CircuitState (Closed=0, Open=1, HalfOpen=2)
+///   bits 2-7: probe counter (only valid in HalfOpen)
 
 #[derive(Debug)]
-struct CircuitInner {
-    state: CircuitState,
-    /// Sliding window: success (false) / error (true) per request
-    window: std::collections::VecDeque<bool>,
-    /// Time when circuit last transitioned to Open
-    opened_at_ms: u64,
-    /// Number of probe requests sent in half-open state
-    half_open_requests: usize,
-    /// Number of successful probe requests in half-open state
-    half_open_successes: usize,
+pub struct CircuitBreaker {
+    /// Atomic state byte: bits 0-1 = state, bits 2-7 = probe_counter
+    state_atomic: AtomicU8,
+    /// Recovery timeout in seconds
+    recovery_timeout_secs: AtomicU64,
+    /// Error threshold percentage
+    error_threshold: u8,
+    /// Window size
+    window_size: usize,
+    /// Max probe requests in half-open state
+    half_open_max_requests: usize,
+    /// Sliding window: Arc shared so clones preserve history across route rebuilds
+    window: Arc<ParkingMutex<VecDeque<bool>>>,
+    /// Time when circuit last transitioned to Open (milliseconds)
+    opened_at_ms: AtomicU64,
+    /// Lock for window modifications only (fine-grained, not on hot path)
+    window_lock: std::sync::Mutex<()>,
     /// History of recent state transitions (ring buffer, max 20)
-    history: Vec<CircuitTransition>,
+    history: Arc<ParkingMutex<Vec<CircuitTransition>>>,
 }
+
+const STATE_MASK: u8 = 0x03;
+const STATE_CLOSED: u8 = 0;
+const STATE_OPEN: u8 = 1;
+const STATE_HALF_OPEN: u8 = 2;
+
 
 impl CircuitBreaker {
     /// Create a new circuit breaker with default config
@@ -147,150 +164,182 @@ impl CircuitBreaker {
     /// Create a new circuit breaker with custom config
     pub fn with_config(config: CircuitBreakerConfig) -> Self {
         Self {
-            state: Arc::new(parking_lot::Mutex::new(CircuitInner {
-                state: CircuitState::Closed,
-                window: std::collections::VecDeque::with_capacity(config.window_size),
-                opened_at_ms: 0,
-                half_open_requests: 0,
-                half_open_successes: 0,
-                history: Vec::with_capacity(20),
-            })),
-            config,
+            state_atomic: AtomicU8::new(STATE_CLOSED),
+            recovery_timeout_secs: AtomicU64::new(config.recovery_timeout_secs),
+            error_threshold: config.error_threshold,
+            window_size: config.window_size,
+            half_open_max_requests: config.half_open_max_requests,
+            window: Arc::new(ParkingMutex::new(VecDeque::with_capacity(config.window_size))),
+            opened_at_ms: AtomicU64::new(0),
+            window_lock: std::sync::Mutex::new(()),
+            history: Arc::new(ParkingMutex::new(Vec::with_capacity(20))),
         }
     }
 
     /// Returns true if the circuit allows a request to proceed.
-    /// If false, the caller should return 503 immediately.
+    /// Lock-free fast path using single atomic load.
+    #[inline]
     pub fn allow_request(&self) -> bool {
-        let mut inner = self.state.lock();
-        let now_ms = Self::now_ms();
-
-        match inner.state {
-            CircuitState::Closed => true,
-            CircuitState::Open => {
-                let elapsed = now_ms.saturating_sub(inner.opened_at_ms);
-                let recovery_ms = self.config.recovery_timeout_secs * 1000;
+        let state = self.state_atomic.load(Ordering::Acquire);
+        match state & STATE_MASK {
+            STATE_CLOSED => true,
+            STATE_OPEN => {
+                let recovery_timeout = self.recovery_timeout_secs.load(Ordering::Relaxed);
+                let opened_at = self.opened_at_ms.load(Ordering::Relaxed);
+                let now = now_ms();
+                let elapsed = now.saturating_sub(opened_at);
+                let recovery_ms = recovery_timeout * 1000;
                 if elapsed >= recovery_ms {
-                    let from = inner.state;
-                    inner.state = CircuitState::HalfOpen;
-                    Self::record_transition(&mut inner, from, CircuitState::HalfOpen);
-                    inner.half_open_requests = 0;
-                    inner.half_open_successes = 0;
-                    tracing::info!(
-                        recovery_timeout = self.config.recovery_timeout_secs,
-                        "Circuit breaker transitioning to half-open"
-                    );
-                    true
+                    self.try_transition_to_half_open()
                 } else {
                     false
                 }
             }
-            CircuitState::HalfOpen => {
-                inner.half_open_requests += 1;
-                inner.half_open_requests <= self.config.half_open_max_requests
+            STATE_HALF_OPEN => {
+                let probe_count = ((state >> 2) & 0x3F) as usize;
+                probe_count < self.half_open_max_requests
             }
+            _ => false,
+        }
+    }
+
+    /// Atomic transition to HalfOpen state
+    #[inline(always)]
+    fn try_transition_to_half_open(&self) -> bool {
+        let current = self.state_atomic.load(Ordering::Acquire);
+        let current_state = current & STATE_MASK;
+
+        if current_state == STATE_HALF_OPEN { return true; }
+        if current_state == STATE_CLOSED { return true; }
+
+        let new = STATE_HALF_OPEN | (1u8 << 2);
+
+        match self.state_atomic.compare_exchange(
+            current, new, Ordering::AcqRel, Ordering::Relaxed
+        ) {
+            Ok(_) => {
+                self.record_transition(CircuitState::Open, CircuitState::HalfOpen);
+                tracing::info!(
+                    recovery_timeout = self.recovery_timeout_secs.load(Ordering::Relaxed),
+                    "Circuit breaker transitioning to half-open"
+                );
+                true
+            }
+            Err(actual) => (actual & STATE_MASK) != STATE_OPEN,
         }
     }
 
     /// Record a successful request
     pub fn record_success(&self) {
-        let mut inner = self.state.lock();
-        match inner.state {
-            CircuitState::Closed => {
-                Self::push_window(&mut inner, false, self.config.window_size);
+        let state = self.state_atomic.load(Ordering::Acquire);
+        match state & STATE_MASK {
+            STATE_CLOSED => {
+                let _guard = self.window_lock.lock();
+                let mut window = self.window.lock();
+                if window.len() >= self.window_size { window.pop_front(); }
+                window.push_back(false);
             }
-            CircuitState::HalfOpen => {
-                inner.half_open_successes += 1;
-                if inner.half_open_successes >= self.config.half_open_max_requests {
-                    // All probes succeeded → close the circuit
-                    let from = inner.state;
-                    inner.state = CircuitState::Closed;
-                    Self::record_transition(&mut inner, from, CircuitState::Closed);
-                    inner.window.clear();
-                    tracing::info!(
-                        successes = inner.half_open_successes,
-                        "Circuit breaker closed after successful recovery probes"
+            STATE_HALF_OPEN => {
+                let probe_count = ((state >> 2) & 0x3F) as usize;
+                if probe_count >= self.half_open_max_requests {
+                    self.transition_to_closed();
+                    tracing::info!("Circuit breaker closed after successful recovery probes");
+                } else {
+                    let _ = self.state_atomic.compare_exchange(
+                        state, state + (1 << 2), Ordering::AcqRel, Ordering::Relaxed
                     );
                 }
             }
-            CircuitState::Open => {
-                // Success while open shouldn't happen (requests are blocked),
-                // but handle gracefully in case of race.
-            }
+            _ => {}
         }
     }
 
     /// Record a failed request (5xx, timeout, connection error)
     pub fn record_error(&self) {
-        let mut inner = self.state.lock();
-        match inner.state {
-            CircuitState::Closed => {
-                Self::push_window(&mut inner, true, self.config.window_size);
-                let error_count = inner.window.iter().filter(|&&e| e).count();
-                let threshold = self.config.window_size * self.config.error_threshold as usize / 100;
-                if error_count >= threshold && inner.window.len() >= self.config.window_size {
-                    let from = inner.state;
-                    inner.state = CircuitState::Open;
-                    Self::record_transition(&mut inner, from, CircuitState::Open);
-                    inner.opened_at_ms = Self::now_ms();
+        let state = self.state_atomic.load(Ordering::Acquire);
+        match state & STATE_MASK {
+            STATE_CLOSED => {
+                {
+                    let mut window = self.window.lock();
+                    if window.len() >= self.window_size { window.pop_front(); }
+                    window.push_back(true);
+                }
+                let window = self.window.lock();
+                let error_count = window.iter().filter(|&&e| e).count();
+                let threshold = self.window_size * self.error_threshold as usize / 100;
+                if error_count >= threshold && window.len() >= self.window_size {
+                    drop(window);
+                    self.transition_to_open();
                     tracing::warn!(
-                        error_rate = format!("{:.1}%", 100.0 * error_count as f64 / self.config.window_size as f64),
-                        error_count,
-                        window_size = self.config.window_size,
-                        threshold = threshold,
+                        error_rate = format!("{:.1}%", 100.0 * error_count as f64 / self.window_size as f64),
+                        error_count, window_size = self.window_size, threshold = threshold,
                         "Circuit breaker OPENED"
                     );
                 }
             }
-            CircuitState::HalfOpen => {
-                // Any error in half-open → reopen immediately
-                let from = inner.state;
-                inner.state = CircuitState::Open;
-                Self::record_transition(&mut inner, from, CircuitState::Open);
-                inner.opened_at_ms = Self::now_ms();
+            STATE_HALF_OPEN => {
+                self.transition_to_open();
                 tracing::warn!("Circuit breaker REOPENED — probe failed");
             }
-            CircuitState::Open => {
-                // Already open, refresh the timer on errors
-                inner.opened_at_ms = Self::now_ms();
+            STATE_OPEN => {
+                self.opened_at_ms.store(now_ms(), Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    #[inline(always)]
+    fn transition_to_open(&self) {
+        self.opened_at_ms.store(now_ms(), Ordering::Relaxed);
+        loop {
+            let current = self.state_atomic.load(Ordering::Acquire);
+            match self.state_atomic.compare_exchange(
+                current, STATE_OPEN, Ordering::AcqRel, Ordering::Relaxed
+            ) {
+                Ok(_) => { self.record_transition(CircuitState::Closed, CircuitState::Open); break; }
+                Err(actual) => if actual & STATE_MASK != STATE_CLOSED { break; }
             }
         }
     }
 
-    /// Get current circuit state (for metrics/admin)
+    #[inline(always)]
+    fn transition_to_closed(&self) {
+        let current = self.state_atomic.load(Ordering::Relaxed);
+        let _ = self.state_atomic.compare_exchange(
+            current, STATE_CLOSED, Ordering::AcqRel, Ordering::Relaxed
+        );
+        let mut window = self.window.lock();
+        window.clear();
+    }
+
+    #[inline]
     pub fn current_state(&self) -> CircuitState {
-        self.state.lock().state
-    }
-
-    fn push_window(inner: &mut CircuitInner, is_error: bool, window_size: usize) {
-        if inner.window.len() >= window_size {
-            inner.window.pop_front();
+        match self.state_atomic.load(Ordering::Acquire) & STATE_MASK {
+            STATE_CLOSED => CircuitState::Closed,
+            STATE_OPEN => CircuitState::Open,
+            STATE_HALF_OPEN => CircuitState::HalfOpen,
+            _ => CircuitState::Closed,
         }
-        inner.window.push_back(is_error);
     }
 
-    fn now_ms() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
+    #[inline]
+    fn record_transition(&self, from: CircuitState, to: CircuitState) {
+        let mut history = self.history.lock();
+        if history.len() >= 20 { history.remove(0); }
+        history.push(CircuitTransition { from, to, timestamp_ms: now_ms() });
     }
 
-    fn record_transition(inner: &mut CircuitInner, from: CircuitState, to: CircuitState) {
-        if inner.history.len() >= 20 {
-            inner.history.remove(0);
-        }
-        inner.history.push(CircuitTransition {
-            from,
-            to,
-            timestamp_ms: Self::now_ms(),
-        });
-    }
-
-    /// Get the history of recent state transitions (for admin/metrics)
     pub fn transition_history(&self) -> Vec<CircuitTransition> {
-        self.state.lock().history.clone()
+        self.history.lock().clone()
     }
+}
+
+#[inline]
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// Clone preserves the shared state via Arc so that route-table rebuilds
@@ -298,13 +347,21 @@ impl CircuitBreaker {
 impl Clone for CircuitBreaker {
     fn clone(&self) -> Self {
         Self {
-            state: Arc::clone(&self.state),
-            config: self.config.clone(),
+            state_atomic: AtomicU8::new(self.state_atomic.load(Ordering::Relaxed)),
+            recovery_timeout_secs: AtomicU64::new(self.recovery_timeout_secs.load(Ordering::Relaxed)),
+            error_threshold: self.error_threshold,
+            window_size: self.window_size,
+            half_open_max_requests: self.half_open_max_requests,
+            window: Arc::clone(&self.window),
+            opened_at_ms: AtomicU64::new(self.opened_at_ms.load(Ordering::Relaxed)),
+            window_lock: std::sync::Mutex::new(()),
+            history: Arc::clone(&self.history),
         }
     }
 }
 
- impl Default for CircuitBreaker {
+
+impl Default for CircuitBreaker {
      fn default() -> Self {
          Self::new()
      }

@@ -1003,7 +1003,7 @@ mod tests {
                 admin_token: String::new(),
                 admin_users: vec![],
                 workers: 0,
-            },
+            drain_timeout: String::new(),},
             consul: crate::config::ConsulConfig {
                 address: "127.0.0.1:8500".into(),
                 scheme: "http".into(),
@@ -1051,7 +1051,7 @@ mod tests {
                 admin_token: String::new(),
                 admin_users: vec![],
                 workers: 0,
-            },
+            drain_timeout: String::new(),},
             consul: crate::config::ConsulConfig {
                 address: "127.0.0.1:8500".into(),
                 scheme: "http".into(),
@@ -1094,7 +1094,7 @@ mod tests {
                 admin_token: String::new(),
                 admin_users: vec![],
                 workers: 0,
-            },
+            drain_timeout: String::new(),},
             consul: crate::config::ConsulConfig {
                 address: "127.0.0.1:8500".into(),
                 scheme: "http".into(),

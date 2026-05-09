@@ -102,6 +102,7 @@ impl Picker for RandomPicker {
 /// `Target::try_acquire_connection_slot`, forming a proper inter-thread
 /// ordering boundary without requiring full SeqCst serialization.
 
+
 pub struct LeastConnectionsPicker;
 
 impl Picker for LeastConnectionsPicker {
@@ -115,30 +116,40 @@ impl Picker for LeastConnectionsPicker {
             return None;
         }
 
-        // Acquire ordering: pairs with Release in try_acquire_connection_slot.
-        let has_weight = targets.iter().any(|t| t.weight > 0.0);
+        // Single-pass algorithm: find min with or without weights
+        // Avoids filter + min_by_key double iteration
+        let mut best: Option<Arc<Target>> = None;
+        let mut best_score: Option<u64> = None;
 
-        if has_weight {
-            // Weight-aware: pick the target with the lowest connections/weight ratio.
-            // Use OrderedFloat for deterministic comparison of f64 in min_by_key.
-            targets
-                .iter()
-                .filter(|t| t.weight > 0.0)
-                .min_by_key(|t| {
-                    let conns = t.active_connections.load(Ordering::Acquire) as f64;
-                    // Scale by 1e6 to preserve sub-integer precision in integer comparison.
-                    // weight ranges [0.001, 1.0], conns ranges [0, u64::MAX].
-                    // conns / weight gives effective load — lower is preferred.
-                    (conns / t.weight * 1e6) as u64
-                })
-                .map(Arc::clone)
-        } else {
-            // No weights configured — simple min-connections (Fabio-compatible).
-            targets
-                .iter()
-                .min_by_key(|t| t.active_connections.load(Ordering::Acquire))
-                .map(Arc::clone)
+        // First pass: weighted targets
+        for target in targets {
+            // Skip weight==0 targets (no traffic)
+            if target.weight <= 0.0 {
+                continue;
+            }
+            let conns = target.active_connections.load(Ordering::Acquire) as f64;
+            let score = (conns / target.weight * 1e6) as u64;
+
+            if best_score.map_or(true, |b| score < b) {
+                best = Some(Arc::clone(target));
+                best_score = Some(score);
+            }
         }
+
+        // If all weights are 0, fallback to simple min-connections
+        if best.is_none() {
+            for target in targets {
+                let conns = target.active_connections.load(Ordering::Acquire);
+                let score = conns;
+
+                if best_score.map_or(true, |b| score < b) {
+                    best = Some(Arc::clone(target));
+                    best_score = Some(score);
+                }
+            }
+        }
+
+        best
     }
 }
 

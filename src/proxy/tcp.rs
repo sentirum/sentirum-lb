@@ -768,7 +768,7 @@ mod tests {
                 admin_token: String::new(),
                 admin_users: vec![],
                 workers: 0,
-            },
+            drain_timeout: String::new(),},
             consul: ConsulConfig {
                 address: "127.0.0.1:8500".to_string(),
                 scheme: "http".to_string(),
