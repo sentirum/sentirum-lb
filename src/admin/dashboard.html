@@ -5,344 +5,426 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sentirum LB</title>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        html { font-size: 14px; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: #0f0f0f;
-            color: #e0e0e0;
-            line-height: 1.5;
+        :root {
+            --bg-0: #09090b;
+            --bg-1: #0c0c0f;
+            --bg-2: #111114;
+            --bg-3: #18181b;
+            --bg-4: #1e1e22;
+            --bg-5: #27272a;
+            --border: #27272a;
+            --border-hover: #3f3f46;
+            --text-0: #fafafa;
+            --text-1: #e4e4e7;
+            --text-2: #a1a1aa;
+            --text-3: #71717a;
+            --text-4: #52525b;
+            --accent: #818cf8;
+            --accent-dim: rgba(129,140,248,0.12);
+            --accent-border: rgba(129,140,248,0.25);
+            --green: #34d399;
+            --green-dim: rgba(52,211,153,0.12);
+            --green-border: rgba(52,211,153,0.25);
+            --yellow: #fbbf24;
+            --yellow-dim: rgba(251,191,36,0.12);
+            --yellow-border: rgba(251,191,36,0.25);
+            --red: #f87171;
+            --red-dim: rgba(248,113,113,0.12);
+            --red-border: rgba(248,113,113,0.25);
+            --blue: #60a5fa;
+            --radius-sm: 6px;
+            --radius: 10px;
+            --radius-lg: 14px;
+            --radius-xl: 18px;
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+            --shadow: 0 2px 8px rgba(0,0,0,0.3);
+            --shadow-lg: 0 8px 32px rgba(0,0,0,0.4);
+            --font-sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+            --font-mono: 'SF Mono', 'JetBrains Mono', 'Fira Code', monospace;
+            --transition: 150ms cubic-bezier(0.4, 0, 0.2, 1);
         }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html { font-size: 14px; -webkit-font-smoothing: antialiased; }
+        body { font-family: var(--font-sans); background: var(--bg-0); color: var(--text-1); line-height: 1.6; }
 
-        /* Login Screen */
+        /* ─── Login ─── */
         #login-screen {
-            position: fixed; inset: 0;
-            background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 100%);
-            display: flex; align-items: center; justify-content: center; z-index: 9999;
+            position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+            background: var(--bg-0); z-index: 9999;
+            background-image: radial-gradient(ellipse at 30% 20%, rgba(129,140,248,0.06) 0%, transparent 60%),
+                              radial-gradient(ellipse at 70% 80%, rgba(99,102,241,0.04) 0%, transparent 60%);
         }
         #login-screen.hidden { display: none; }
         .login-card {
-            background: rgba(20, 20, 20, 0.95); border: 1px solid #2a2a3a;
-            border-radius: 16px; padding: 3rem; text-align: center; min-width: 360px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+            background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-xl);
+            padding: 3rem; text-align: center; min-width: 380px; box-shadow: var(--shadow-lg);
         }
-        .login-card h1 { font-size: 1.8rem; font-weight: 600; color: #fff; margin-bottom: 0.5rem; }
-        .login-card .subtitle { color: #999; margin-bottom: 2rem; font-size: 0.9rem; }
-        .login-card input {
-            width: 100%; padding: 1rem; background: #1a1a1a; border: 1px solid #333;
-            border-radius: 8px; color: #fff; font-size: 1rem; margin-bottom: 1rem;
+        .login-logo { font-size: 2.2rem; font-weight: 700; color: var(--text-0); letter-spacing: -0.03em; margin-bottom: 0.25rem; }
+        .login-logo span { color: var(--accent); }
+        .login-sub { color: var(--text-3); font-size: 0.85rem; margin-bottom: 2.5rem; }
+        .login-field {
+            width: 100%; padding: 0.85rem 1rem; background: var(--bg-1); border: 1px solid var(--border);
+            border-radius: var(--radius); color: var(--text-0); font-size: 0.9rem; margin-bottom: 0.85rem;
+            transition: border-color var(--transition);
         }
-        .login-card input:focus { outline: none; border-color: #6366f1; }
-        .login-card button {
-            width: 100%; padding: 1rem; background: linear-gradient(135deg, #6366f1, #8b5cf6);
-            border: none; border-radius: 8px; color: #fff; font-size: 1rem; font-weight: 500; cursor: pointer;
+        .login-field:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+        .login-btn {
+            width: 100%; padding: 0.85rem; background: var(--accent); border: none; border-radius: var(--radius);
+            color: #fff; font-size: 0.9rem; font-weight: 600; cursor: pointer; transition: opacity var(--transition);
+            margin-top: 0.5rem;
         }
-        .login-card button:hover { opacity: 0.9; }
-        .login-error { color: #ef4444; font-size: 0.85rem; margin-top: 1rem; display: none; }
+        .login-btn:hover { opacity: 0.9; }
+        .login-error { color: var(--red); font-size: 0.8rem; margin-top: 1rem; display: none; }
 
-        /* Error banner */
+        /* ─── Error Banner ─── */
         .error-banner {
-            display: none; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3);
-            border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1.5rem; color: #ef4444; font-size: 0.85rem;
+            display: none; background: var(--red-dim); border: 1px solid var(--red-border);
+            border-radius: var(--radius); padding: 0.65rem 1rem; margin-bottom: 1.5rem;
+            color: var(--red); font-size: 0.8rem;
         }
         .error-banner.visible { display: flex; align-items: center; gap: 0.5rem; }
 
-        /* App Layout */
+        /* ─── Layout ─── */
         .app { display: none; }
-        .app.active { display: grid; }
-        .layout { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+        .app.active { display: block; }
+        .shell { display: flex; min-height: 100vh; }
 
-        /* Sidebar */
-        nav {
-            background: #0a0a0a; padding: 1.5rem 1rem; border-right: 1px solid #1a1a1a;
-            position: fixed; width: 220px; height: 100vh; display: flex; flex-direction: column;
+        /* ─── Sidebar ─── */
+        .sidebar {
+            width: 240px; background: var(--bg-1); border-right: 1px solid var(--border);
+            display: flex; flex-direction: column; position: fixed; top: 0; bottom: 0;
+            z-index: 100;
         }
-        .logo { font-size: 1.1rem; font-weight: 600; margin-bottom: 2rem; padding: 0 0.5rem; }
-        .logo span { color: #6366f1; }
-        .nav-links { flex: 1; }
-        .nav a {
-            display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 0.75rem;
-            color: #999; text-decoration: none; font-size: 0.85rem; border-radius: 6px;
+        .sidebar-head {
+            padding: 1.5rem 1.25rem 1rem; border-bottom: 1px solid var(--border);
         }
-        .nav a:hover, .nav a.active { background: #1a1a1a; color: #e0e0e0; }
-        .nav a.active { background: #1f1f2e; color: #6366f1; }
-        .nav-icon { font-size: 1.1rem; width: 20px; text-align: center; }
-        .user-section { padding-top: 1rem; border-top: 1px solid #1a1a1a; }
-        .user-info { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem; margin-bottom: 0.5rem; }
+        .brand { font-size: 1rem; font-weight: 700; letter-spacing: -0.02em; color: var(--text-0); }
+        .brand span { color: var(--accent); }
+        .brand-sub { font-size: 0.7rem; color: var(--text-4); margin-top: 0.15rem; text-transform: uppercase; letter-spacing: 0.08em; }
+        .sidebar-nav { flex: 1; padding: 0.75rem 0.5rem; overflow-y: auto; }
+        .nav-group-label { font-size: 0.65rem; font-weight: 600; color: var(--text-4); text-transform: uppercase; letter-spacing: 0.1em; padding: 1rem 0.75rem 0.4rem; }
+        .nav-item {
+            display: flex; align-items: center; gap: 0.6rem; padding: 0.55rem 0.75rem;
+            color: var(--text-3); text-decoration: none; font-size: 0.82rem; font-weight: 500;
+            border-radius: var(--radius-sm); transition: all var(--transition); margin-bottom: 1px;
+        }
+        .nav-item:hover { background: var(--bg-3); color: var(--text-1); }
+        .nav-item.active { background: var(--accent-dim); color: var(--accent); }
+        .nav-icon { font-size: 1rem; width: 18px; text-align: center; flex-shrink: 0; }
+        .sidebar-foot {
+            padding: 0.75rem; border-top: 1px solid var(--border);
+        }
+        .user-row { display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0.5rem; }
         .user-avatar {
-            width: 32px; height: 32px; background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            width: 28px; height: 28px; background: linear-gradient(135deg, var(--accent), #6366f1);
             border-radius: 50%; display: flex; align-items: center; justify-content: center;
-            font-weight: 600; font-size: 0.8rem;
+            font-weight: 700; font-size: 0.7rem; color: #fff; flex-shrink: 0;
         }
-        .user-name { font-size: 0.85rem; }
+        .user-name { font-size: 0.8rem; color: var(--text-1); font-weight: 500; }
         .logout-btn {
-            width: 100%; padding: 0.5rem; background: transparent; border: 1px solid #333;
-            border-radius: 6px; color: #999; font-size: 0.8rem; cursor: pointer;
+            width: 100%; padding: 0.45rem; background: transparent; border: 1px solid var(--border);
+            border-radius: var(--radius-sm); color: var(--text-3); font-size: 0.75rem; cursor: pointer;
+            margin-top: 0.5rem; transition: all var(--transition); font-weight: 500;
         }
-        .logout-btn:hover { border-color: #ef4444; color: #ef4444; }
+        .logout-btn:hover { border-color: var(--red-border); color: var(--red); background: var(--red-dim); }
 
-        /* Main content */
-        main { margin-left: 220px; padding: 2rem 2.5rem; }
+        /* ─── Main ─── */
+        .main { flex: 1; margin-left: 240px; padding: 2rem 2.5rem 3rem; min-width: 0; }
         .page { display: none; }
         .page.active { display: block; }
 
-        /* Header */
-        .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; }
-        h1 { font-size: 1.3rem; font-weight: 500; color: #ccc; }
-        .live-badge {
-            display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.8rem;
-            background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.3);
-            border-radius: 20px; font-size: 0.75rem; color: #22c55e;
-        }
-        .live-dot { width: 8px; height: 8px; background: #22c55e; border-radius: 50%; animation: pulse 2s infinite; }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        /* ─── Page Header ─── */
+        .page-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.75rem; }
+        .page-title { font-size: 1.35rem; font-weight: 600; color: var(--text-0); letter-spacing: -0.02em; }
+        .page-title-sub { font-size: 0.8rem; color: var(--text-3); font-weight: 400; margin-left: 0.75rem; }
 
-        /* Stats grid */
-        .stats {
-            display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 1px; background: #1a1a1a; border-radius: 12px; overflow: hidden; margin-bottom: 2rem;
+        /* ─── Status Pill ─── */
+        .pill {
+            display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.3rem 0.7rem;
+            border-radius: 20px; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.02em;
         }
-        .stat { background: #141414; padding: 1.5rem; }
-        .stat label { display: block; font-size: 0.7rem; color: #888; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.5rem; }
-        .stat .val { font-size: 2rem; font-weight: 300; color: #fff; }
-        .stat .sub { font-size: 0.75rem; color: #666; margin-top: 0.3rem; }
-        .stat .val.ok { color: #22c55e; }
-        .stat .val.warn { color: #eab308; }
-        .stat .val.err { color: #ef4444; }
+        .pill-live { background: var(--green-dim); color: var(--green); border: 1px solid var(--green-border); }
+        .pill-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+        .pill-live .pill-dot { animation: blink 2s ease-in-out infinite; }
+        @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
 
-        /* Charts */
-        .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem; }
-        .chart-card { background: #141414; border-radius: 12px; padding: 1.5rem; }
-        .chart-card h3 { font-size: 0.85rem; color: #999; margin-bottom: 1rem; font-weight: 500; }
+        /* ─── Stat Cards ─── */
+        .stat-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+            gap: 0.75rem; margin-bottom: 1.75rem;
+        }
+        .stat-card {
+            background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 1.25rem; transition: border-color var(--transition);
+        }
+        .stat-card:hover { border-color: var(--border-hover); }
+        .stat-label { font-size: 0.68rem; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem; }
+        .stat-value { font-size: 1.8rem; font-weight: 300; color: var(--text-0); line-height: 1; letter-spacing: -0.02em; }
+        .stat-value.green { color: var(--green); }
+        .stat-value.yellow { color: var(--yellow); }
+        .stat-value.red { color: var(--red); }
+        .stat-delta { font-size: 0.7rem; color: var(--text-4); margin-top: 0.4rem; }
+
+        /* ─── Chart Cards ─── */
+        .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1.75rem; }
+        .chart-card { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem; }
+        .chart-card h3 { font-size: 0.78rem; color: var(--text-3); margin-bottom: 1rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
         .chart-card canvas { max-height: 200px; }
 
-        /* Tables */
-        table { width: 100%; border-collapse: collapse; }
-        th, td { text-align: left; padding: 0.75rem; border-bottom: 1px solid #1a1a1a; }
-        th { font-size: 0.7rem; color: #888; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 500; }
-        td { font-size: 0.85rem; }
-        .mono { font-family: 'SF Mono', Monaco, monospace; font-size: 0.8rem; color: #888; }
-        tr.err { background: rgba(239, 68, 68, 0.05); }
-        tr.warn { background: rgba(234, 179, 8, 0.05); }
-        tr.clickable { cursor: pointer; }
-        tr.clickable:hover { background: #1a1a1a; }
-
-        /* Badges */
-        .badge {
-            display: inline-block; padding: 0.2rem 0.5rem; background: #1a1a1a;
-            border-radius: 4px; font-size: 0.7rem; color: #888; text-transform: uppercase;
+        /* ─── Data Table ─── */
+        .table-wrap {
+            background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+            overflow: hidden;
         }
-        .badge.tls { background: rgba(99, 102, 241, 0.2); color: #6366f1; }
-        .badge.grpc { background: rgba(234, 179, 8, 0.2); color: #eab308; }
-        .badge.tcp { background: rgba(34, 197, 94, 0.2); color: #22c55e; }
-
-        /* CB badges */
-        .cb-badge { padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem; font-weight: 500; }
-        .cb-closed { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
-        .cb-open { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
-        .cb-halfopen { background: rgba(234, 179, 8, 0.15); color: #eab308; }
-
-        /* Weight bar */
-        .weight-bar { display: inline-block; width: 60px; height: 6px; background: #1a1a1a; border-radius: 3px; overflow: hidden; vertical-align: middle; }
-        .weight-bar-fill { height: 100%; border-radius: 3px; background: #6366f1; }
-
-        /* Sparkline */
-        .sparkline { display: inline-block; vertical-align: middle; }
-
-        /* CB timeline */
-        .cb-timeline { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #1a1a1a; }
-        .cb-timeline-seg { height: 100%; }
-        .cb-timeline-seg.closed { background: #22c55e; }
-        .cb-timeline-seg.open { background: #ef4444; }
-        .cb-timeline-seg.halfopen { background: #eab308; }
-
-        /* Topology */
-        #topology-canvas { width: 100%; height: 600px; background: #0a0a0a; border-radius: 12px; display: block; }
-        .topo-legend { display: flex; gap: 1.5rem; margin-top: 1rem; font-size: 0.8rem; color: #888; }
-        .topo-legend-item { display: flex; align-items: center; gap: 0.4rem; }
-        .topo-legend-dot { width: 12px; height: 12px; border-radius: 50%; }
-
-        /* Log filter bar */
-        .log-filters { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
-        .log-filters input {
-            padding: 0.5rem 0.75rem; background: #1a1a1a; border: 1px solid #333;
-            border-radius: 6px; color: #fff; font-size: 0.85rem; flex: 1; min-width: 200px;
+        .table-wrap table { width: 100%; border-collapse: collapse; }
+        .table-wrap th {
+            text-align: left; padding: 0.7rem 1rem; font-size: 0.68rem; font-weight: 600;
+            color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em;
+            background: var(--bg-3); border-bottom: 1px solid var(--border);
         }
-        .log-filters input:focus { outline: none; border-color: #6366f1; }
-        .level-btns { display: flex; gap: 0.25rem; }
-        .level-btn {
-            padding: 0.4rem 0.6rem; background: #1a1a1a; border: 1px solid #333;
-            border-radius: 4px; color: #888; font-size: 0.75rem; cursor: pointer; font-family: 'SF Mono', monospace;
+        .table-wrap td { padding: 0.7rem 1rem; font-size: 0.82rem; border-bottom: 1px solid var(--border); color: var(--text-2); }
+        .table-wrap tr:last-child td { border-bottom: none; }
+        .table-wrap tr.row-err { background: var(--red-dim); }
+        .table-wrap tr.row-warn { background: var(--yellow-dim); }
+        .table-wrap tr.row-click { cursor: pointer; transition: background var(--transition); }
+        .table-wrap tr.row-click:hover { background: var(--bg-3); }
+        .table-wrap tr.row-click.row-err:hover { background: var(--red-dim); }
+        .table-wrap .mono { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-3); }
+
+        /* ─── Badges ─── */
+        .tag {
+            display: inline-flex; align-items: center; padding: 0.15rem 0.5rem;
+            border-radius: 4px; font-size: 0.68rem; font-weight: 600; color: var(--text-3);
+            background: var(--bg-4); text-transform: uppercase; letter-spacing: 0.04em;
         }
-        .level-btn.active { border-color: #6366f1; color: #6366f1; }
-        .level-btn.active.lvl-e { border-color: #ef4444; color: #ef4444; }
-        .level-btn.active.lvl-w { border-color: #eab308; color: #eab308; }
-        .level-btn.active.lvl-i { border-color: #22c55e; color: #22c55e; }
-        .stream-btn {
-            padding: 0.5rem 1rem; background: #1a1a1a; border: 1px solid #333;
-            border-radius: 6px; color: #888; font-size: 0.8rem; cursor: pointer;
+        .tag-tls { background: var(--accent-dim); color: var(--accent); }
+        .tag-grpc { background: var(--yellow-dim); color: var(--yellow); }
+        .tag-tcp { background: var(--green-dim); color: var(--green); }
+
+        /* ─── CB Status ─── */
+        .cb { padding: 0.2rem 0.55rem; border-radius: var(--radius-sm); font-size: 0.7rem; font-weight: 600; }
+        .cb-closed { background: var(--green-dim); color: var(--green); }
+        .cb-open { background: var(--red-dim); color: var(--red); }
+        .cb-halfopen { background: var(--yellow-dim); color: var(--yellow); }
+
+        /* ─── Weight Bar ─── */
+        .wbar { display: inline-block; width: 52px; height: 4px; background: var(--bg-4); border-radius: 2px; overflow: hidden; vertical-align: middle; margin-right: 4px; }
+        .wbar-fill { height: 100%; border-radius: 2px; background: var(--accent); transition: width 0.3s; }
+
+        /* ─── Sparkline ─── */
+        .spark { display: inline-block; vertical-align: middle; }
+
+        /* ─── CB Timeline ─── */
+        .cbtl { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--bg-4); }
+        .cbtl-s { height: 100%; }
+        .cbtl-s.closed { background: var(--green); }
+        .cbtl-s.open { background: var(--red); }
+        .cbtl-s.halfopen { background: var(--yellow); }
+
+        /* ─── Topology ─── */
+        #topo-canvas { width: 100%; height: 560px; background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--radius); display: block; }
+        .topo-bar { display: flex; gap: 0.5rem; align-items: center; }
+        .topo-legend { display: flex; gap: 1.25rem; margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-3); }
+        .topo-legend-item { display: flex; align-items: center; gap: 0.35rem; }
+        .topo-legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+
+        /* ─── Log Filters ─── */
+        .log-bar { display: flex; gap: 0.6rem; align-items: center; margin-bottom: 0.75rem; flex-wrap: wrap; }
+        .log-search {
+            flex: 1; min-width: 180px; padding: 0.5rem 0.75rem; background: var(--bg-2);
+            border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-0);
+            font-size: 0.82rem; font-family: var(--font-sans); transition: border-color var(--transition);
         }
-        .stream-btn.on { background: rgba(34, 197, 94, 0.15); border-color: #22c55e; color: #22c55e; }
-
-        /* Logs container */
-        #logs-container {
-            background: #0a0a0a; border-radius: 8px; padding: 1rem;
-            font-family: 'SF Mono', Monaco, monospace; font-size: 0.8rem;
-            max-height: 600px; overflow-y: auto;
+        .log-search:focus { outline: none; border-color: var(--accent); }
+        .lvl-group { display: flex; gap: 2px; }
+        .lvl-btn {
+            padding: 0.35rem 0.5rem; background: var(--bg-2); border: 1px solid var(--border);
+            border-radius: 3px; color: var(--text-4); font-size: 0.7rem; cursor: pointer;
+            font-family: var(--font-mono); font-weight: 600; transition: all var(--transition);
         }
-        .log { padding: 0.4rem 0; border-bottom: 1px solid #151515; display: flex; gap: 1rem; }
-        .log .ts { color: #666; flex-shrink: 0; }
-        .log .lvl { width: 50px; flex-shrink: 0; font-weight: 500; }
-        .log .lvl.I { color: #22c55e; }
-        .log .lvl.W { color: #eab308; background: rgba(234,179,8,0.08); border-radius: 2px; padding: 0 0.3rem; }
-        .log .lvl.E { color: #ef4444; background: rgba(239,68,68,0.08); border-radius: 2px; padding: 0 0.3rem; }
-        .log .lvl.D { color: #999; }
-        .log .lvl.T { color: #555; }
-        .log .msg { color: #888; word-break: break-all; }
-        .log.highlight { background: rgba(99, 102, 241, 0.08); }
-
-        /* Cards */
-        .card { background: #141414; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; }
-        .card-header { display: flex; justify-content: space-between; margin-bottom: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid #1a1a1a; }
-        .card-title { font-size: 0.9rem; font-weight: 500; color: #ccc; }
-
-        /* Target detail panel */
-        .target-detail {
-            background: #141414; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem;
-            display: none; border: 1px solid #252525;
+        .lvl-btn.on { color: var(--text-1); }
+        .lvl-btn.on.lvl-e { border-color: var(--red-border); color: var(--red); background: var(--red-dim); }
+        .lvl-btn.on.lvl-w { border-color: var(--yellow-border); color: var(--yellow); background: var(--yellow-dim); }
+        .lvl-btn.on.lvl-i { border-color: var(--green-border); color: var(--green); background: var(--green-dim); }
+        .lvl-btn.on.lvl-d { border-color: var(--accent-border); color: var(--accent); background: var(--accent-dim); }
+        .lvl-btn.on.lvl-t { border-color: var(--border-hover); color: var(--text-2); background: var(--bg-3); }
+        .strm-btn {
+            padding: 0.45rem 0.85rem; background: var(--bg-2); border: 1px solid var(--border);
+            border-radius: var(--radius-sm); color: var(--text-3); font-size: 0.78rem; cursor: pointer;
+            font-weight: 500; transition: all var(--transition);
         }
-        .target-detail.open { display: block; }
-        .target-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 1rem; }
-        .target-detail-section h4 { font-size: 0.8rem; color: #888; text-transform: uppercase; margin-bottom: 0.75rem; }
-        .target-detail-kv { display: grid; grid-template-columns: auto 1fr; gap: 0.3rem 1rem; font-size: 0.85rem; }
-        .target-detail-kv dt { color: #888; }
-        .target-detail-kv dd { color: #e0e0e0; }
+        .strm-btn.on { background: var(--green-dim); border-color: var(--green-border); color: var(--green); }
 
-        /* Config diff */
-        .config-diff { background: #0a0a0a; border-radius: 8px; padding: 1rem; overflow: auto; font-size: 0.8rem; font-family: 'SF Mono', monospace; white-space: pre-wrap; }
-        .config-diff .key { color: #999; }
-        .config-diff .changed { color: #eab308; }
-        .config-diff .masked { color: #555; }
-
-        /* Cert expiry */
-        .cert-card { display: flex; justify-content: space-between; align-items: center; }
-        .cert-days { font-size: 1.5rem; font-weight: 300; }
-        .cert-days.warn { color: #eab308; }
-        .cert-days.err { color: #ef4444; }
-
-        /* Action buttons */
-        .action-btn {
-            padding: 0.4rem 0.8rem; background: #1a1a1a; border: 1px solid #333;
-            border-radius: 6px; color: #888; font-size: 0.8rem; cursor: pointer;
+        /* ─── Log Container ─── */
+        #logs-box {
+            background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 0.75rem; font-family: var(--font-mono); font-size: 0.78rem;
+            max-height: 520px; overflow-y: auto;
         }
-        .action-btn:hover { border-color: #6366f1; color: #6366f1; }
-        .action-btn.primary { background: rgba(99, 102, 241, 0.15); border-color: #6366f1; color: #6366f1; }
+        .log-row { padding: 0.3rem 0; border-bottom: 1px solid rgba(39,39,42,0.5); display: flex; gap: 0.75rem; }
+        .log-row:last-child { border-bottom: none; }
+        .log-ts { color: var(--text-4); flex-shrink: 0; font-size: 0.75rem; }
+        .log-lvl { width: 44px; flex-shrink: 0; font-weight: 600; font-size: 0.72rem; }
+        .log-lvl.I { color: var(--green); }
+        .log-lvl.W { color: var(--yellow); }
+        .log-lvl.E { color: var(--red); }
+        .log-lvl.D { color: var(--text-4); }
+        .log-lvl.T { color: var(--text-4); opacity: 0.6; }
+        .log-msg { color: var(--text-3); word-break: break-all; }
+        .log-row.hl { background: var(--accent-dim); border-radius: 3px; padding: 0.3rem 0.4rem; }
 
-        /* Topology grid (fallback) */
-        .topology-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 1rem; margin-top: 1.5rem; }
+        /* ─── Detail Panel ─── */
+        .detail-panel {
+            background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+            margin-top: 0.75rem; display: none; overflow: hidden;
+        }
+        .detail-panel.open { display: block; }
+        .detail-head {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 1rem 1.25rem; background: var(--bg-3); border-bottom: 1px solid var(--border);
+        }
+        .detail-title { font-size: 0.9rem; font-weight: 600; color: var(--text-0); }
+        .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; padding: 1.25rem; }
+        .detail-grid h4 { font-size: 0.7rem; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.6rem; }
+        .detail-kv { display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 0.75rem; font-size: 0.82rem; }
+        .detail-kv dt { color: var(--text-3); }
+        .detail-kv dd { color: var(--text-1); }
+
+        /* ─── Action Buttons ─── */
+        .btn {
+            padding: 0.4rem 0.75rem; background: var(--bg-3); border: 1px solid var(--border);
+            border-radius: var(--radius-sm); color: var(--text-2); font-size: 0.78rem;
+            cursor: pointer; font-weight: 500; transition: all var(--transition); font-family: var(--font-sans);
+        }
+        .btn:hover { border-color: var(--accent-border); color: var(--accent); }
+        .btn-sm { padding: 0.3rem 0.6rem; font-size: 0.72rem; }
+
+        /* ─── Config ─── */
+        .config-pre {
+            background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 1.25rem; overflow: auto; font-size: 0.78rem; font-family: var(--font-mono); white-space: pre-wrap; line-height: 1.8;
+        }
+        .config-pre .ck { color: var(--text-4); }
+        .config-pre .cv { color: var(--text-2); }
+        .config-pre .cv.diff { color: var(--yellow); }
+        .config-pre .cv.mask { color: var(--text-4); }
+
+        /* ─── Cert Card ─── */
+        .cert-row {
+            display: flex; justify-content: space-between; align-items: center;
+            background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 1.25rem; margin-bottom: 0.5rem;
+        }
+        .cert-days { font-size: 1.4rem; font-weight: 300; }
+        .cert-days.warn { color: var(--yellow); }
+        .cert-days.err { color: var(--red); }
+        .cert-days.ok { color: var(--green); }
+
+        /* ─── Cards (generic) ─── */
+        .card { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem; margin-bottom: 0.5rem; }
+
+        /* ─── Topology Grid (fallback) ─── */
+        .topo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 0.75rem; }
         .node-card {
-            background: #1a1a1a; border-radius: 12px; padding: 1.25rem; text-align: center;
-            border: 1px solid #252525; transition: all 0.2s;
+            background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 1rem; text-align: center; transition: all var(--transition);
         }
-        .node-card:hover { border-color: #333; transform: translateY(-2px); }
-        .node-card.lb { background: linear-gradient(135deg, #1f1f2e, #2a2a4a); border-color: #6366f1; }
-        .node-icon { font-size: 1.5rem; margin-bottom: 0.5rem; }
-        .node-label { font-weight: 500; color: #e0e0e0; margin-bottom: 0.25rem; }
-        .node-stats { font-size: 0.75rem; color: #999; margin-top: 0.5rem; }
-        .node-status { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-left: 0.5rem; }
-        .node-status.ok { background: #22c55e; }
-        .node-status.err { background: #ef4444; }
-        .node-status.warn { background: #eab308; }
+        .node-card:hover { border-color: var(--border-hover); transform: translateY(-1px); }
+        .node-icon { font-size: 1.25rem; margin-bottom: 0.4rem; }
+        .node-label { font-weight: 600; color: var(--text-1); font-size: 0.82rem; margin-bottom: 0.15rem; }
+        .node-meta { font-size: 0.7rem; color: var(--text-3); margin-top: 0.4rem; line-height: 1.5; }
+        .node-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 0.4rem; vertical-align: middle; }
+        .node-dot.ok { background: var(--green); }
+        .node-dot.err { background: var(--red); }
+        .node-dot.warn { background: var(--yellow); }
 
-        /* No data */
-        .no-data { color: #666; text-align: center; padding: 2rem; }
+        /* ─── No Data ─── */
+        .empty { color: var(--text-4); text-align: center; padding: 3rem 1rem; font-size: 0.85rem; }
 
-        /* Tooltip */
-        .tooltip {
-            position: absolute; background: #1a1a1a; border: 1px solid #333; border-radius: 8px;
-            padding: 0.75rem 1rem; font-size: 0.8rem; z-index: 100; pointer-events: none;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.5); max-width: 300px;
-        }
-
-        /* Responsive */
+        /* ─── Responsive ─── */
         @media (max-width: 768px) {
-            .layout { grid-template-columns: 1fr; }
-            nav { position: relative; width: 100%; height: auto; padding: 0.75rem; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
-            .logo { margin-bottom: 0; margin-right: 0.5rem; }
-            .nav-links { display: flex; flex-wrap: wrap; gap: 0.25rem; flex: 1; }
-            .nav a { padding: 0.4rem 0.5rem; font-size: 0.75rem; }
+            .shell { flex-direction: column; }
+            .sidebar { width: 100%; height: auto; position: relative; flex-direction: row; flex-wrap: wrap; padding: 0.5rem; align-items: center; gap: 0.5rem; }
+            .sidebar-head { border-bottom: none; padding: 0.5rem; }
+            .brand-sub { display: none; }
+            .sidebar-nav { display: flex; flex-wrap: wrap; gap: 0.25rem; padding: 0; }
+            .nav-group-label { display: none; }
+            .nav-item { padding: 0.35rem 0.5rem; font-size: 0.75rem; }
             .nav-icon { display: none; }
-            .user-section { border-top: none; padding-top: 0; border-left: 1px solid #1a1a1a; padding-left: 0.75rem; margin-left: 0.25rem; }
-            .user-info { display: none; }
-            main { margin-left: 0; padding: 1rem; }
-            .charts { grid-template-columns: 1fr; }
-            .stats { grid-template-columns: repeat(2, 1fr); }
+            .sidebar-foot { border-top: none; border-left: 1px solid var(--border); padding: 0.25rem 0.5rem; }
+            .user-row { display: none; }
+            .main { margin-left: 0; padding: 1rem; }
+            .chart-grid { grid-template-columns: 1fr; }
+            .stat-grid { grid-template-columns: repeat(2, 1fr); }
+            .detail-grid { grid-template-columns: 1fr; }
+            .log-bar { flex-direction: column; align-items: stretch; }
             .login-card { min-width: 0; margin: 1rem; }
-            #login-screen { padding: 1rem; }
-            .target-detail-grid { grid-template-columns: 1fr; }
-            .log-filters { flex-direction: column; align-items: stretch; }
         }
     </style>
 </head>
 <body>
-    <!-- Login Screen -->
+    <!-- Login -->
     <div id="login-screen">
         <div class="login-card">
-            <h1>&#x2696;&#xFE0E; Sentirum LB</h1>
-            <p class="subtitle">Admin Dashboard</p>
-            <input type="text" id="username-input" placeholder="Username" autocomplete="off" />
-            <input type="password" id="password-input" placeholder="Password" />
-            <button onclick="doLogin()">Login</button>
+            <div class="login-logo"><span>sentirum</span> lb</div>
+            <div class="login-sub">Load Balancer Administration</div>
+            <input type="text" id="username-input" class="login-field" placeholder="Username" autocomplete="off" />
+            <input type="password" id="password-input" class="login-field" placeholder="Password" />
+            <button class="login-btn" onclick="doLogin()">Sign In</button>
             <p class="login-error" id="login-error">Invalid credentials</p>
         </div>
     </div>
 
-    <!-- App -->
+    <!-- App Shell -->
     <div class="app" id="app">
-        <div class="layout">
-            <nav>
-                <div class="logo"><span>sentirum</span> lb</div>
-                <div class="nav-links">
-                    <a href="#" data-page="overview" class="active" onclick="showPage('overview')"><span class="nav-icon">&#x1F4CA;</span> Overview</a>
-                    <a href="#" data-page="topology" onclick="showPage('topology')"><span class="nav-icon">&#x1F517;</span> Topology</a>
-                    <a href="#" data-page="targets" onclick="showPage('targets')"><span class="nav-icon">&#x1F3AF;</span> Targets</a>
-                    <a href="#" data-page="dns" onclick="showPage('dns')"><span class="nav-icon">&#x1F310;</span> DNS</a>
-                    <a href="#" data-page="consul" onclick="showPage('consul')"><span class="nav-icon">&#x2601;&#xFE0F;</span> Consul</a>
-                    <a href="#" data-page="routes" onclick="showPage('routes')"><span class="nav-icon">&#x1F6E4;&#xFE0F;</span> Routes</a>
-                    <a href="#" data-page="logs" onclick="showPage('logs')"><span class="nav-icon">&#x1F4CB;</span> Logs</a>
-                    <a href="#" data-page="config" onclick="showPage('config')"><span class="nav-icon">&#x2699;&#xFE0F;</span> Config</a>
-                    <a href="#" data-page="certs" onclick="showPage('certs')"><span class="nav-icon">&#x1F510;</span> Certs</a>
+        <div class="shell">
+            <aside class="sidebar">
+                <div class="sidebar-head">
+                    <div class="brand"><span>sentirum</span> lb</div>
+                    <div class="brand-sub">Admin Console</div>
                 </div>
-                <div class="user-section">
-                    <div class="user-info">
+                <nav class="sidebar-nav">
+                    <div class="nav-group-label">Monitor</div>
+                    <a href="#" data-page="overview" class="nav-item active" onclick="showPage('overview')"><span class="nav-icon">&#x1F4CA;</span> Overview</a>
+                    <a href="#" data-page="topology" class="nav-item" onclick="showPage('topology')"><span class="nav-icon">&#x1F3AF;</span> Topology</a>
+                    <a href="#" data-page="targets" class="nav-item" onclick="showPage('targets')"><span class="nav-icon">&#x2B22;</span> Targets</a>
+                    <a href="#" data-page="logs" class="nav-item" onclick="showPage('logs')"><span class="nav-icon">&#x1F4CB;</span> Logs</a>
+                    <div class="nav-group-label">Infrastructure</div>
+                    <a href="#" data-page="routes" class="nav-item" onclick="showPage('routes')"><span class="nav-icon">&#x1F6E4;&#xFE0F;</span> Routes</a>
+                    <a href="#" data-page="consul" class="nav-item" onclick="showPage('consul')"><span class="nav-icon">&#x2601;&#xFE0F;</span> Consul</a>
+                    <a href="#" data-page="dns" class="nav-item" onclick="showPage('dns')"><span class="nav-icon">&#x1F310;</span> DNS Cache</a>
+                    <a href="#" data-page="certs" class="nav-item" onclick="showPage('certs')"><span class="nav-icon">&#x1F510;</span> Certificates</a>
+                    <div class="nav-group-label">System</div>
+                    <a href="#" data-page="config" class="nav-item" onclick="showPage('config')"><span class="nav-icon">&#x2699;&#xFE0F;</span> Configuration</a>
+                </nav>
+                <div class="sidebar-foot">
+                    <div class="user-row">
                         <div class="user-avatar" id="user-avatar">?</div>
-                        <span class="user-name" id="user-name">Loading...</span>
+                        <span class="user-name" id="user-name">-</span>
                     </div>
-                    <button class="logout-btn" onclick="doLogout()">Logout</button>
+                    <button class="logout-btn" onclick="doLogout()">Sign Out</button>
                 </div>
-            </nav>
+            </aside>
 
-            <main>
-                <!-- Connection error banner -->
-                <div class="error-banner" id="error-banner">
-                    <span>&#x26A0;&#xFE0F; Backend unreachable &mdash; showing cached data</span>
-                </div>
+            <div class="main">
+                <!-- Error Banner -->
+                <div class="error-banner" id="error-banner"><span>&#x26A0;&#xFE0F; Backend unreachable</span></div>
 
                 <!-- Overview -->
                 <div id="page-overview" class="page active">
-                    <div class="page-header">
-                        <h1>Overview</h1>
-                        <div class="live-badge"><div class="live-dot" id="live-indicator"></div> <span id="live-text">LIVE</span></div>
+                    <div class="page-head">
+                        <h1 class="page-title">Overview <span class="page-title-sub" id="ov-uptime"></span></h1>
+                        <span class="pill pill-live"><span class="pill-dot"></span> LIVE</span>
                     </div>
-                    <div class="stats" id="stats-row">
-                        <div class="stat"><label>Requests / sec</label><div class="val" id="stat-rps">-</div><div class="sub" id="stat-rps-sub"></div></div>
-                        <div class="stat"><label>Error Rate</label><div class="val" id="stat-errors">-</div></div>
-                        <div class="stat"><label>Active Connections</label><div class="val" id="stat-conn">-</div><div class="sub" id="stat-conn-sub">0 open, 0 close/s</div></div>
-                        <div class="stat"><label>Avg Latency</label><div class="val" id="stat-latency">-</div></div>
-                        <div class="stat"><label>Routes / Targets</label><div class="val" id="stat-routes">-</div></div>
-                        <div class="stat"><label>Requests Total</label><div class="val" id="stat-requests">-</div></div>
+                    <div class="stat-grid">
+                        <div class="stat-card"><div class="stat-label">Requests / sec</div><div class="stat-value" id="s-rps">-</div><div class="stat-delta" id="s-rps-d"></div></div>
+                        <div class="stat-card"><div class="stat-label">Error Rate</div><div class="stat-value" id="s-err">-</div><div class="stat-delta" id="s-err-d"></div></div>
+                        <div class="stat-card"><div class="stat-label">Connections</div><div class="stat-value" id="s-conn">-</div></div>
+                        <div class="stat-card"><div class="stat-label">Avg Latency</div><div class="stat-value" id="s-lat">-</div></div>
+                        <div class="stat-card"><div class="stat-label">Routes / Targets</div><div class="stat-value" id="s-rt">-</div></div>
+                        <div class="stat-card"><div class="stat-label">Total Requests</div><div class="stat-value" id="s-total">-</div></div>
                     </div>
-                    <div class="charts">
+                    <div class="chart-grid">
                         <div class="chart-card"><h3>Latency Distribution</h3><canvas id="lat-chart"></canvas></div>
                         <div class="chart-card"><h3>Status Codes</h3><canvas id="status-chart"></canvas></div>
                     </div>
@@ -350,672 +432,448 @@
 
                 <!-- Topology -->
                 <div id="page-topology" class="page">
-                    <div class="page-header">
-                        <h1>Topology</h1>
-                        <div style="display:flex;gap:0.5rem;align-items:center">
-                            <button class="action-btn" onclick="topoZoom(1.2)">+</button>
-                            <button class="action-btn" onclick="topoZoom(0.8)">&minus;</button>
-                            <button class="action-btn" onclick="topoReset()">Reset</button>
-                            <div class="live-badge"><div class="live-dot"></div> LIVE</div>
+                    <div class="page-head">
+                        <h1 class="page-title">Topology</h1>
+                        <div class="topo-bar">
+                            <button class="btn btn-sm" onclick="topoZoom(1.2)">+</button>
+                            <button class="btn btn-sm" onclick="topoZoom(0.8)">&minus;</button>
+                            <button class="btn btn-sm" onclick="topoReset()">Reset</button>
+                            <span class="pill pill-live"><span class="pill-dot"></span> LIVE</span>
                         </div>
                     </div>
-                    <canvas id="topology-canvas"></canvas>
+                    <canvas id="topo-canvas"></canvas>
                     <div class="topo-legend">
-                        <div class="topo-legend-item"><div class="topo-legend-dot" style="background:#6366f1"></div> Load Balancer</div>
-                        <div class="topo-legend-item"><div class="topo-legend-dot" style="background:#22c55e"></div> Healthy</div>
-                        <div class="topo-legend-item"><div class="topo-legend-dot" style="background:#eab308"></div> Half-Open</div>
-                        <div class="topo-legend-item"><div class="topo-legend-dot" style="background:#ef4444"></div> Circuit Open</div>
-                        <div class="topo-legend-item">Line thickness = connection ratio</div>
+                        <div class="topo-legend-item"><div class="topo-legend-dot" style="background:var(--accent)"></div> Load Balancer</div>
+                        <div class="topo-legend-item"><div class="topo-legend-dot" style="background:var(--green)"></div> Healthy</div>
+                        <div class="topo-legend-item"><div class="topo-legend-dot" style="background:var(--yellow)"></div> Half-Open</div>
+                        <div class="topo-legend-item"><div class="topo-legend-dot" style="background:var(--red)"></div> Circuit Open</div>
+                        <div class="topo-legend-item" style="color:var(--text-4)">Edge width = active connections</div>
                     </div>
                 </div>
 
                 <!-- Targets -->
                 <div id="page-targets" class="page">
-                    <div class="page-header">
-                        <h1>Targets</h1>
-                        <div class="live-badge"><div class="live-dot"></div> LIVE</div>
+                    <div class="page-head">
+                        <h1 class="page-title">Targets</h1>
+                        <span class="pill pill-live"><span class="pill-dot"></span> LIVE</span>
                     </div>
-                    <div class="card" style="overflow-x:auto">
+                    <div class="table-wrap" style="overflow-x:auto">
                         <table>
-                            <thead>
-                                <tr>
-                                    <th></th>
-                                    <th>Service</th>
-                                    <th>URL</th>
-                                    <th>Proto</th>
-                                    <th>Weight</th>
-                                    <th>Req/s</th>
-                                    <th>Errors</th>
-                                    <th>Err%</th>
-                                    <th>Latency</th>
-                                    <th>Conns</th>
-                                    <th>CB</th>
-                                </tr>
-                            </thead>
-                            <tbody id="targets-table"></tbody>
+                            <thead><tr><th>#</th><th>Service</th><th>Upstream</th><th>Proto</th><th>Weight</th><th>Req/s</th><th>Errors</th><th>Err%</th><th>Latency</th><th>Conns</th><th>Circuit Breaker</th></tr></thead>
+                            <tbody id="targets-tbody"></tbody>
                         </table>
                     </div>
-                    <div id="target-detail" class="target-detail"></div>
-                </div>
-
-                <!-- DNS Cache -->
-                <div id="page-dns" class="page">
-                    <div class="page-header">
-                        <h1>DNS Cache</h1>
-                        <div class="live-badge"><div class="live-dot"></div> LIVE</div>
-                    </div>
-                    <div class="stats" id="dns-stats" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 1.5rem;"></div>
-                    <div id="dns-entries"></div>
-                </div>
-
-                <!-- Consul -->
-                <div id="page-consul" class="page">
-                    <div class="page-header">
-                        <h1>Consul Status</h1>
-                        <div class="live-badge"><div class="live-dot"></div> LIVE</div>
-                    </div>
-                    <div class="topology-grid" id="consul-watchers"></div>
-                </div>
-
-                <!-- Routes -->
-                <div id="page-routes" class="page">
-                    <div class="page-header">
-                        <h1>Routes</h1>
-                        <button class="action-btn" onclick="exportRoutes()">&#x1F4E5; Export JSON</button>
-                    </div>
-                    <div class="card" id="routes-list"></div>
+                    <div id="target-detail" class="detail-panel"></div>
                 </div>
 
                 <!-- Logs -->
                 <div id="page-logs" class="page">
-                    <div class="page-header">
-                        <h1>Logs</h1>
-                    </div>
-                    <div class="log-filters">
-                        <input type="text" id="log-search" placeholder="Search logs..." oninput="filterLogs()" />
-                        <div class="level-btns">
-                            <button class="level-btn active lvl-e" data-level="ERROR" onclick="toggleLevel(this)">ERR</button>
-                            <button class="level-btn active lvl-w" data-level="WARN" onclick="toggleLevel(this)">WRN</button>
-                            <button class="level-btn active lvl-i" data-level="INFO" onclick="toggleLevel(this)">INF</button>
-                            <button class="level-btn" data-level="DEBUG" onclick="toggleLevel(this)">DBG</button>
-                            <button class="level-btn" data-level="TRACE" onclick="toggleLevel(this)">TRC</button>
+                    <div class="page-head"><h1 class="page-title">Logs</h1></div>
+                    <div class="log-bar">
+                        <input type="text" id="log-search" class="log-search" placeholder="Search logs..." oninput="filterLogs()" />
+                        <div class="lvl-group">
+                            <button class="lvl-btn on lvl-e" data-level="ERROR" onclick="toggleLevel(this)">ERR</button>
+                            <button class="lvl-btn on lvl-w" data-level="WARN" onclick="toggleLevel(this)">WRN</button>
+                            <button class="lvl-btn on lvl-i" data-level="INFO" onclick="toggleLevel(this)">INF</button>
+                            <button class="lvl-btn lvl-d" data-level="DEBUG" onclick="toggleLevel(this)">DBG</button>
+                            <button class="lvl-btn lvl-t" data-level="TRACE" onclick="toggleLevel(this)">TRC</button>
                         </div>
-                        <button class="stream-btn" id="stream-btn" onclick="toggleStream()">Stream: OFF</button>
+                        <button class="strm-btn" id="stream-btn" onclick="toggleStream()">Stream: OFF</button>
                     </div>
-                    <div id="logs-container"></div>
+                    <div id="logs-box"></div>
                 </div>
 
-                <!-- Config -->
-                <div id="page-config" class="page">
-                    <div class="page-header">
-                        <h1>Configuration</h1>
-                        <button class="action-btn" onclick="exportConfig()">&#x1F4E5; Export JSON</button>
+                <!-- Routes -->
+                <div id="page-routes" class="page">
+                    <div class="page-head">
+                        <h1 class="page-title">Routes</h1>
+                        <button class="btn" onclick="exportRoutes()">&#x1F4E5; Export JSON</button>
                     </div>
-                    <div id="config-list"></div>
+                    <div id="routes-list"></div>
+                </div>
+
+                <!-- Consul -->
+                <div id="page-consul" class="page">
+                    <div class="page-head"><h1 class="page-title">Consul</h1><span class="pill pill-live"><span class="pill-dot"></span> LIVE</span></div>
+                    <div class="topo-grid" id="consul-grid"></div>
+                </div>
+
+                <!-- DNS -->
+                <div id="page-dns" class="page">
+                    <div class="page-head"><h1 class="page-title">DNS Cache</h1><span class="pill pill-live"><span class="pill-dot"></span> LIVE</span></div>
+                    <div class="stat-grid" id="dns-stats" style="grid-template-columns:repeat(4,1fr);margin-bottom:1rem"></div>
+                    <div id="dns-entries"></div>
                 </div>
 
                 <!-- Certs -->
                 <div id="page-certs" class="page">
-                    <div class="page-header">
-                        <h1>TLS Certificates</h1>
-                    </div>
+                    <div class="page-head"><h1 class="page-title">Certificates</h1></div>
                     <div id="certs-list"></div>
                 </div>
-            </main>
+
+                <!-- Config -->
+                <div id="page-config" class="page">
+                    <div class="page-head">
+                        <h1 class="page-title">Configuration</h1>
+                        <button class="btn" onclick="exportConfig()">&#x1F4E5; Export JSON</button>
+                    </div>
+                    <div id="config-list"></div>
+                </div>
+            </div>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script>
-    // ===== STATE =====
+    // ===== State =====
     const API = '/admin';
     let token = localStorage.getItem('admin_token') || '';
     let username = localStorage.getItem('admin_user') || '';
     let logSse = null, metricsSse = null;
     let charts = {};
-    let prevSnapshot = null;
-    let targetHistory = {}; // url -> { requests: [ring], errors: [ring], timestamps: [ring] }
-    const HISTORY_LEN = 60;
+    let prevSnap = null;
+    let targetHist = {};
+    const HIST = 60;
     let cachedLogs = [];
     let activeLevels = new Set(['ERROR','WARN','INFO']);
-    let logSearchTerm = '';
+    let logSearch = '';
     let topoData = null, topoScale = 1, topoPan = {x:0,y:0};
     let selectedTarget = null;
     let cachedConfig = null;
-    let topoAnimFrame = null;
-    let topoNodes = [], topoEdges = [];
 
-    // ===== HELPERS =====
-    function esc(s) { if (s == null) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-    function fmt(n) { if (n >= 1e9) return (n/1e9).toFixed(1)+'B'; if (n >= 1e6) return (n/1e6).toFixed(1)+'M'; if (n >= 1e3) return (n/1e3).toFixed(1)+'K'; return String(n); }
-    function fmtLat(us) { if (us < 1000) return us+'µs'; if (us < 1e6) return (us/1000).toFixed(1)+'ms'; return (us/1e6).toFixed(2)+'s'; }
-    function fmtTime(ms) { return new Date(ms).toISOString().slice(11,19); }
-    function pct(val, total) { return total > 0 ? (val/total*100).toFixed(1)+'%' : '0%'; }
-    function headers() { return { 'Authorization': 'Bearer ' + token }; }
-    async function api(path) {
-        const r = await fetch(API + path, { headers: headers() });
-        if (r.status === 401) { localStorage.removeItem('admin_token'); location.reload(); throw new Error('unauthorized'); }
-        return r.json();
-    }
+    // ===== Helpers =====
+    const esc = s => s == null ? '' : String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    const fmt = n => n >= 1e9 ? (n/1e9).toFixed(1)+'B' : n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : String(n);
+    const fmtLat = us => us < 1000 ? us+'µs' : us < 1e6 ? (us/1000).toFixed(1)+'ms' : (us/1e6).toFixed(2)+'s';
+    const fmtTime = ms => new Date(ms).toISOString().slice(11,19);
+    const hdrs = () => ({'Authorization':'Bearer '+token});
+    async function api(p) { const r = await fetch(API+p,{headers:hdrs()}); if(r.status===401){localStorage.removeItem('admin_token');location.reload();throw new Error('401');} return r.json(); }
 
-    // ===== AUTH =====
+    // ===== Auth =====
     async function doLogin() {
-        const user = document.getElementById('username-input').value.trim();
-        const pass = document.getElementById('password-input').value;
-        try {
-            const r = await fetch(API+'/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:user,password:pass}) });
-            const d = await r.json();
-            if (d.success && d.token) { token=d.token; username=d.user||user; localStorage.setItem('admin_token',token); localStorage.setItem('admin_user',username); showApp(); }
-            else document.getElementById('login-error').style.display='block';
-        } catch(e) { document.getElementById('login-error').style.display='block'; }
+        const u=document.getElementById('username-input').value.trim(), p=document.getElementById('password-input').value;
+        try { const r=await fetch(API+'/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})}); const d=await r.json(); if(d.success&&d.token){token=d.token;username=d.user||u;localStorage.setItem('admin_token',token);localStorage.setItem('admin_user',username);showApp();}else document.getElementById('login-error').style.display='block'; } catch(e){document.getElementById('login-error').style.display='block';}
     }
-    async function doLogout() {
-        try { await fetch(API+'/logout',{method:'POST',headers:headers()}); } catch(e){}
-        localStorage.removeItem('admin_token'); localStorage.removeItem('admin_user'); location.reload();
-    }
+    async function doLogout() { try{await fetch(API+'/logout',{method:'POST',headers:hdrs()});}catch(e){} localStorage.removeItem('admin_token');localStorage.removeItem('admin_user');location.reload(); }
     function showApp() {
         document.getElementById('login-screen').classList.add('hidden');
         document.getElementById('app').classList.add('active');
         document.getElementById('user-name').textContent = username;
         document.getElementById('user-avatar').textContent = username[0].toUpperCase();
-        initCharts();
-        startMetricsStream();
-        refreshStatic();
+        initCharts(); startMetrics(); refreshStatic();
     }
 
-    // ===== NAVIGATION =====
-    function showPage(page) {
-        document.querySelectorAll('.nav a').forEach(a => a.classList.remove('active'));
-        document.querySelector('[data-page="'+page+'"]').classList.add('active');
-        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-        document.getElementById('page-'+page).classList.add('active');
-        if (page === 'topology') drawTopology();
+    // ===== Navigation =====
+    function showPage(p) {
+        document.querySelectorAll('.nav-item').forEach(a=>a.classList.remove('active'));
+        document.querySelector(`[data-page="${p}"]`).classList.add('active');
+        document.querySelectorAll('.page').forEach(e=>e.classList.remove('active'));
+        document.getElementById('page-'+p).classList.add('active');
+        if(p==='topology') drawTopo();
     }
 
-    // ===== SSE METRICS STREAM =====
-    function startMetricsStream() {
-        if (metricsSse) metricsSse.close();
-        metricsSse = new EventSource(API + '/metrics/stream?token=' + encodeURIComponent(token));
-        metricsSse.onmessage = e => {
-            try {
-                const snap = JSON.parse(e.data.replace(/^data:\s*/, ''));
-                processSnapshot(snap);
-                setErrorState(false);
-            } catch(err) {}
-        };
-        metricsSse.onerror = () => { setErrorState(true); };
+    // ===== SSE Metrics =====
+    function startMetrics() {
+        if(metricsSse) metricsSse.close();
+        metricsSse = new EventSource(API+'/metrics/stream?token='+encodeURIComponent(token));
+        metricsSse.onmessage = e => { try { const s=JSON.parse(e.data.replace(/^data:\s*/,'')); processSnap(s); setError(false); } catch(err){} };
+        metricsSse.onerror = () => setError(true);
+    }
+    function processSnap(s) {
+        const dt = prevSnap ? Math.max(s.timestamp-prevSnap.timestamp,1) : 1;
+        const rps = prevSnap ? ((s.requests_total-prevSnap.requests_total)/dt).toFixed(1) : '0';
+        const errRate = s.requests_total>0 ? ((s.requests_error_total/s.requests_total)*100).toFixed(1)+'%' : '0%';
+        const errPct = s.requests_total>0 ? s.requests_error_total/s.requests_total : 0;
+        document.getElementById('s-rps').textContent = rps;
+        document.getElementById('s-err').textContent = errRate;
+        document.getElementById('s-err').className = 'stat-value' + (errPct>0.05?' red':errPct>0.01?' yellow':'');
+        document.getElementById('s-conn').textContent = s.active_connections;
+        document.getElementById('s-total').textContent = fmt(s.requests_total);
+        document.getElementById('s-rt').textContent = s.route_count+' / '+s.target_count;
+        if(s.targets&&s.targets.length>0) document.getElementById('s-lat').textContent = fmtLat(Math.round(s.targets.reduce((a,t)=>a+t.avg_latency_us,0)/s.targets.length));
+        if(s.targets) s.targets.forEach(t=>{
+            if(!targetHist[t.url]) targetHist[t.url]={req:[],err:[],ts:[]};
+            const h=targetHist[t.url], prev=h.req.length>0?h.req[h.req.length-1]:0;
+            h.req.push(t.requests); h.err.push(t.errors); h.ts.push(s.timestamp);
+            if(h.req.length>HIST){h.req.shift();h.err.shift();h.ts.shift();}
+            h.rate = prevSnap ? (t.requests-prev)/dt : 0;
+        });
+        prevSnap = s;
     }
 
-    function processSnapshot(snap) {
-        const now = snap.timestamp;
-        const delta = prevSnapshot ? snap : null;
-        const dt = delta ? (now - prevSnapshot.timestamp) || 1 : 1;
-
-        // Overview stats
-        const rps = delta ? ((snap.requests_total - prevSnapshot.requests_total) / dt).toFixed(1) : '0';
-        const errRate = snap.requests_total > 0 ? ((snap.requests_error_total / snap.requests_total)*100).toFixed(1)+'%' : '0%';
-        document.getElementById('stat-rps').textContent = rps;
-        document.getElementById('stat-errors').textContent = errRate;
-        document.getElementById('stat-errors').className = 'val' + (snap.requests_error_total > 0 && snap.requests_total > 0 && (snap.requests_error_total/snap.requests_total > 0.05) ? ' err' : snap.requests_error_total > 0 ? ' warn' : '');
-        document.getElementById('stat-conn').textContent = snap.active_connections;
-        document.getElementById('stat-requests').textContent = fmt(snap.requests_total);
-        document.getElementById('stat-routes').textContent = snap.route_count + ' / ' + snap.target_count;
-
-        // Avg latency
-        if (snap.targets && snap.targets.length > 0) {
-            const avgLat = Math.round(snap.targets.reduce((s,t) => s + t.avg_latency_us, 0) / snap.targets.length);
-            document.getElementById('stat-latency').textContent = fmtLat(avgLat);
-        }
-
-        // Per-target history
-        if (snap.targets) {
-            snap.targets.forEach(t => {
-                if (!targetHistory[t.url]) targetHistory[t.url] = { requests: [], errors: [], timestamps: [] };
-                const h = targetHistory[t.url];
-                const prevReq = h.requests.length > 0 ? h.requests[h.requests.length-1] : 0;
-                h.requests.push(t.requests);
-                h.errors.push(t.errors);
-                h.timestamps.push(now);
-                if (h.requests.length > HISTORY_LEN) { h.requests.shift(); h.errors.shift(); h.timestamps.shift(); }
-                h.rate = delta ? (t.requests - prevReq) / dt : 0;
-            });
-        }
-
-        prevSnapshot = snap;
-    }
-
-    // ===== STATIC DATA REFRESH (10s interval) =====
+    // ===== Static Refresh =====
     async function refreshStatic() {
-        if (!token) return;
-        const safeFetch = (p, fb) => p.catch(() => fb);
-
-        const [routes, targets, dns, consul, config, logs, certs] = await Promise.all([
-            safeFetch(api('/routes'), {route_count:0, target_count:0}),
-            safeFetch(api('/targets'), {targets:[]}),
-            safeFetch(api('/dns-cache'), {stats:{}, entries:[]}),
-            safeFetch(api('/consul-status'), {}),
-            safeFetch(api('/config'), {}),
-            safeFetch(api('/logs?limit=200'), []),
-            safeFetch(api('/certs'), {certs:[]}),
+        if(!token) return;
+        const safe=(p,fb)=>p.catch(()=>fb);
+        const [routes,targets,dns,consul,config,logs,certs] = await Promise.all([
+            safe(api('/routes'),{route_count:0,target_count:0}),
+            safe(api('/targets'),{targets:[]}),
+            safe(api('/dns-cache'),{stats:{},entries:[]}),
+            safe(api('/consul-status'),{}),
+            safe(api('/config'),{}),
+            safe(api('/logs?limit=200'),[]),
+            safe(api('/certs'),{certs:[]})
         ]);
-
-        cachedLogs = logs || [];
-        cachedConfig = config;
-        renderTargets(targets.targets || []);
-        renderDns(dns);
-        renderConsul(consul);
-        renderRoutes(routes);
-        renderLogs();
-        renderCerts(certs);
-        renderConfig(config);
+        cachedLogs=logs||[]; cachedConfig=config;
+        renderTargets(targets.targets||[]);
+        renderDns(dns); renderConsul(consul); renderRoutes(routes);
+        renderLogs(); renderCerts(certs); renderConfig(config);
         refreshMetrics();
-
-        // Topology data
-        try {
-            topoData = await api('/topology');
-            if (document.getElementById('page-topology').classList.contains('active')) drawTopology();
-        } catch(e) {}
-
+        try { topoData=await api('/topology'); if(document.getElementById('page-topology').classList.contains('active')) drawTopo(); } catch(e){}
         setTimeout(refreshStatic, 10000);
     }
-
     async function refreshMetrics() {
-        try {
-            const r = await fetch(API+'/metrics', {headers:headers()});
-            const text = await r.text();
-            const m = {};
-            text.split('\n').forEach(l => { if (l.includes(' ')) { const n=l.split(' ')[0].replace(/\{.*?\}/,''); const v=parseFloat(l.split(' ').pop()); if(!isNaN(v)) m[n.replace(/sentirum_lb_/,'')]=v; }});
-            // Charts
-            if (charts.latency) {
-                charts.latency.data.labels = ['<1ms','<5ms','<10ms','<25ms','<50ms','<100ms','<250ms','<500ms','<1s','<5s','>5s'];
-                charts.latency.data.datasets[0].data = [m.latency_bucket_1ms||0,m.latency_bucket_5ms||0,m.latency_bucket_10ms||0,m.latency_bucket_25ms||0,m.latency_bucket_50ms||0,m.latency_bucket_100ms||0,m.latency_bucket_250ms||0,m.latency_bucket_500ms||0,m.latency_bucket_1s||0,m.latency_bucket_5s||0,m.latency_bucket_inf||0];
-                charts.latency.update();
-            }
-            if (charts.status) {
-                charts.status.data.datasets[0].data = [m.status_2xx||0,m.status_3xx||0,m.status_4xx||0,m.status_5xx||0];
-                charts.status.update();
-            }
+        try { const r=await fetch(API+'/metrics',{headers:hdrs()}); const t=await r.text(); const m={};
+        t.split('\n').forEach(l=>{if(l.includes(' ')){const n=l.split(' ')[0].replace(/\{.*?\}/,'');const v=parseFloat(l.split(' ').pop());if(!isNaN(v))m[n.replace(/sentirum_lb_/,'')]=v;}});
+        if(charts.latency){charts.latency.data.labels=['<1ms','<5ms','<10ms','<25ms','<50ms','<100ms','<250ms','<500ms','<1s','<5s','>5s'];charts.latency.data.datasets[0].data=[m.latency_bucket_1ms||0,m.latency_bucket_5ms||0,m.latency_bucket_10ms||0,m.latency_bucket_25ms||0,m.latency_bucket_50ms||0,m.latency_bucket_100ms||0,m.latency_bucket_250ms||0,m.latency_bucket_500ms||0,m.latency_bucket_1s||0,m.latency_bucket_5s||0,m.latency_bucket_inf||0];charts.latency.update();}
+        if(charts.status){charts.status.data.datasets[0].data=[m.status_2xx||0,m.status_3xx||0,m.status_4xx||0,m.status_5xx||0];charts.status.update();}
         } catch(e){}
     }
-
-    function setErrorState(hasError) {
-        const b = document.getElementById('error-banner');
-        const li = document.getElementById('live-indicator');
-        const lt = document.getElementById('live-text');
-        if (hasError) { b.classList.add('visible'); if(li) li.style.background='#ef4444'; if(lt) lt.textContent='DISCONNECTED'; }
-        else { b.classList.remove('visible'); if(li) li.style.background='#22c55e'; if(lt) lt.textContent='LIVE'; }
+    function setError(yes) {
+        const b=document.getElementById('error-banner');
+        if(yes) b.classList.add('visible'); else b.classList.remove('visible');
     }
 
-    // ===== CHARTS =====
+    // ===== Charts =====
     function initCharts() {
-        charts.latency = new Chart(document.getElementById('lat-chart'), {
-            type:'bar', data:{labels:[], datasets:[{data:[], backgroundColor:'#333'}]},
-            options:{responsive:true, plugins:{legend:{display:false}}, scales:{y:{ticks:{color:'#999'},grid:{color:'#1a1a1a'}},x:{ticks:{color:'#999'},grid:{display:false}}}}
-        });
-        charts.status = new Chart(document.getElementById('status-chart'), {
-            type:'doughnut', data:{labels:['2xx','3xx','4xx','5xx'], datasets:[{data:[0,0,0,0],backgroundColor:['#22c55e','#eab308','#f97316','#ef4444']}]},
-            options:{responsive:true, plugins:{legend:{position:'bottom',labels:{color:'#999'}}}}
-        });
+        const base = {responsive:true,plugins:{legend:{display:false}},scales:{y:{ticks:{color:'#52525b',font:{size:10}},grid:{color:'#1e1e22'}},x:{ticks:{color:'#52525b',font:{size:10}},grid:{display:false}}}};
+        charts.latency = new Chart(document.getElementById('lat-chart'),{type:'bar',data:{labels:[],datasets:[{data:[],backgroundColor:'#27272a',borderRadius:3}]},options:base});
+        charts.status = new Chart(document.getElementById('status-chart'),{type:'doughnut',data:{labels:['2xx','3xx','4xx','5xx'],datasets:[{data:[0,0,0,0],backgroundColor:['#34d399','#fbbf24','#f97316','#f87171'],borderWidth:0}]},options:{responsive:true,cutout:'65%',plugins:{legend:{position:'bottom',labels:{color:'#71717a',padding:12,font:{size:11}}}}}});
     }
 
-    // ===== SPARKLINE =====
-    function sparklineSVG(data, width, height, color) {
-        if (!data || data.length < 2) return '';
-        const max = Math.max(...data, 1);
-        const step = width / (data.length - 1);
-        const pts = data.map((v, i) => `${(i*step).toFixed(1)},${(height - (v/max)*height).toFixed(1)}`).join(' ');
-        return `<svg class="sparkline" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5"/></svg>`;
+    // ===== Sparkline =====
+    function spark(data,w,h,color) {
+        if(!data||data.length<2) return '';
+        const max=Math.max(...data,1), step=w/(data.length-1);
+        const pts=data.map((v,i)=>`${(i*step).toFixed(1)},${(h-(v/max)*h).toFixed(1)}`).join(' ');
+        return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
     }
 
-    // ===== CB TIMELINE =====
-    function cbTimelineHTML(history) {
-        if (!history || history.length === 0) return '<span style="color:#666">-</span>';
-        const segs = history.slice(-8);
-        const totalMs = segs.length > 1 ? (segs[0].timestamp_ms - segs[segs.length-1].timestamp_ms) || 1 : 1;
-        let html = '<div class="cb-timeline" title="';
-        segs.forEach(s => { html += `${s.from}→${s.to} ${fmtTime(s.timestamp_ms)}  `; });
-        html += '">';
-        // Show last state durations as proportional segments
-        segs.forEach((s, i) => {
-            const next = i > 0 ? segs[i-1].timestamp_ms : Date.now();
-            const dur = next - s.timestamp_ms;
-            const pct = Math.max(2, Math.min(98, (dur / totalMs) * 100));
-            html += `<div class="cb-timeline-seg ${s.to === 'closed' ? 'closed' : s.to === 'open' ? 'open' : 'halfopen'}" style="width:${pct}%"></div>`;
-        });
-        html += '</div>';
-        return html;
+    // ===== CB Timeline =====
+    function cbTL(hist) {
+        if(!hist||!hist.length) return '<span style="color:var(--text-4)">-</span>';
+        const segs=hist.slice(-6);
+        let h='<div class="cbtl" title="';
+        segs.forEach(s=>{h+=`${s.from}→${s.to} ${fmtTime(s.timestamp_ms)}  `;});
+        h+='">';
+        segs.forEach(s=>{h+=`<div class="cbtl-s ${s.to==='closed'?'closed':s.to==='open'?'open':'halfopen'}" style="width:${Math.max(5,100/segs.length)}%"></div>`;});
+        return h+'</div>';
     }
 
-    // ===== RENDER TARGETS =====
+    // ===== Targets =====
     function renderTargets(targets) {
-        const tbody = document.getElementById('targets-table');
-        tbody.innerHTML = targets.map((t, i) => {
-            const h = targetHistory[t.url];
-            const rate = h ? h.rate : 0;
-            const reqData = h ? h.requests.slice(-20) : [];
-            const errData = h ? h.errors.slice(-20) : [];
-            const errClass = (t.stats && t.stats.error_rate_pct || 0) > 5 ? 'err' : (t.stats && t.stats.error_rate_pct || 0) > 1 ? 'warn' : '';
-            const lat = t.stats && t.stats.avg_latency_us ? fmtLat(t.stats.avg_latency_us) : '-';
-            const wPct = t.weight > 0 ? (t.weight * 100).toFixed(0) : 0;
-            const sparkColor = (t.stats && t.stats.error_rate_pct || 0) > 5 ? '#ef4444' : (t.stats && t.stats.error_rate_pct || 0) > 1 ? '#eab308' : '#22c55e';
-            return `<tr class="${errClass} clickable" onclick="toggleTargetDetail(${i})" data-idx="${i}">
-                <td><span style="color:#666;font-size:0.8rem">${i+1}</span></td>
-                <td>${esc(t.service)}</td>
+        document.getElementById('targets-tbody').innerHTML = targets.map((t,i) => {
+            const h=targetHist[t.url], rate=h?h.rate:0;
+            const reqD=h?h.req.slice(-20):[];
+            const errPct=t.stats?.error_rate_pct||0;
+            const cls=errPct>5?'row-err':errPct>1?'row-warn':'';
+            const lat=t.stats?.avg_latency_us?fmtLat(t.stats.avg_latency_us):'-';
+            const wPct=t.weight>0?(t.weight*100).toFixed(0):0;
+            const sc=errPct>5?'var(--red)':errPct>1?'var(--yellow)':'var(--green)';
+            return `<tr class="${cls} row-click" onclick="toggleDetail(${i})" data-idx="${i}">
+                <td style="color:var(--text-4);font-size:0.75rem">${i+1}</td>
+                <td style="color:var(--text-0);font-weight:500">${esc(t.service)}</td>
                 <td class="mono">${esc(t.url)}</td>
-                <td><span class="badge">${esc(t.protocol)}</span>${t.tls ? '<span class="badge tls">TLS</span>' : ''}</td>
-                <td><div class="weight-bar"><div class="weight-bar-fill" style="width:${wPct}%"></div></div> <span style="font-size:0.75rem;color:#888">${(t.weight*100).toFixed(0)}%</span></td>
-                <td>${sparklineSVG(reqData, 50, 16, sparkColor)} <span style="font-size:0.8rem">${rate.toFixed(1)}</span></td>
-                <td>${fmt(t.stats && t.stats.errors || 0)}</td>
-                <td style="color:${errClass ? '#ef4444' : '#888'}">${t.stats && t.stats.error_rate_pct || 0}%</td>
+                <td><span class="tag">${esc(t.protocol)}</span>${t.tls?'<span class="tag tag-tls">TLS</span>':''}</td>
+                <td><span class="wbar"><span class="wbar-fill" style="width:${wPct}%"></span></span><span style="font-size:0.72rem;color:var(--text-4)">${wPct}%</span></td>
+                <td>${spark(reqD,44,14,sc)} <span style="font-size:0.78rem">${rate.toFixed(1)}</span></td>
+                <td>${fmt(t.stats?.errors||0)}</td>
+                <td style="color:${errPct>5?'var(--red)':errPct>1?'var(--yellow)':'var(--text-3)'}">${errPct}%</td>
                 <td>${lat}</td>
-                <td>${t.active_connections || 0}</td>
-                <td>${cbTimelineHTML(t.circuit_breaker_history)} <span class="cb-badge cb-${esc(t.circuit_breaker)}">${esc(t.circuit_breaker)}</span></td>
+                <td>${t.active_connections||0}</td>
+                <td>${cbTL(t.circuit_breaker_history)} <span class="cb cb-${esc(t.circuit_breaker)}">${esc(t.circuit_breaker)}</span></td>
             </tr>`;
         }).join('');
-        // Store for detail view
-        window._targets = targets;
+        window._tgts = targets;
     }
-
-    function toggleTargetDetail(idx) {
-        const panel = document.getElementById('target-detail');
-        if (selectedTarget === idx) { selectedTarget = null; panel.classList.remove('open'); return; }
-        selectedTarget = idx;
-        const t = window._targets[idx];
-        if (!t) return;
-        const h = targetHistory[t.url] || { requests:[], errors:[], rate:0 };
-        const reqData = h.requests.slice(-HISTORY_LEN);
-        const errData = h.errors.slice(-HISTORY_LEN);
-
-        let cbHtml = '';
-        if (t.circuit_breaker_history && t.circuit_breaker_history.length > 0) {
-            cbHtml = '<table style="width:100%"><tr><th>Time</th><th>From</th><th>To</th></tr>';
-            t.circuit_breaker_history.slice(0, 15).forEach(s => {
-                cbHtml += `<tr><td style="font-size:0.8rem">${fmtTime(s.timestamp_ms)}</td><td><span class="cb-badge cb-${s.from}">${s.from}</span></td><td><span class="cb-badge cb-${s.to}">${s.to}</span></td></tr>`;
-            });
-            cbHtml += '</table>';
-        } else cbHtml = '<span style="color:#666">No transitions recorded</span>';
-
-        panel.innerHTML = `
-            <div class="card-header"><span class="card-title">${esc(t.service)} &mdash; ${esc(t.url)}</span><button class="action-btn" onclick="selectedTarget=null;document.getElementById('target-detail').classList.remove('open')">Close</button></div>
-            <div class="target-detail-grid">
-                <div class="target-detail-section">
-                    <h4>Properties</h4>
-                    <dl class="target-detail-kv">
-                        <dt>Host / Path</dt><dd>${esc(t.host)}${esc(t.path)}</dd>
-                        <dt>Protocol</dt><dd>${esc(t.protocol)}${t.tls ? ' +TLS' : ''}${t.http2 ? ' +H2' : ''}</dd>
-                        <dt>Source</dt><dd>${esc(t.source)}</dd>
-                        <dt>Weight</dt><dd>${(t.weight*100).toFixed(1)}% (fixed: ${(t.fixed_weight*100).toFixed(1)}%)</dd>
-                        <dt>Circuit Breaker</dt><dd><span class="cb-badge cb-${esc(t.circuit_breaker)}">${esc(t.circuit_breaker)}</span></dd>
-                    </dl>
-                </div>
-                <div class="target-detail-section">
-                    <h4>Stats</h4>
-                    <dl class="target-detail-kv">
-                        <dt>Requests</dt><dd>${fmt(t.stats && t.stats.requests || 0)}</dd>
-                        <dt>Req/sec</dt><dd>${h.rate ? h.rate.toFixed(2) : '-'}</dd>
-                        <dt>Errors</dt><dd>${fmt(t.stats && t.stats.errors || 0)} (${t.stats && t.stats.error_rate_pct || 0}%)</dd>
-                        <dt>Avg Latency</dt><dd>${t.stats && t.stats.avg_latency_us ? fmtLat(t.stats.avg_latency_us) : '-'}</dd>
-                        <dt>Bytes</dt><dd>${fmt(t.stats && t.stats.bytes_total || 0)}</dd>
-                        <dt>Connections</dt><dd>${t.active_connections || 0}</dd>
-                    </dl>
-                </div>
-                <div class="target-detail-section">
-                    <h4>Request Trend (60s)</h4>
-                    ${sparklineSVG(reqData, 280, 40, '#6366f1')}
-                    <div style="margin-top:0.5rem"><h4>Error Trend</h4>${sparklineSVG(errData, 280, 40, '#ef4444')}</div>
-                </div>
-                <div class="target-detail-section">
-                    <h4>Circuit Breaker History</h4>
-                    ${cbHtml}
-                </div>
+    function toggleDetail(i) {
+        const p=document.getElementById('target-detail');
+        if(selectedTarget===i){selectedTarget=null;p.classList.remove('open');return;}
+        selectedTarget=i;
+        const t=window._tgts[i]; if(!t)return;
+        const h=targetHist[t.url]||{req:[],err:[],rate:0};
+        let cbH='';
+        if(t.circuit_breaker_history?.length){
+            cbH='<div style="overflow-x:auto"><table style="width:100%"><tr><th>Time</th><th>From</th><th>To</th></tr>';
+            t.circuit_breaker_history.slice(0,12).forEach(s=>{cbH+=`<tr><td style="font-size:0.78rem">${fmtTime(s.timestamp_ms)}</td><td><span class="cb cb-${s.from}">${s.from}</span></td><td><span class="cb cb-${s.to}">${s.to}</span></td></tr>`;});
+            cbH+='</table></div>';
+        } else cbH='<span style="color:var(--text-4)">No transitions recorded</span>';
+        p.innerHTML=`
+            <div class="detail-head"><span class="detail-title">${esc(t.service)} &mdash; ${esc(t.url)}</span><button class="btn btn-sm" onclick="selectedTarget=null;document.getElementById('target-detail').classList.remove('open')">Close</button></div>
+            <div class="detail-grid">
+                <div><h4>Properties</h4><dl class="detail-kv">
+                    <dt>Host</dt><dd>${esc(t.host)}</dd><dt>Path</dt><dd>${esc(t.path)}</dd>
+                    <dt>Protocol</dt><dd>${esc(t.protocol)}${t.tls?' +TLS':''}${t.http2?' +H2':''}</dd>
+                    <dt>Source</dt><dd>${esc(t.source)}</dd>
+                    <dt>Weight</dt><dd>${(t.weight*100).toFixed(1)}% (fixed: ${(t.fixed_weight*100).toFixed(1)}%)</dd>
+                </dl></div>
+                <div><h4>Stats</h4><dl class="detail-kv">
+                    <dt>Requests</dt><dd>${fmt(t.stats?.requests||0)}</dd>
+                    <dt>Req/sec</dt><dd>${h.rate.toFixed(2)}</dd>
+                    <dt>Errors</dt><dd>${fmt(t.stats?.errors||0)} (${t.stats?.error_rate_pct||0}%)</dd>
+                    <dt>Avg Latency</dt><dd>${t.stats?.avg_latency_us?fmtLat(t.stats.avg_latency_us):'-'}</dd>
+                    <dt>Bytes</dt><dd>${fmt(t.stats?.bytes_total||0)}</dd>
+                    <dt>Connections</dt><dd>${t.active_connections||0}</dd>
+                </dl></div>
+                <div><h4>Request Trend</h4>${spark(h.req.slice(-HIST),260,36,'var(--accent)')}<div style="margin-top:0.75rem"><h4>Error Trend</h4>${spark(h.err.slice(-HIST),260,36,'var(--red)')}</div></div>
+                <div><h4>Circuit Breaker</h4><div style="margin-bottom:0.5rem"><span class="cb cb-${esc(t.circuit_breaker)}">${esc(t.circuit_breaker)}</span></div>${cbH}</div>
             </div>`;
-        panel.classList.add('open');
-        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        p.classList.add('open');
+        p.scrollIntoView({behavior:'smooth',block:'nearest'});
     }
 
-    // ===== RENDER TOPOLOGY (Canvas) =====
-    function drawTopology() {
-        if (!topoData) return;
-        const canvas = document.getElementById('topology-canvas');
-        if (!canvas) return;
-        const ctx = canvas.getContext('2d');
-        const dpr = window.devicePixelRatio || 1;
-        const rect = canvas.getBoundingClientRect();
-        canvas.width = rect.width * dpr;
-        canvas.height = rect.height * dpr;
-        ctx.scale(dpr, dpr);
-        const W = rect.width, H = rect.height;
-
-        ctx.clearRect(0, 0, W, H);
-        ctx.save();
-        ctx.translate(W/2 + topoPan.x, 80 + topoPan.y);
-        ctx.scale(topoScale, topoScale);
-
-        // Build layout
-        const lb = topoData.lb || {};
-        const hosts = topoData.hosts || [];
-
-        // LB node
-        const lbX = 0, lbY = 0;
-        ctx.beginPath(); ctx.arc(lbX, lbY, 30, 0, Math.PI*2);
-        ctx.fillStyle = '#6366f1'; ctx.fill();
-        ctx.fillStyle = '#fff'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText('LB', lbX, lbY);
-        ctx.fillStyle = '#888'; ctx.font = '10px sans-serif';
-        ctx.fillText(`${fmt(lb.requests||0)} req · ${lb.active_connections||0} conn`, lbX, lbY + 42);
-
-        let nodeIdx = 0;
-        hosts.forEach((hostObj, hi) => {
-            const routes = hostObj.routes || [];
-            routes.forEach((routeObj, ri) => {
-                const targets = routeObj.targets || [];
-                const baseY = 160 + nodeIdx * 0;
-                const xSpread = Math.min(targets.length * 140, W * 0.7);
-                const startX = -xSpread / 2;
-
-                targets.forEach((t, ti) => {
-                    const tx = startX + ti * 140 + 70;
-                    const ty = 200 + (hi * 100) + (ri * 80);
-                    const cbState = t.circuit_breaker || 'closed';
-                    const color = cbState === 'open' ? '#ef4444' : cbState === 'halfopen' ? '#eab308' : '#22c55e';
-
-                    // Edge
-                    const maxConns = Math.max(...targets.map(tt => tt.active_connections || 0), 1);
-                    const thickness = 1 + ((t.active_connections || 0) / maxConns) * 5;
-                    ctx.beginPath();
-                    ctx.moveTo(lbX, lbY + 30);
-                    ctx.quadraticCurveTo(lbX, ty - 40, tx, ty - 20);
-                    ctx.strokeStyle = color + '66';
-                    ctx.lineWidth = thickness;
-                    ctx.stroke();
-
-                    // Node circle
-                    const radius = 20 + Math.min((t.active_connections || 0) * 0.5, 15);
-                    ctx.beginPath(); ctx.arc(tx, ty, radius, 0, Math.PI*2);
-                    ctx.fillStyle = color + '33'; ctx.fill();
-                    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
-
-                    // Label
-                    ctx.fillStyle = '#e0e0e0'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
-                    ctx.fillText(t.service || '', tx, ty - 2);
-                    ctx.fillStyle = '#888'; ctx.font = '9px sans-serif';
-                    ctx.fillText(`${t.active_connections||0} conn`, tx, ty + 12);
-
-                    nodeIdx++;
+    // ===== Topology Canvas =====
+    function drawTopo() {
+        if(!topoData)return;
+        const c=document.getElementById('topo-canvas'); if(!c)return;
+        const ctx=c.getContext('2d'), dpr=devicePixelRatio||1, r=c.getBoundingClientRect();
+        c.width=r.width*dpr; c.height=r.height*dpr; ctx.scale(dpr,dpr);
+        const W=r.width, H=r.height;
+        ctx.clearRect(0,0,W,H);
+        ctx.save(); ctx.translate(W/2+topoPan.x,70+topoPan.y); ctx.scale(topoScale,topoScale);
+        const lb=topoData.lb||{}, hosts=topoData.hosts||[];
+        // LB
+        ctx.beginPath();ctx.arc(0,0,26,0,Math.PI*2);ctx.fillStyle='#818cf8';ctx.fill();
+        ctx.fillStyle='#fff';ctx.font='bold 11px system-ui';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('LB',0,0);
+        ctx.fillStyle='#71717a';ctx.font='10px system-ui';ctx.fillText(`${fmt(lb.requests||0)} req · ${lb.active_connections||0} conn`,0,38);
+        let ni=0;
+        hosts.forEach((ho,hi)=>{
+            ho.routes?.forEach((ro,ri)=>{
+                ro.targets?.forEach((t,ti)=>{
+                    const n=ho.routes?.reduce((a,r)=>a+(r.targets?.length||0),0)||1;
+                    const spread=Math.min(n*130,W*0.7);
+                    const tx=-spread/2+ti*130+65, ty=180+hi*110+ri*90;
+                    const cb=t.circuit_breaker||'closed';
+                    const col=cb==='open'?'#f87171':cb==='halfopen'?'#fbbf24':'#34d399';
+                    const maxC=Math.max(...(ro.targets||[]).map(tt=>tt.active_connections||0),1);
+                    const lw=1+((t.active_connections||0)/maxC)*4;
+                    ctx.beginPath();ctx.moveTo(0,26);ctx.quadraticCurveTo(0,ty-30,tx,ty-18);
+                    ctx.strokeStyle=col+'55';ctx.lineWidth=lw;ctx.stroke();
+                    const rad=18+Math.min((t.active_connections||0)*0.4,12);
+                    ctx.beginPath();ctx.arc(tx,ty,rad,0,Math.PI*2);ctx.fillStyle=col+'22';ctx.fill();ctx.strokeStyle=col;ctx.lineWidth=1.5;ctx.stroke();
+                    ctx.fillStyle='#e4e4e7';ctx.font='bold 9px system-ui';ctx.textAlign='center';ctx.fillText(t.service||'',tx,ty-1);
+                    ctx.fillStyle='#71717a';ctx.font='8px system-ui';ctx.fillText(`${t.active_connections||0} conn`,tx,ty+10);
+                    ni++;
                 });
             });
         });
-
         ctx.restore();
-
-        // Pan & zoom with mouse
-        if (!canvas._wired) {
-            canvas._wired = true;
-            let dragging = false, lastX, lastY;
-            canvas.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
-            canvas.addEventListener('mousemove', e => { if (dragging) { topoPan.x += e.clientX - lastX; topoPan.y += e.clientY - lastY; lastX = e.clientX; lastY = e.clientY; drawTopology(); } });
-            canvas.addEventListener('mouseup', () => { dragging = false; });
-            canvas.addEventListener('wheel', e => { e.preventDefault(); const f = e.deltaY < 0 ? 1.1 : 0.9; topoScale = Math.max(0.3, Math.min(3, topoScale * f)); drawTopology(); });
+        if(!c._w){
+            c._w=true;let drag=false,lx,ly;
+            c.onmousedown=e=>{drag=true;lx=e.clientX;ly=e.clientY;};
+            c.onmousemove=e=>{if(drag){topoPan.x+=e.clientX-lx;topoPan.y+=e.clientY-ly;lx=e.clientX;ly=e.clientY;drawTopo();}};
+            c.onmouseup=()=>{drag=false;};
+            c.onwheel=e=>{e.preventDefault();topoScale=Math.max(0.3,Math.min(3,topoScale*(e.deltaY<0?1.1:0.9)));drawTopo();};
         }
     }
-    function topoZoom(f) { topoScale = Math.max(0.3, Math.min(3, topoScale * f)); drawTopology(); }
-    function topoReset() { topoScale = 1; topoPan = {x:0,y:0}; drawTopology(); }
+    function topoZoom(f){topoScale=Math.max(0.3,Math.min(3,topoScale*f));drawTopo();}
+    function topoReset(){topoScale=1;topoPan={x:0,y:0};drawTopo();}
 
-    // ===== RENDER DNS =====
-    function renderDns(dns) {
-        document.getElementById('dns-stats').innerHTML =
-            `<div class="stat"><label>Entries</label><div class="val">${dns.stats && dns.stats.total_entries || 0}</div></div>` +
-            `<div class="stat"><label>Hits</label><div class="val ok">${dns.stats && dns.stats.hits || 0}</div></div>` +
-            `<div class="stat"><label>Misses</label><div class="val">${dns.stats && dns.stats.misses || 0}</div></div>` +
-            `<div class="stat"><label>Hit Rate</label><div class="val ${((dns.stats && dns.stats.hit_rate || 0) > 80 ? 'ok' : 'warn')}">${dns.stats && dns.stats.hit_rate || 0}%</div></div>`;
-        document.getElementById('dns-entries').innerHTML = (dns.entries || []).map(e =>
-            `<div class="card" style="margin-top:0.5rem"><strong>${esc(e.host)}</strong> &#x2192; ${esc(e.addrs && e.addrs.join(', '))} <span style="color:#999;font-size:0.8rem;margin-left:1rem">TTL: ${e.ttl_remaining_secs}s${e.is_negative ? ' (NXDOMAIN)' : ''}</span></div>`
-        ).join('') || '<p class="no-data">No cached entries</p>';
+    // ===== DNS =====
+    function renderDns(d) {
+        document.getElementById('dns-stats').innerHTML=
+            `<div class="stat-card"><div class="stat-label">Entries</div><div class="stat-value">${d.stats?.total_entries||0}</div></div>`+
+            `<div class="stat-card"><div class="stat-label">Hits</div><div class="stat-value green">${d.stats?.hits||0}</div></div>`+
+            `<div class="stat-card"><div class="stat-label">Misses</div><div class="stat-value">${d.stats?.misses||0}</div></div>`+
+            `<div class="stat-card"><div class="stat-label">Hit Rate</div><div class="stat-value ${((d.stats?.hit_rate||0)>80?'green':'yellow')}">${d.stats?.hit_rate||0}%</div></div>`;
+        document.getElementById('dns-entries').innerHTML=(d.entries||[]).map(e=>
+            `<div class="card"><strong style="color:var(--text-0)">${esc(e.host)}</strong> <span style="color:var(--text-3)">&#x2192;</span> <span class="mono">${esc(e.addrs?.join(', '))}</span><span style="color:var(--text-4);font-size:0.75rem;margin-left:1rem">TTL: ${e.ttl_remaining_secs}s${e.is_negative?' (NXDOMAIN)':''}</span></div>`
+        ).join('')||'<div class="empty">No cached entries</div>';
     }
 
-    // ===== RENDER CONSUL =====
-    function renderConsul(consul) {
-        const watchers = ['services','kv','tls','client_ca'];
-        document.getElementById('consul-watchers').innerHTML = watchers.map(w => {
-            const d = consul[w] || {};
-            const errs = d.errors || 0;
-            const statusColor = errs > 10 ? '#ef4444' : errs > 0 ? '#eab308' : '#22c55e';
-            return `<div class="node-card"><div class="node-icon">&#x2601;&#xFE0F;</div><div class="node-label">${w.toUpperCase()}</div><div class="node-stats">Index: ${d.last_index||0}<br>Backoff: ${d.backoff_secs||0}s<br>Errors: <span style="color:${statusColor}">${errs}</span></div></div>`;
-        }).join('');
-    }
+    // ===== Consul =====
 
-    // ===== RENDER ROUTES =====
-    function renderRoutes(data) {
-        const routes = data.routes || [];
-        if (routes.length === 0) { document.getElementById('routes-list').innerHTML = '<p class="no-data">No routes configured</p>'; return; }
-        // Group by host
-        const byHost = {};
-        routes.forEach(r => {
-            const h = r.host || '*';
-            if (!byHost[h]) byHost[h] = [];
-            byHost[h].push(r);
-        });
+    function renderConsul(c) {
         let html = '';
-        Object.keys(byHost).sort().forEach(host => {
-            html += `<div style="margin-bottom:1rem"><h3 style="font-size:0.9rem;color:#6366f1;margin-bottom:0.5rem">${esc(host)}</h3>`;
-            html += '<table><tr><th>Path</th><th>Targets</th><th>Matcher</th></tr>';
-            byHost[host].forEach(r => {
-                const targets = (r.targets || []).map(t => `<span class="badge">${esc(t.service)}</span> ${esc(t.url)}`).join('<br>');
-                html += `<tr><td class="mono">${esc(r.path)}</td><td>${targets}</td><td>${esc(r.matcher)}</td></tr>`;
-            });
-            html += '</table></div>';
+        ['services','kv','tls','client_ca'].forEach(w=>{
+            const d=c[w]||{}, errs=d.errors||0;
+            const col=errs>10?'var(--red)':errs>0?'var(--yellow)':'var(--green)';
+            html += `<div class="node-card"><div class="node-icon">&#x2601;&#xFE0F;</div><div class="node-label">${w.toUpperCase()}</div><div class="node-meta">Index: ${d.last_index||0}<br>Backoff: ${d.backoff_secs||0}s<br>Errors: <span style="color:${col}">${errs}</span></div></div>`;
         });
-        document.getElementById('routes-list').innerHTML = html;
+        document.getElementById('consul-grid').innerHTML = html;
     }
 
-    // ===== LOGS =====
+    // ===== Routes =====
+    function renderRoutes(data) {
+        const routes=data.routes||[];
+        if(!routes.length){document.getElementById('routes-list').innerHTML='<div class="empty">No routes configured</div>';return;}
+        const byH={};routes.forEach(r=>{const h=r.host||'*';if(!byH[h])byH[h]=[];byH[h].push(r);});
+        let h='';
+        Object.keys(byH).sort().forEach(host=>{
+            h+=`<div class="card"><div style="font-size:0.78rem;font-weight:600;color:var(--accent);margin-bottom:0.75rem">${esc(host)}</div><div class="table-wrap"><table><tr><th>Path</th><th>Targets</th><th>Matcher</th></tr>`;
+            byH[host].forEach(r=>{
+                const tgts=(r.targets||[]).map(t=>`<span class="tag" style="margin:1px">${esc(t.service)}</span> <span class="mono">${esc(t.url)}</span>`).join('<br>');
+                h+=`<tr><td class="mono">${esc(r.path)}</td><td>${tgts}</td><td>${esc(r.matcher)}</td></tr>`;
+            });
+            h+='</table></div></div>';
+        });
+        document.getElementById('routes-list').innerHTML=h;
+    }
+
+    // ===== Logs =====
     function renderLogs() {
-        const container = document.getElementById('logs-container');
-        const filtered = filterCachedLogs();
-        container.innerHTML = filtered.slice(0, 500).map(l => {
-            const lvlChar = (l.level && l.level[0]) || 'I';
-            const isHighlight = logSearchTerm && l.message && l.message.toLowerCase().includes(logSearchTerm);
-            return `<div class="log${isHighlight ? ' highlight' : ''}"><span class="ts">${l.timestamp ? fmtTime(l.timestamp*1000) : ''}</span><span class="lvl ${lvlChar}">${esc(l.level)}</span><span class="msg">${esc(l.message)}</span></div>`;
+        const f=filterCached();
+        document.getElementById('logs-box').innerHTML=f.slice(0,500).map(l=>{
+            const c=(l.level?.[0])||'I';
+            const hl=logSearch&&l.message?.toLowerCase().includes(logSearch);
+            return `<div class="log-row${hl?' hl':''}"><span class="log-ts">${l.timestamp?fmtTime(l.timestamp*1000):''}</span><span class="log-lvl ${c}">${esc(l.level)}</span><span class="log-msg">${esc(l.message)}</span></div>`;
+        }).join('');
+    }
+    function filterCached(){return cachedLogs.filter(l=>activeLevels.has(l.level)&&(!logSearch||l.message?.toLowerCase().includes(logSearch)));}
+    function filterLogs(){logSearch=(document.getElementById('log-search').value||'').toLowerCase();renderLogs();}
+    function toggleLevel(b){const l=b.dataset.level;if(activeLevels.has(l)){activeLevels.delete(l);b.classList.remove('on');}else{activeLevels.add(l);b.classList.add('on');}renderLogs();}
+    function toggleStream(){
+        const b=document.getElementById('stream-btn');
+        if(logSse){logSse.close();logSse=null;b.classList.remove('on');b.textContent='Stream: OFF';}
+        else{logSse=new EventSource(API+'/logs/stream?token='+encodeURIComponent(token));
+            logSse.onmessage=e=>{try{const l=JSON.parse(e.data);cachedLogs.unshift(l);if(cachedLogs.length>2000)cachedLogs.length=2000;
+                if(activeLevels.has(l.level)&&(!logSearch||l.message?.toLowerCase().includes(logSearch))){const c=document.getElementById('logs-box'),d=document.createElement('div');
+                d.className='log-row'+(logSearch&&l.message?.toLowerCase().includes(logSearch)?' hl':'');
+                d.innerHTML=`<span class="log-ts">${fmtTime(l.timestamp*1000)}</span><span class="log-lvl ${(l.level||'I')[0]}">${esc(l.level)}</span><span class="log-msg">${esc(l.message)}</span>`;
+                c.insertBefore(d,c.firstChild);if(c.children.length>500)c.removeChild(c.lastChild);}}catch(e){}};
+            logSse.onerror=()=>{logSse.close();logSse=null;b.classList.remove('on');b.textContent='Stream: OFF';};
+            b.classList.add('on');b.textContent='Stream: ON';}
+    }
+
+    // ===== Config =====
+    function renderConfig(cfg) {
+        if(!cfg||typeof cfg!=='object'){document.getElementById('config-list').innerHTML='<div class="empty">No config loaded</div>';return;}
+        const sens=['admin_token','token','password'];
+        const defs={workers:1,poll_interval:'0s',strategy:'round-robin',matcher:'prefix',no_route_status:404,connect_timeout:'5s',read_timeout:'60s',write_timeout:'60s',idle_timeout:'120s',enable_h2c:false,pool_size:128,max_connections:0,circuit_breaker_enabled:true,circuit_breaker_error_threshold:50,circuit_breaker_window_size:100,circuit_breaker_recovery_timeout:30,circuit_breaker_half_open_max:3,dns_cache_ttl:30,dns_negative_cache_ttl:10};
+        let h='<div class="config-pre">';
+        (function walk(o,pfx){Object.keys(o).sort().forEach(k=>{
+            const fk=pfx?pfx+'.'+k:k, v=o[k];
+            if(v&&typeof v==='object'&&!Array.isArray(v)){walk(v,fk);return;}
+            const isSens=sens.some(s=>k.toLowerCase().includes(s));
+            const isDiff=defs[k]!==undefined&&v!==defs[k];
+            const cls=isSens?'mask':isDiff?'diff':'';
+            const disp=isSens?'••••••••':typeof v==='boolean'?(v?'true':'false'):String(v);
+            h+=`<span class="ck">${esc(fk)}</span>: <span class="cv ${cls}">${esc(disp)}</span>\n`;
+        });})(cfg,'');
+        h+='</div>';
+        document.getElementById('config-list').innerHTML=h;
+    }
+
+    // ===== Certs =====
+    function renderCerts(d) {
+        if(!d?.certs?.length){document.getElementById('certs-list').innerHTML='<div class="empty">No TLS certificates loaded</div>';return;}
+        document.getElementById('certs-list').innerHTML=d.certs.map(c=>{
+            const dl=c.days_until_expiry||0;
+            const cls=dl<7?'err':dl<30?'warn':'ok';
+            return `<div class="cert-row"><div><div style="font-weight:600;color:var(--text-0)">${esc(c.cn||c.subject||'Unknown')}</div><div style="font-size:0.78rem;color:var(--text-3);margin-top:0.15rem">Source: ${esc(c.source||'file')} · Expires: ${esc(c.not_after||'?')}</div></div><div class="cert-days ${cls}">${dl}d</div></div>`;
         }).join('');
     }
 
-    function filterCachedLogs() {
-        return cachedLogs.filter(l => {
-            if (!activeLevels.has(l.level)) return false;
-            if (logSearchTerm && !(l.message && l.message.toLowerCase().includes(logSearchTerm))) return false;
-            return true;
-        });
-    }
+    // ===== Export =====
+    function exportRoutes(){dl(window._routes||{}, 'sentirum-routes.json');}
+    function exportConfig(){dl(cachedConfig||{}, 'sentirum-config.json');}
+    function dl(d,f){const b=new Blob([JSON.stringify(d,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=f;a.click();}
 
-    function filterLogs() {
-        logSearchTerm = (document.getElementById('log-search').value || '').toLowerCase();
-        renderLogs();
+    // ===== Init =====
+    if(token&&username){
+        fetch(API+'/me',{headers:hdrs()}).then(r=>r.json()).then(d=>{if(d.authenticated)showApp();else{localStorage.removeItem('admin_token');localStorage.removeItem('admin_user');}}).catch(()=>{localStorage.removeItem('admin_token');localStorage.removeItem('admin_user');});
     }
-
-    function toggleLevel(btn) {
-        const level = btn.dataset.level;
-        if (activeLevels.has(level)) { activeLevels.delete(level); btn.classList.remove('active'); }
-        else { activeLevels.add(level); btn.classList.add('active'); }
-        renderLogs();
-    }
-
-    function toggleStream() {
-        const btn = document.getElementById('stream-btn');
-        if (logSse) {
-            logSse.close(); logSse = null;
-            btn.classList.remove('on'); btn.textContent = 'Stream: OFF';
-        } else {
-            logSse = new EventSource(API + '/logs/stream?token=' + encodeURIComponent(token));
-            logSse.onmessage = e => {
-                try {
-                    const l = JSON.parse(e.data);
-                    cachedLogs.unshift(l);
-                    if (cachedLogs.length > 2000) cachedLogs.length = 2000;
-                    if (activeLevels.has(l.level) && (!logSearchTerm || (l.message && l.message.toLowerCase().includes(logSearchTerm)))) {
-                        const c = document.getElementById('logs-container');
-                        const div = document.createElement('div');
-                        div.className = 'log' + (logSearchTerm && l.message && l.message.toLowerCase().includes(logSearchTerm) ? ' highlight' : '');
-                        div.innerHTML = `<span class="ts">${fmtTime(l.timestamp*1000)}</span><span class="lvl ${(l.level||'I')[0]}">${esc(l.level)}</span><span class="msg">${esc(l.message)}</span>`;
-                        c.insertBefore(div, c.firstChild);
-                        if (c.children.length > 500) c.removeChild(c.lastChild);
-                    }
-                } catch(err){}
-            };
-            logSse.onerror = () => { logSse.close(); logSse=null; btn.classList.remove('on'); btn.textContent='Stream: OFF'; };
-            btn.classList.add('on'); btn.textContent = 'Stream: ON';
-        }
-    }
-
-    // ===== CONFIG =====
-    function renderConfig(config) {
-        if (!config || typeof config !== 'object') { document.getElementById('config-list').innerHTML = '<p class="no-data">No config loaded</p>'; return; }
-        const sensitive = ['admin_token','token'];
-        const defaults = { workers: 1, poll_interval: '0s', strategy: 'round-robin', matcher: 'prefix', no_route_status: 404, connect_timeout: '5s', read_timeout: '60s', write_timeout: '60s', idle_timeout: '120s', enable_h2c: false, pool_size: 128, max_connections: 0, circuit_breaker_enabled: true, circuit_breaker_error_threshold: 50, circuit_breaker_window_size: 100, circuit_breaker_recovery_timeout: 30, circuit_breaker_half_open_max: 3, dns_cache_ttl: 30, dns_negative_cache_ttl: 10 };
-
-        let html = '<div class="config-diff">';
-        function renderObj(obj, prefix) {
-            Object.keys(obj).sort().forEach(k => {
-                const fullKey = prefix ? prefix + '.' + k : k;
-                const val = obj[k];
-                if (val && typeof val === 'object' && !Array.isArray(val)) { renderObj(val, fullKey); return; }
-                const isSensitive = sensitive.some(s => k.toLowerCase().includes(s));
-                const isDefault = defaults[k] !== undefined && val === defaults[k];
-                const cls = isSensitive ? 'masked' : isDefault ? '' : 'changed';
-                const display = isSensitive ? '••••••' : (typeof val === 'boolean' ? (val ? 'true' : 'false') : String(val));
-                html += `<span class="key">${esc(fullKey)}</span>: <span class="${cls}">${esc(display)}</span>\n`;
-            });
-        }
-        renderObj(config, '');
-        html += '</div>';
-        document.getElementById('config-list').innerHTML = html;
-    }
-
-    // ===== CERTS =====
-    function renderCerts(data) {
-        if (!data || !data.certs || data.certs.length === 0) { document.getElementById('certs-list').innerHTML = '<p class="no-data">No TLS certificates loaded</p>'; return; }
-        document.getElementById('certs-list').innerHTML = data.certs.map(c => {
-            const daysLeft = c.days_until_expiry || 0;
-            const cls = daysLeft < 7 ? 'err' : daysLeft < 30 ? 'warn' : '';
-            return `<div class="card cert-card"><div><strong>${esc(c.cn || c.subject || 'Unknown')}</strong><div style="font-size:0.8rem;color:#888;margin-top:0.25rem">Source: ${esc(c.source||'file')} · Expires: ${esc(c.not_after||'?')}</div></div><div class="cert-days ${cls}">${daysLeft}d</div></div>`;
-        }).join('');
-    }
-
-    // ===== EXPORT =====
-    function exportRoutes() { downloadJSON(window._routes || {}, 'sentirum-routes.json'); }
-    function exportConfig() { downloadJSON(cachedConfig || {}, 'sentirum-config.json'); }
-    function downloadJSON(data, filename) {
-        const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
-        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; a.click();
-    }
-
-    // ===== INIT =====
-    if (token && username) {
-        fetch(API + '/me', { headers: headers() })
-            .then(r => r.json())
-            .then(d => { if (d.authenticated) showApp(); else { localStorage.removeItem('admin_token'); localStorage.removeItem('admin_user'); } })
-            .catch(() => { localStorage.removeItem('admin_token'); localStorage.removeItem('admin_user'); });
-    }
-    document.getElementById('password-input').addEventListener('keypress', e => { if (e.key === 'Enter') doLogin(); });
+    document.getElementById('password-input').addEventListener('keypress',e=>{if(e.key==='Enter')doLogin();});
     </script>
 </body>
 </html>
