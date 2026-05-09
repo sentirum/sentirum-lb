@@ -13,463 +13,274 @@
             color: #e0e0e0;
             line-height: 1.5;
         }
-        
+
         /* Login Screen */
         #login-screen {
-            position: fixed;
-            inset: 0;
+            position: fixed; inset: 0;
             background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 100%);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 9999;
+            display: flex; align-items: center; justify-content: center; z-index: 9999;
         }
         #login-screen.hidden { display: none; }
         .login-card {
-            background: rgba(20, 20, 20, 0.95);
-            border: 1px solid #2a2a3a;
-            border-radius: 16px;
-            padding: 3rem;
-            text-align: center;
-            min-width: 360px;
+            background: rgba(20, 20, 20, 0.95); border: 1px solid #2a2a3a;
+            border-radius: 16px; padding: 3rem; text-align: center; min-width: 360px;
             box-shadow: 0 20px 60px rgba(0,0,0,0.5);
         }
-        .login-card h1 {
-            font-size: 1.8rem;
-            font-weight: 600;
-            color: #fff;
-            margin-bottom: 0.5rem;
-            letter-spacing: -0.02em;
-        }
-        .login-card .subtitle {
-            color: #999;
-            margin-bottom: 2rem;
-            font-size: 0.9rem;
-        }
+        .login-card h1 { font-size: 1.8rem; font-weight: 600; color: #fff; margin-bottom: 0.5rem; }
+        .login-card .subtitle { color: #999; margin-bottom: 2rem; font-size: 0.9rem; }
         .login-card input {
-            width: 100%;
-            padding: 1rem;
-            background: #1a1a1a;
-            border: 1px solid #333;
-            border-radius: 8px;
-            color: #fff;
-            font-size: 1rem;
-            margin-bottom: 1rem;
-            transition: border-color 0.2s;
+            width: 100%; padding: 1rem; background: #1a1a1a; border: 1px solid #333;
+            border-radius: 8px; color: #fff; font-size: 1rem; margin-bottom: 1rem;
         }
-        .login-card input:focus {
-            outline: none;
-            border-color: #6366f1;
-        }
+        .login-card input:focus { outline: none; border-color: #6366f1; }
         .login-card button {
-            width: 100%;
-            padding: 1rem;
-            background: linear-gradient(135deg, #6366f1, #8b5cf6);
-            border: none;
-            border-radius: 8px;
-            color: #fff;
-            font-size: 1rem;
-            font-weight: 500;
-            cursor: pointer;
-            transition: opacity 0.2s;
+            width: 100%; padding: 1rem; background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            border: none; border-radius: 8px; color: #fff; font-size: 1rem; font-weight: 500; cursor: pointer;
         }
         .login-card button:hover { opacity: 0.9; }
-        .login-error {
-            color: #ef4444;
-            font-size: 0.85rem;
-            margin-top: 1rem;
-            display: none;
-        }
-        
+        .login-error { color: #ef4444; font-size: 0.85rem; margin-top: 1rem; display: none; }
+
         /* Error banner */
         .error-banner {
-            display: none;
-            background: rgba(239, 68, 68, 0.15);
-            border: 1px solid rgba(239, 68, 68, 0.3);
-            border-radius: 8px;
-            padding: 0.75rem 1rem;
-            margin-bottom: 1.5rem;
-            color: #ef4444;
-            font-size: 0.85rem;
+            display: none; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1.5rem; color: #ef4444; font-size: 0.85rem;
         }
         .error-banner.visible { display: flex; align-items: center; gap: 0.5rem; }
-        
+
         /* App Layout */
         .app { display: none; }
         .app.active { display: grid; }
-        .layout {
-            display: grid;
-            grid-template-columns: 200px 1fr;
-            min-height: 100vh;
-        }
-        
+        .layout { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+
         /* Sidebar */
         nav {
-            background: #0a0a0a;
-            padding: 1.5rem 1rem;
-            border-right: 1px solid #1a1a1a;
-            position: fixed;
-            width: 200px;
-            height: 100vh;
-            display: flex;
-            flex-direction: column;
+            background: #0a0a0a; padding: 1.5rem 1rem; border-right: 1px solid #1a1a1a;
+            position: fixed; width: 220px; height: 100vh; display: flex; flex-direction: column;
         }
-        .logo {
-            font-size: 1.1rem;
-            font-weight: 600;
-            letter-spacing: -0.02em;
-            margin-bottom: 2rem;
-            padding: 0 0.5rem;
-        }
+        .logo { font-size: 1.1rem; font-weight: 600; margin-bottom: 2rem; padding: 0 0.5rem; }
         .logo span { color: #6366f1; }
         .nav-links { flex: 1; }
         .nav a {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            padding: 0.6rem 0.75rem;
-            color: #999;
-            text-decoration: none;
-            font-size: 0.85rem;
-            border-radius: 6px;
-            transition: all 0.15s;
+            display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 0.75rem;
+            color: #999; text-decoration: none; font-size: 0.85rem; border-radius: 6px;
         }
-        .nav a:hover, .nav a.active { 
-            background: #1a1a1a;
-            color: #e0e0e0;
-        }
+        .nav a:hover, .nav a.active { background: #1a1a1a; color: #e0e0e0; }
         .nav a.active { background: #1f1f2e; color: #6366f1; }
-        .nav-icon { font-size: 1.1rem; }
-        
-        /* User section */
-        .user-section {
-            padding-top: 1rem;
-            border-top: 1px solid #1a1a1a;
-        }
-        .user-info {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            padding: 0.5rem;
-            margin-bottom: 0.5rem;
-        }
+        .nav-icon { font-size: 1.1rem; width: 20px; text-align: center; }
+        .user-section { padding-top: 1rem; border-top: 1px solid #1a1a1a; }
+        .user-info { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem; margin-bottom: 0.5rem; }
         .user-avatar {
-            width: 32px;
-            height: 32px;
-            background: linear-gradient(135deg, #6366f1, #8b5cf6);
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 600;
-            font-size: 0.8rem;
+            width: 32px; height: 32px; background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            border-radius: 50%; display: flex; align-items: center; justify-content: center;
+            font-weight: 600; font-size: 0.8rem;
         }
-        .user-name { font-size: 0.85rem; color: #e0e0e0; }
+        .user-name { font-size: 0.85rem; }
         .logout-btn {
-            width: 100%;
-            padding: 0.5rem;
-            background: transparent;
-            border: 1px solid #333;
-            border-radius: 6px;
-            color: #999;
-            font-size: 0.8rem;
-            cursor: pointer;
-            transition: all 0.15s;
+            width: 100%; padding: 0.5rem; background: transparent; border: 1px solid #333;
+            border-radius: 6px; color: #999; font-size: 0.8rem; cursor: pointer;
         }
         .logout-btn:hover { border-color: #ef4444; color: #ef4444; }
-        
+
         /* Main content */
-        main {
-            margin-left: 200px;
-            padding: 2rem 2.5rem;
-        }
+        main { margin-left: 220px; padding: 2rem 2.5rem; }
         .page { display: none; }
         .page.active { display: block; }
-        
+
         /* Header */
-        .page-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 2rem;
-        }
-        h1 {
-            font-size: 1.3rem;
-            font-weight: 500;
-            color: #ccc;
-            letter-spacing: -0.01em;
-        }
+        .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; }
+        h1 { font-size: 1.3rem; font-weight: 500; color: #ccc; }
         .live-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-            padding: 0.4rem 0.8rem;
-            background: rgba(34, 197, 94, 0.1);
-            border: 1px solid rgba(34, 197, 94, 0.3);
-            border-radius: 20px;
-            font-size: 0.75rem;
-            color: #22c55e;
+            display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.8rem;
+            background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.3);
+            border-radius: 20px; font-size: 0.75rem; color: #22c55e;
         }
-        .live-dot {
-            width: 8px;
-            height: 8px;
-            background: #22c55e;
-            border-radius: 50%;
-            animation: pulse 2s infinite;
-        }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-        
+        .live-dot { width: 8px; height: 8px; background: #22c55e; border-radius: 50%; animation: pulse 2s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
         /* Stats grid */
         .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 1px;
-            background: #1a1a1a;
-            border-radius: 12px;
-            overflow: hidden;
-            margin-bottom: 2rem;
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 1px; background: #1a1a1a; border-radius: 12px; overflow: hidden; margin-bottom: 2rem;
         }
-        .stat {
-            background: #141414;
-            padding: 1.5rem;
-        }
-        .stat label {
-            display: block;
-            font-size: 0.7rem;
-            color: #888;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            margin-bottom: 0.5rem;
-        }
-        .stat .val {
-            font-size: 2rem;
-            font-weight: 300;
-            color: #fff;
-        }
-        .stat .sub {
-            font-size: 0.75rem;
-            color: #666;
-            margin-top: 0.3rem;
-        }
+        .stat { background: #141414; padding: 1.5rem; }
+        .stat label { display: block; font-size: 0.7rem; color: #888; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.5rem; }
+        .stat .val { font-size: 2rem; font-weight: 300; color: #fff; }
+        .stat .sub { font-size: 0.75rem; color: #666; margin-top: 0.3rem; }
         .stat .val.ok { color: #22c55e; }
         .stat .val.warn { color: #eab308; }
         .stat .val.err { color: #ef4444; }
-        
+
         /* Charts */
-        .charts {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 1.5rem;
-            margin-bottom: 2rem;
-        }
-        .chart-card {
-            background: #141414;
-            border-radius: 12px;
-            padding: 1.5rem;
-        }
-        .chart-card h3 {
-            font-size: 0.85rem;
-            color: #999;
-            margin-bottom: 1rem;
-            font-weight: 500;
-        }
+        .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem; }
+        .chart-card { background: #141414; border-radius: 12px; padding: 1.5rem; }
+        .chart-card h3 { font-size: 0.85rem; color: #999; margin-bottom: 1rem; font-weight: 500; }
         .chart-card canvas { max-height: 200px; }
-        
+
         /* Tables */
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        th, td {
-            text-align: left;
-            padding: 1rem 0.75rem;
-            border-bottom: 1px solid #1a1a1a;
-        }
-        th {
-            font-size: 0.7rem;
-            color: #888;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            font-weight: 500;
-        }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 0.75rem; border-bottom: 1px solid #1a1a1a; }
+        th { font-size: 0.7rem; color: #888; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 500; }
         td { font-size: 0.85rem; }
         .mono { font-family: 'SF Mono', Monaco, monospace; font-size: 0.8rem; color: #888; }
-        
+        tr.err { background: rgba(239, 68, 68, 0.05); }
+        tr.warn { background: rgba(234, 179, 8, 0.05); }
+        tr.clickable { cursor: pointer; }
+        tr.clickable:hover { background: #1a1a1a; }
+
         /* Badges */
         .badge {
-            display: inline-block;
-            padding: 0.2rem 0.5rem;
-            background: #1a1a1a;
-            border-radius: 4px;
-            font-size: 0.7rem;
-            color: #888;
-            text-transform: uppercase;
+            display: inline-block; padding: 0.2rem 0.5rem; background: #1a1a1a;
+            border-radius: 4px; font-size: 0.7rem; color: #888; text-transform: uppercase;
         }
         .badge.tls { background: rgba(99, 102, 241, 0.2); color: #6366f1; }
         .badge.grpc { background: rgba(234, 179, 8, 0.2); color: #eab308; }
-        
-        /* Circuit breaker badges */
-        .cb-badge {
-            padding: 0.25rem 0.6rem;
-            border-radius: 12px;
-            font-size: 0.75rem;
-            font-weight: 500;
-        }
+        .badge.tcp { background: rgba(34, 197, 94, 0.2); color: #22c55e; }
+
+        /* CB badges */
+        .cb-badge { padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem; font-weight: 500; }
         .cb-closed { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
         .cb-open { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
         .cb-halfopen { background: rgba(234, 179, 8, 0.15); color: #eab308; }
-        
-        /* Topology cards */
-        .topology-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-            gap: 1rem;
-            margin-top: 1.5rem;
+
+        /* Weight bar */
+        .weight-bar { display: inline-block; width: 60px; height: 6px; background: #1a1a1a; border-radius: 3px; overflow: hidden; vertical-align: middle; }
+        .weight-bar-fill { height: 100%; border-radius: 3px; background: #6366f1; }
+
+        /* Sparkline */
+        .sparkline { display: inline-block; vertical-align: middle; }
+
+        /* CB timeline */
+        .cb-timeline { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #1a1a1a; }
+        .cb-timeline-seg { height: 100%; }
+        .cb-timeline-seg.closed { background: #22c55e; }
+        .cb-timeline-seg.open { background: #ef4444; }
+        .cb-timeline-seg.halfopen { background: #eab308; }
+
+        /* Topology */
+        #topology-canvas { width: 100%; height: 600px; background: #0a0a0a; border-radius: 12px; display: block; }
+        .topo-legend { display: flex; gap: 1.5rem; margin-top: 1rem; font-size: 0.8rem; color: #888; }
+        .topo-legend-item { display: flex; align-items: center; gap: 0.4rem; }
+        .topo-legend-dot { width: 12px; height: 12px; border-radius: 50%; }
+
+        /* Log filter bar */
+        .log-filters { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+        .log-filters input {
+            padding: 0.5rem 0.75rem; background: #1a1a1a; border: 1px solid #333;
+            border-radius: 6px; color: #fff; font-size: 0.85rem; flex: 1; min-width: 200px;
         }
+        .log-filters input:focus { outline: none; border-color: #6366f1; }
+        .level-btns { display: flex; gap: 0.25rem; }
+        .level-btn {
+            padding: 0.4rem 0.6rem; background: #1a1a1a; border: 1px solid #333;
+            border-radius: 4px; color: #888; font-size: 0.75rem; cursor: pointer; font-family: 'SF Mono', monospace;
+        }
+        .level-btn.active { border-color: #6366f1; color: #6366f1; }
+        .level-btn.active.lvl-e { border-color: #ef4444; color: #ef4444; }
+        .level-btn.active.lvl-w { border-color: #eab308; color: #eab308; }
+        .level-btn.active.lvl-i { border-color: #22c55e; color: #22c55e; }
+        .stream-btn {
+            padding: 0.5rem 1rem; background: #1a1a1a; border: 1px solid #333;
+            border-radius: 6px; color: #888; font-size: 0.8rem; cursor: pointer;
+        }
+        .stream-btn.on { background: rgba(34, 197, 94, 0.15); border-color: #22c55e; color: #22c55e; }
+
+        /* Logs container */
+        #logs-container {
+            background: #0a0a0a; border-radius: 8px; padding: 1rem;
+            font-family: 'SF Mono', Monaco, monospace; font-size: 0.8rem;
+            max-height: 600px; overflow-y: auto;
+        }
+        .log { padding: 0.4rem 0; border-bottom: 1px solid #151515; display: flex; gap: 1rem; }
+        .log .ts { color: #666; flex-shrink: 0; }
+        .log .lvl { width: 50px; flex-shrink: 0; font-weight: 500; }
+        .log .lvl.I { color: #22c55e; }
+        .log .lvl.W { color: #eab308; background: rgba(234,179,8,0.08); border-radius: 2px; padding: 0 0.3rem; }
+        .log .lvl.E { color: #ef4444; background: rgba(239,68,68,0.08); border-radius: 2px; padding: 0 0.3rem; }
+        .log .lvl.D { color: #999; }
+        .log .lvl.T { color: #555; }
+        .log .msg { color: #888; word-break: break-all; }
+        .log.highlight { background: rgba(99, 102, 241, 0.08); }
+
+        /* Cards */
+        .card { background: #141414; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; }
+        .card-header { display: flex; justify-content: space-between; margin-bottom: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid #1a1a1a; }
+        .card-title { font-size: 0.9rem; font-weight: 500; color: #ccc; }
+
+        /* Target detail panel */
+        .target-detail {
+            background: #141414; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem;
+            display: none; border: 1px solid #252525;
+        }
+        .target-detail.open { display: block; }
+        .target-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 1rem; }
+        .target-detail-section h4 { font-size: 0.8rem; color: #888; text-transform: uppercase; margin-bottom: 0.75rem; }
+        .target-detail-kv { display: grid; grid-template-columns: auto 1fr; gap: 0.3rem 1rem; font-size: 0.85rem; }
+        .target-detail-kv dt { color: #888; }
+        .target-detail-kv dd { color: #e0e0e0; }
+
+        /* Config diff */
+        .config-diff { background: #0a0a0a; border-radius: 8px; padding: 1rem; overflow: auto; font-size: 0.8rem; font-family: 'SF Mono', monospace; white-space: pre-wrap; }
+        .config-diff .key { color: #999; }
+        .config-diff .changed { color: #eab308; }
+        .config-diff .masked { color: #555; }
+
+        /* Cert expiry */
+        .cert-card { display: flex; justify-content: space-between; align-items: center; }
+        .cert-days { font-size: 1.5rem; font-weight: 300; }
+        .cert-days.warn { color: #eab308; }
+        .cert-days.err { color: #ef4444; }
+
+        /* Action buttons */
+        .action-btn {
+            padding: 0.4rem 0.8rem; background: #1a1a1a; border: 1px solid #333;
+            border-radius: 6px; color: #888; font-size: 0.8rem; cursor: pointer;
+        }
+        .action-btn:hover { border-color: #6366f1; color: #6366f1; }
+        .action-btn.primary { background: rgba(99, 102, 241, 0.15); border-color: #6366f1; color: #6366f1; }
+
+        /* Topology grid (fallback) */
+        .topology-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 1rem; margin-top: 1.5rem; }
         .node-card {
-            background: #1a1a1a;
-            border-radius: 12px;
-            padding: 1.25rem;
-            text-align: center;
-            border: 1px solid #252525;
-            transition: all 0.2s;
+            background: #1a1a1a; border-radius: 12px; padding: 1.25rem; text-align: center;
+            border: 1px solid #252525; transition: all 0.2s;
         }
         .node-card:hover { border-color: #333; transform: translateY(-2px); }
-        .node-card.lb {
-            background: linear-gradient(135deg, #1f1f2e, #2a2a4a);
-            border-color: #6366f1;
-        }
+        .node-card.lb { background: linear-gradient(135deg, #1f1f2e, #2a2a4a); border-color: #6366f1; }
         .node-icon { font-size: 1.5rem; margin-bottom: 0.5rem; }
         .node-label { font-weight: 500; color: #e0e0e0; margin-bottom: 0.25rem; }
         .node-stats { font-size: 0.75rem; color: #999; margin-top: 0.5rem; }
-        .node-status { 
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            margin-left: 0.5rem;
-        }
+        .node-status { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-left: 0.5rem; }
         .node-status.ok { background: #22c55e; }
         .node-status.err { background: #ef4444; }
         .node-status.warn { background: #eab308; }
-        
-        /* Cards */
-        .card {
-            background: #141414;
-            border-radius: 12px;
-            padding: 1.5rem;
-            margin-bottom: 1rem;
-        }
-        .card-header {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 1rem;
-            padding-bottom: 0.75rem;
-            border-bottom: 1px solid #1a1a1a;
-        }
-        .card-title { font-size: 0.9rem; font-weight: 500; color: #ccc; }
-        
-        /* Logs */
-        #logs-container {
-            background: #0a0a0a;
-            border-radius: 8px;
-            padding: 1rem;
-            font-family: 'SF Mono', Monaco, monospace;
-            font-size: 0.8rem;
-            max-height: 500px;
-            overflow-y: auto;
-        }
-        .log {
-            padding: 0.4rem 0;
-            border-bottom: 1px solid #151515;
-            display: flex;
-            gap: 1rem;
-        }
-        .log .ts { color: #666; flex-shrink: 0; }
-        .log .lvl { 
-            width: 50px;
-            flex-shrink: 0;
-            font-weight: 500;
-        }
-        .log .lvl.I { color: #22c55e; }
-        .log .lvl.W { color: #eab308; }
-        .log .lvl.E { color: #ef4444; }
-        .log .lvl.D { color: #999; }
-        .log .msg { color: #888; }
-        
-        /* Refresh button */
-        .refresh-btn {
-            padding: 0.5rem 1rem;
-            background: #1a1a1a;
-            border: 1px solid #333;
-            border-radius: 6px;
-            color: #888;
-            font-size: 0.8rem;
-            cursor: pointer;
-            transition: all 0.15s;
-        }
-        .refresh-btn:hover { background: #222; color: #fff; }
-        
-        /* Error rows */
-        tr.err { background: rgba(239, 68, 68, 0.05); }
-        tr.warn { background: rgba(234, 179, 8, 0.05); }
-        
+
         /* No data */
         .no-data { color: #666; text-align: center; padding: 2rem; }
-        
-        /* Loading */
-        .loading { color: #999; }
-        .loading::after {
-            content: '';
-            animation: dots 1.5s infinite;
+
+        /* Tooltip */
+        .tooltip {
+            position: absolute; background: #1a1a1a; border: 1px solid #333; border-radius: 8px;
+            padding: 0.75rem 1rem; font-size: 0.8rem; z-index: 100; pointer-events: none;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5); max-width: 300px;
         }
-        @keyframes dots {
-            0%, 20% { content: '.'; }
-            40% { content: '..'; }
-            60%, 100% { content: '...'; }
-        }
-        
+
         /* Responsive */
         @media (max-width: 768px) {
             .layout { grid-template-columns: 1fr; }
-            nav {
-                position: relative;
-                width: 100%;
-                height: auto;
-                padding: 0.75rem;
-                flex-direction: row;
-                flex-wrap: wrap;
-                align-items: center;
-                gap: 0.5rem;
-            }
+            nav { position: relative; width: 100%; height: auto; padding: 0.75rem; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
             .logo { margin-bottom: 0; margin-right: 0.5rem; }
-            .nav-links {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 0.25rem;
-                flex: 1;
-            }
+            .nav-links { display: flex; flex-wrap: wrap; gap: 0.25rem; flex: 1; }
             .nav a { padding: 0.4rem 0.5rem; font-size: 0.75rem; }
             .nav-icon { display: none; }
-            .user-section {
-                border-top: none;
-                padding-top: 0;
-                border-left: 1px solid #1a1a1a;
-                padding-left: 0.75rem;
-                margin-left: 0.25rem;
-            }
+            .user-section { border-top: none; padding-top: 0; border-left: 1px solid #1a1a1a; padding-left: 0.75rem; margin-left: 0.25rem; }
             .user-info { display: none; }
-            main {
-                margin-left: 0;
-                padding: 1rem;
-            }
+            main { margin-left: 0; padding: 1rem; }
             .charts { grid-template-columns: 1fr; }
             .stats { grid-template-columns: repeat(2, 1fr); }
             .login-card { min-width: 0; margin: 1rem; }
             #login-screen { padding: 1rem; }
+            .target-detail-grid { grid-template-columns: 1fr; }
+            .log-filters { flex-direction: column; align-items: stretch; }
         }
     </style>
 </head>
@@ -485,37 +296,22 @@
             <p class="login-error" id="login-error">Invalid credentials</p>
         </div>
     </div>
-    
+
     <!-- App -->
     <div class="app" id="app">
         <div class="layout">
             <nav>
                 <div class="logo"><span>sentirum</span> lb</div>
                 <div class="nav-links">
-                    <a href="#" data-page="overview" class="active" onclick="showPage('overview')">
-                        <span class="nav-icon">&#x1F4CA;</span> Overview
-                    </a>
-                    <a href="#" data-page="topology" onclick="showPage('topology')">
-                        <span class="nav-icon">&#x1F517;</span> Topology
-                    </a>
-                    <a href="#" data-page="targets" onclick="showPage('targets')">
-                        <span class="nav-icon">&#x1F3AF;</span> Targets
-                    </a>
-                    <a href="#" data-page="dns" onclick="showPage('dns')">
-                        <span class="nav-icon">&#x1F310;</span> DNS Cache
-                    </a>
-                    <a href="#" data-page="consul" onclick="showPage('consul')">
-                        <span class="nav-icon">&#x2601;&#xFE0F;</span> Consul
-                    </a>
-                    <a href="#" data-page="routes" onclick="showPage('routes')">
-                        <span class="nav-icon">&#x1F6E4;&#xFE0F;</span> Routes
-                    </a>
-                    <a href="#" data-page="logs" onclick="showPage('logs')">
-                        <span class="nav-icon">&#x1F4CB;</span> Logs
-                    </a>
-                    <a href="#" data-page="config" onclick="showPage('config')">
-                        <span class="nav-icon">&#x2699;&#xFE0F;</span> Config
-                    </a>
+                    <a href="#" data-page="overview" class="active" onclick="showPage('overview')"><span class="nav-icon">&#x1F4CA;</span> Overview</a>
+                    <a href="#" data-page="topology" onclick="showPage('topology')"><span class="nav-icon">&#x1F517;</span> Topology</a>
+                    <a href="#" data-page="targets" onclick="showPage('targets')"><span class="nav-icon">&#x1F3AF;</span> Targets</a>
+                    <a href="#" data-page="dns" onclick="showPage('dns')"><span class="nav-icon">&#x1F310;</span> DNS</a>
+                    <a href="#" data-page="consul" onclick="showPage('consul')"><span class="nav-icon">&#x2601;&#xFE0F;</span> Consul</a>
+                    <a href="#" data-page="routes" onclick="showPage('routes')"><span class="nav-icon">&#x1F6E4;&#xFE0F;</span> Routes</a>
+                    <a href="#" data-page="logs" onclick="showPage('logs')"><span class="nav-icon">&#x1F4CB;</span> Logs</a>
+                    <a href="#" data-page="config" onclick="showPage('config')"><span class="nav-icon">&#x2699;&#xFE0F;</span> Config</a>
+                    <a href="#" data-page="certs" onclick="showPage('certs')"><span class="nav-icon">&#x1F510;</span> Certs</a>
                 </div>
                 <div class="user-section">
                     <div class="user-info">
@@ -525,13 +321,13 @@
                     <button class="logout-btn" onclick="doLogout()">Logout</button>
                 </div>
             </nav>
-            
+
             <main>
                 <!-- Connection error banner -->
                 <div class="error-banner" id="error-banner">
                     <span>&#x26A0;&#xFE0F; Backend unreachable &mdash; showing cached data</span>
                 </div>
-                
+
                 <!-- Overview -->
                 <div id="page-overview" class="page active">
                     <div class="page-header">
@@ -539,433 +335,687 @@
                         <div class="live-badge"><div class="live-dot" id="live-indicator"></div> <span id="live-text">LIVE</span></div>
                     </div>
                     <div class="stats" id="stats-row">
-                        <div class="stat"><label>Total Requests</label><div class="val" id="stat-requests">-</div></div>
+                        <div class="stat"><label>Requests / sec</label><div class="val" id="stat-rps">-</div><div class="sub" id="stat-rps-sub"></div></div>
                         <div class="stat"><label>Error Rate</label><div class="val" id="stat-errors">-</div></div>
-                        <div class="stat"><label>Active Connections</label><div class="val" id="stat-conn">-</div></div>
-                        <div class="stat"><label>Routes</label><div class="val" id="stat-routes">-</div></div>
-                        <div class="stat"><label>Targets</label><div class="val" id="stat-targets">-</div></div>
+                        <div class="stat"><label>Active Connections</label><div class="val" id="stat-conn">-</div><div class="sub" id="stat-conn-sub">0 open, 0 close/s</div></div>
+                        <div class="stat"><label>Avg Latency</label><div class="val" id="stat-latency">-</div></div>
+                        <div class="stat"><label>Routes / Targets</label><div class="val" id="stat-routes">-</div></div>
+                        <div class="stat"><label>Requests Total</label><div class="val" id="stat-requests">-</div></div>
                     </div>
                     <div class="charts">
-                        <div class="chart-card">
-                            <h3>Latency Distribution</h3>
-                            <canvas id="lat-chart"></canvas>
-                        </div>
-                        <div class="chart-card">
-                            <h3>Status Codes</h3>
-                            <canvas id="status-chart"></canvas>
-                        </div>
+                        <div class="chart-card"><h3>Latency Distribution</h3><canvas id="lat-chart"></canvas></div>
+                        <div class="chart-card"><h3>Status Codes</h3><canvas id="status-chart"></canvas></div>
                     </div>
                 </div>
-                
+
                 <!-- Topology -->
                 <div id="page-topology" class="page">
                     <div class="page-header">
                         <h1>Topology</h1>
-                        <div class="live-badge"><div class="live-dot" id="live-indicator"></div> <span id="live-text">LIVE</span></div>
+                        <div style="display:flex;gap:0.5rem;align-items:center">
+                            <button class="action-btn" onclick="topoZoom(1.2)">+</button>
+                            <button class="action-btn" onclick="topoZoom(0.8)">&minus;</button>
+                            <button class="action-btn" onclick="topoReset()">Reset</button>
+                            <div class="live-badge"><div class="live-dot"></div> LIVE</div>
+                        </div>
                     </div>
-                    <div class="topology-grid" id="topology-grid"></div>
+                    <canvas id="topology-canvas"></canvas>
+                    <div class="topo-legend">
+                        <div class="topo-legend-item"><div class="topo-legend-dot" style="background:#6366f1"></div> Load Balancer</div>
+                        <div class="topo-legend-item"><div class="topo-legend-dot" style="background:#22c55e"></div> Healthy</div>
+                        <div class="topo-legend-item"><div class="topo-legend-dot" style="background:#eab308"></div> Half-Open</div>
+                        <div class="topo-legend-item"><div class="topo-legend-dot" style="background:#ef4444"></div> Circuit Open</div>
+                        <div class="topo-legend-item">Line thickness = connection ratio</div>
+                    </div>
                 </div>
-                
+
                 <!-- Targets -->
                 <div id="page-targets" class="page">
                     <div class="page-header">
                         <h1>Targets</h1>
-                        <div class="live-badge"><div class="live-dot" id="live-indicator"></div> <span id="live-text">LIVE</span></div>
+                        <div class="live-badge"><div class="live-dot"></div> LIVE</div>
                     </div>
-                    <div class="card">
+                    <div class="card" style="overflow-x:auto">
                         <table>
                             <thead>
                                 <tr>
+                                    <th></th>
                                     <th>Service</th>
                                     <th>URL</th>
-                                    <th>Protocol</th>
-                                    <th>Requests</th>
+                                    <th>Proto</th>
+                                    <th>Weight</th>
+                                    <th>Req/s</th>
                                     <th>Errors</th>
                                     <th>Err%</th>
-                                    <th>Avg Latency</th>
-                                    <th>Connections</th>
-                                    <th>CB State</th>
+                                    <th>Latency</th>
+                                    <th>Conns</th>
+                                    <th>CB</th>
                                 </tr>
                             </thead>
                             <tbody id="targets-table"></tbody>
                         </table>
                     </div>
+                    <div id="target-detail" class="target-detail"></div>
                 </div>
-                
+
                 <!-- DNS Cache -->
                 <div id="page-dns" class="page">
                     <div class="page-header">
                         <h1>DNS Cache</h1>
-                        <div class="live-badge"><div class="live-dot" id="live-indicator"></div> <span id="live-text">LIVE</span></div>
+                        <div class="live-badge"><div class="live-dot"></div> LIVE</div>
                     </div>
                     <div class="stats" id="dns-stats" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 1.5rem;"></div>
                     <div id="dns-entries"></div>
                 </div>
-                
+
                 <!-- Consul -->
                 <div id="page-consul" class="page">
                     <div class="page-header">
                         <h1>Consul Status</h1>
-                        <div class="live-badge"><div class="live-dot" id="live-indicator"></div> <span id="live-text">LIVE</span></div>
+                        <div class="live-badge"><div class="live-dot"></div> LIVE</div>
                     </div>
                     <div class="topology-grid" id="consul-watchers"></div>
                 </div>
-                
+
                 <!-- Routes -->
                 <div id="page-routes" class="page">
                     <div class="page-header">
                         <h1>Routes</h1>
+                        <button class="action-btn" onclick="exportRoutes()">&#x1F4E5; Export JSON</button>
                     </div>
                     <div class="card" id="routes-list"></div>
                 </div>
-                
+
                 <!-- Logs -->
                 <div id="page-logs" class="page">
                     <div class="page-header">
                         <h1>Logs</h1>
-                        <button class="refresh-btn" onclick="toggleStream()">Stream: OFF</button>
+                    </div>
+                    <div class="log-filters">
+                        <input type="text" id="log-search" placeholder="Search logs..." oninput="filterLogs()" />
+                        <div class="level-btns">
+                            <button class="level-btn active lvl-e" data-level="ERROR" onclick="toggleLevel(this)">ERR</button>
+                            <button class="level-btn active lvl-w" data-level="WARN" onclick="toggleLevel(this)">WRN</button>
+                            <button class="level-btn active lvl-i" data-level="INFO" onclick="toggleLevel(this)">INF</button>
+                            <button class="level-btn" data-level="DEBUG" onclick="toggleLevel(this)">DBG</button>
+                            <button class="level-btn" data-level="TRACE" onclick="toggleLevel(this)">TRC</button>
+                        </div>
+                        <button class="stream-btn" id="stream-btn" onclick="toggleStream()">Stream: OFF</button>
                     </div>
                     <div id="logs-container"></div>
                 </div>
-                
+
                 <!-- Config -->
                 <div id="page-config" class="page">
                     <div class="page-header">
                         <h1>Configuration</h1>
+                        <button class="action-btn" onclick="exportConfig()">&#x1F4E5; Export JSON</button>
                     </div>
                     <div id="config-list"></div>
+                </div>
+
+                <!-- Certs -->
+                <div id="page-certs" class="page">
+                    <div class="page-header">
+                        <h1>TLS Certificates</h1>
+                    </div>
+                    <div id="certs-list"></div>
                 </div>
             </main>
         </div>
     </div>
-    
+
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script>
-        const API = '/admin';
-        let token = localStorage.getItem('admin_token') || '';
-        let username = localStorage.getItem('admin_user') || '';
-        let sse = null;
-        let charts = {};
-        let consecutiveErrors = 0;
-        
-        // HTML escape to prevent XSS
-        function escapeHtml(str) {
-            if (str == null) return '';
-            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-        }
-        
-        // Auth
-        async function doLogin() {
-            const user = document.getElementById('username-input').value.trim();
-            const pass = document.getElementById('password-input').value;
-            
+    // ===== STATE =====
+    const API = '/admin';
+    let token = localStorage.getItem('admin_token') || '';
+    let username = localStorage.getItem('admin_user') || '';
+    let logSse = null, metricsSse = null;
+    let charts = {};
+    let prevSnapshot = null;
+    let targetHistory = {}; // url -> { requests: [ring], errors: [ring], timestamps: [ring] }
+    const HISTORY_LEN = 60;
+    let cachedLogs = [];
+    let activeLevels = new Set(['ERROR','WARN','INFO']);
+    let logSearchTerm = '';
+    let topoData = null, topoScale = 1, topoPan = {x:0,y:0};
+    let selectedTarget = null;
+    let cachedConfig = null;
+    let topoAnimFrame = null;
+    let topoNodes = [], topoEdges = [];
+
+    // ===== HELPERS =====
+    function esc(s) { if (s == null) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+    function fmt(n) { if (n >= 1e9) return (n/1e9).toFixed(1)+'B'; if (n >= 1e6) return (n/1e6).toFixed(1)+'M'; if (n >= 1e3) return (n/1e3).toFixed(1)+'K'; return String(n); }
+    function fmtLat(us) { if (us < 1000) return us+'µs'; if (us < 1e6) return (us/1000).toFixed(1)+'ms'; return (us/1e6).toFixed(2)+'s'; }
+    function fmtTime(ms) { return new Date(ms).toISOString().slice(11,19); }
+    function pct(val, total) { return total > 0 ? (val/total*100).toFixed(1)+'%' : '0%'; }
+    function headers() { return { 'Authorization': 'Bearer ' + token }; }
+    async function api(path) {
+        const r = await fetch(API + path, { headers: headers() });
+        if (r.status === 401) { localStorage.removeItem('admin_token'); location.reload(); throw new Error('unauthorized'); }
+        return r.json();
+    }
+
+    // ===== AUTH =====
+    async function doLogin() {
+        const user = document.getElementById('username-input').value.trim();
+        const pass = document.getElementById('password-input').value;
+        try {
+            const r = await fetch(API+'/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:user,password:pass}) });
+            const d = await r.json();
+            if (d.success && d.token) { token=d.token; username=d.user||user; localStorage.setItem('admin_token',token); localStorage.setItem('admin_user',username); showApp(); }
+            else document.getElementById('login-error').style.display='block';
+        } catch(e) { document.getElementById('login-error').style.display='block'; }
+    }
+    async function doLogout() {
+        try { await fetch(API+'/logout',{method:'POST',headers:headers()}); } catch(e){}
+        localStorage.removeItem('admin_token'); localStorage.removeItem('admin_user'); location.reload();
+    }
+    function showApp() {
+        document.getElementById('login-screen').classList.add('hidden');
+        document.getElementById('app').classList.add('active');
+        document.getElementById('user-name').textContent = username;
+        document.getElementById('user-avatar').textContent = username[0].toUpperCase();
+        initCharts();
+        startMetricsStream();
+        refreshStatic();
+    }
+
+    // ===== NAVIGATION =====
+    function showPage(page) {
+        document.querySelectorAll('.nav a').forEach(a => a.classList.remove('active'));
+        document.querySelector('[data-page="'+page+'"]').classList.add('active');
+        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+        document.getElementById('page-'+page).classList.add('active');
+        if (page === 'topology') drawTopology();
+    }
+
+    // ===== SSE METRICS STREAM =====
+    function startMetricsStream() {
+        if (metricsSse) metricsSse.close();
+        metricsSse = new EventSource(API + '/metrics/stream?token=' + encodeURIComponent(token));
+        metricsSse.onmessage = e => {
             try {
-                const r = await fetch(API + '/login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: user, password: pass })
-                });
-                const d = await r.json();
-                
-                if (d.success && d.token) {
-                    token = d.token;
-                    username = d.user || user;
-                    localStorage.setItem('admin_token', token);
-                    localStorage.setItem('admin_user', username);
-                    showApp();
-                } else {
-                    document.getElementById('login-error').style.display = 'block';
-                }
-            } catch(e) {
-                document.getElementById('login-error').style.display = 'block';
-            }
-        }
-        
-        async function doLogout() {
-            try {
-                await fetch(API + '/logout', { 
-                    method: 'POST',
-                    headers: { 'Authorization': 'Bearer ' + token }
-                });
-            } catch(e) {}
-            localStorage.removeItem('admin_token');
-            localStorage.removeItem('admin_user');
-            location.reload();
-        }
-        
-        function showApp() {
-            document.getElementById('login-screen').classList.add('hidden');
-            document.getElementById('app').classList.add('active');
-            document.getElementById('user-name').textContent = username;
-            document.getElementById('user-avatar').textContent = username[0].toUpperCase();
-            startRealtime();
-            refreshAll();
-        }
-        
-        // Auth header
-        function headers() {
-            return { 'Authorization': 'Bearer ' + token };
-        }
-        
-        // API call with error tracking
-        async function api(path) {
-            const r = await fetch(API + path, { headers: headers() });
-            if (r.status === 401) {
-                localStorage.removeItem('admin_token');
-                location.reload();
-                throw new Error('unauthorized');
-            }
-            return r.json();
-        }
-        
-        // Page navigation
-        function showPage(page) {
-            document.querySelectorAll('.nav a').forEach(a => a.classList.remove('active'));
-            document.querySelector('[data-page="' + page + '"]').classList.add('active');
-            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-            document.getElementById('page-' + page).classList.add('active');
-        }
-        
-        // Format numbers
-        function fmt(n) {
-            if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
-            if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
-            if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
-            return n.toString();
-        }
-        
-        // Charts
-        function initCharts() {
-            charts.latency = new Chart(document.getElementById('lat-chart'), {
-                type: 'bar',
-                data: { labels: [], datasets: [{ data: [], backgroundColor: '#333' }] },
-                options: { responsive: true, plugins: { legend: { display: false } },
-                    scales: { y: { ticks: { color: '#999' }, grid: { color: '#1a1a1a' } },
-                              x: { ticks: { color: '#999' }, grid: { display: false } } } }
-            });
-            charts.status = new Chart(document.getElementById('status-chart'), {
-                type: 'doughnut',
-                data: { labels: ['2xx','3xx','4xx','5xx'], 
-                       datasets: [{ data: [0,0,0,0], backgroundColor: ['#22c55e','#eab308','#f97316','#ef4444'] }] },
-                options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { color: '#999' } } } }
-            });
-        }
-        
-        // Show/hide error banner
-        function setErrorState(hasError) {
-            const banner = document.getElementById('error-banner');
-            const liveIndicator = document.getElementById('live-indicator');
-            const liveText = document.getElementById('live-text');
-            if (hasError) {
-                banner.classList.add('visible');
-                liveIndicator.style.background = '#ef4444';
-                if (liveText) liveText.textContent = 'DISCONNECTED';
-            } else {
-                banner.classList.remove('visible');
-                liveIndicator.style.background = '#22c55e';
-                if (liveText) liveText.textContent = 'LIVE';
-            }
-        }
-        
-        // Refresh all data
-        async function refreshAll() {
-            if (!token) return;
-            
-            let hadError = false;
-            const safeFetch = (promise, fallback) => promise.catch(e => { hadError = true; return fallback; });
-            
-            const [h, r, targets, dns, consul, config, logs] = await Promise.all([
-                safeFetch(api('/health'), {}),
-                safeFetch(api('/routes'), { route_count: 0, target_count: 0 }),
-                safeFetch(api('/targets'), { targets: [] }),
-                safeFetch(api('/dns-cache'), { stats: {}, entries: [] }),
-                safeFetch(api('/consul-status'), {}),
-                safeFetch(api('/config'), {}),
-                safeFetch(api('/logs?limit=100'), [])
-            ]);
-            
-            if (hadError) {
-                consecutiveErrors++;
-                setErrorState(true);
-            } else {
-                consecutiveErrors = 0;
+                const snap = JSON.parse(e.data.replace(/^data:\s*/, ''));
+                processSnapshot(snap);
                 setErrorState(false);
-            }
-            
-            // Overview
-            document.getElementById('stat-routes').textContent = r.route_count || 0;
-            document.getElementById('stat-targets').textContent = r.target_count || 0;
-            
-            // Parse metrics (fetch separately)
-            fetch(API + '/metrics', { headers: headers() })
-                .then(r => r.text())
-                .then(text => {
-                    const m = {};
-                    text.split('\n').forEach(l => {
-                        if (l.includes(' ')) {
-                            const n = l.split(' ')[0].replace(/\{.*?\}/, '');
-                            const v = parseFloat(l.split(' ').pop());
-                            if (!isNaN(v)) m[n.replace(/sentirum_lb_/, '')] = v;
-                        }
-                    });
-                    document.getElementById('stat-requests').textContent = fmt(m.requests_total || 0);
-                    const errRate = m.requests_total ? ((m.requests_error_total / m.requests_total) * 100).toFixed(1) + '%' : '0%';
-                    document.getElementById('stat-errors').textContent = errRate;
-                    document.getElementById('stat-conn').textContent = m.active_connections || 0;
-                    
-                    // Charts
-                    if (charts.latency) {
-                        charts.latency.data.labels = ['<1ms','<5ms','<10ms','<50ms','<100ms','<500ms'];
-                        charts.latency.data.datasets[0].data = [
-                            m.latency_bucket_1ms || 0,
-                            m.latency_bucket_5ms || 0,
-                            m.latency_bucket_10ms || 0,
-                            m.latency_bucket_50ms || 0,
-                            m.latency_bucket_100ms || 0,
-                            (m.latency_bucket_250ms || 0) + (m.latency_bucket_500ms || 0)
-                        ];
-                        charts.latency.update();
-                    }
-                    if (charts.status) {
-                        charts.status.data.datasets[0].data = [
-                            m.status_2xx || 0,
-                            m.status_3xx || 0,
-                            m.status_4xx || 0,
-                            m.status_5xx || 0
-                        ];
-                        charts.status.update();
-                    }
-                });
-            
-            // Targets
-            if (targets.targets) {
-                document.getElementById('targets-table').innerHTML = targets.targets.map(t => {
-                    const errClass = (t.stats && t.stats.error_rate_pct || 0) > 1 ? 'err' : '';
-                    const lat = t.stats && t.stats.avg_latency_us ? (t.stats.avg_latency_us / 1000).toFixed(1) + 'ms' : '-';
-                    return '<tr class="' + errClass + '">' +
-                        '<td>' + escapeHtml(t.service) + '</td>' +
-                        '<td class="mono">' + escapeHtml(t.url) + '</td>' +
-                        '<td><span class="badge">' + escapeHtml(t.protocol) + '</span>' + (t.tls ? '<span class="badge tls">TLS</span>' : '') + '</td>' +
-                        '<td>' + fmt(t.stats && t.stats.requests || 0) + '</td>' +
-                        '<td>' + fmt(t.stats && t.stats.errors || 0) + '</td>' +
-                        '<td>' + (t.stats && t.stats.error_rate_pct || 0) + '%</td>' +
-                        '<td>' + lat + '</td>' +
-                        '<td>' + (t.active_connections || 0) + '</td>' +
-                        '<td><span class="cb-badge cb-' + escapeHtml(t.circuit_breaker) + '">' + escapeHtml(t.circuit_breaker) + '</span></td>' +
-                    '</tr>';
-                }).join('');
-            }
-            
-            // Topology
-            api('/topology').then(d => {
-                let html = '<div class="node-card lb"><div class="node-icon">&#x2696;&#xFE0E;</div><div class="node-label">Load Balancer</div><div class="node-stats">' + fmt(d.nodes && d.nodes[0] && d.nodes[0].stats && d.nodes[0].stats.requests || 0) + ' req</div></div>';
-                (d.nodes || []).filter(n => n.type === 'target').forEach(n => {
-                    const status = n.cb_state === 'open' ? 'err' : n.cb_state === 'halfopen' ? 'warn' : 'ok';
-                    html += '<div class="node-card"><div class="node-icon">&#x1F3AF;</div><div class="node-label">' + escapeHtml(n.label) + '<span class="node-status ' + status + '"></span></div><div class="node-stats">' + fmt(n.stats && n.stats.requests || 0) + ' req</div></div>';
-                });
-                document.getElementById('topology-grid').innerHTML = html;
+            } catch(err) {}
+        };
+        metricsSse.onerror = () => { setErrorState(true); };
+    }
+
+    function processSnapshot(snap) {
+        const now = snap.timestamp;
+        const delta = prevSnapshot ? snap : null;
+        const dt = delta ? (now - prevSnapshot.timestamp) || 1 : 1;
+
+        // Overview stats
+        const rps = delta ? ((snap.requests_total - prevSnapshot.requests_total) / dt).toFixed(1) : '0';
+        const errRate = snap.requests_total > 0 ? ((snap.requests_error_total / snap.requests_total)*100).toFixed(1)+'%' : '0%';
+        document.getElementById('stat-rps').textContent = rps;
+        document.getElementById('stat-errors').textContent = errRate;
+        document.getElementById('stat-errors').className = 'val' + (snap.requests_error_total > 0 && snap.requests_total > 0 && (snap.requests_error_total/snap.requests_total > 0.05) ? ' err' : snap.requests_error_total > 0 ? ' warn' : '');
+        document.getElementById('stat-conn').textContent = snap.active_connections;
+        document.getElementById('stat-requests').textContent = fmt(snap.requests_total);
+        document.getElementById('stat-routes').textContent = snap.route_count + ' / ' + snap.target_count;
+
+        // Avg latency
+        if (snap.targets && snap.targets.length > 0) {
+            const avgLat = Math.round(snap.targets.reduce((s,t) => s + t.avg_latency_us, 0) / snap.targets.length);
+            document.getElementById('stat-latency').textContent = fmtLat(avgLat);
+        }
+
+        // Per-target history
+        if (snap.targets) {
+            snap.targets.forEach(t => {
+                if (!targetHistory[t.url]) targetHistory[t.url] = { requests: [], errors: [], timestamps: [] };
+                const h = targetHistory[t.url];
+                const prevReq = h.requests.length > 0 ? h.requests[h.requests.length-1] : 0;
+                h.requests.push(t.requests);
+                h.errors.push(t.errors);
+                h.timestamps.push(now);
+                if (h.requests.length > HISTORY_LEN) { h.requests.shift(); h.errors.shift(); h.timestamps.shift(); }
+                h.rate = delta ? (t.requests - prevReq) / dt : 0;
             });
-            
-            // DNS
-            document.getElementById('dns-stats').innerHTML =
-                '<div class="stat"><label>Entries</label><div class="val">' + (dns.stats && dns.stats.total_entries || 0) + '</div></div>' +
-                '<div class="stat"><label>Hits</label><div class="val ok">' + (dns.stats && dns.stats.hits || 0) + '</div></div>' +
-                '<div class="stat"><label>Misses</label><div class="val">' + (dns.stats && dns.stats.misses || 0) + '</div></div>' +
-                '<div class="stat"><label>Hit Rate</label><div class="val ' + ((dns.stats && dns.stats.hit_rate || 0) > 80 ? 'ok' : 'warn') + '">' + (dns.stats && dns.stats.hit_rate || 0) + '%</div></div>';
-            document.getElementById('dns-entries').innerHTML = (dns.entries || []).map(e =>
-                '<div class="card" style="margin-top: 0.5rem;">' +
-                    '<strong>' + escapeHtml(e.host) + '</strong> &#x2192; ' + escapeHtml(e.addrs.join(', ')) +
-                    ' <span style="color:#999;font-size:0.8rem;margin-left:1rem;">TTL: ' + e.ttl_remaining_secs + 's' + (e.is_negative ? ' (NXDOMAIN)' : '') + '</span>' +
-                '</div>'
-            ).join('') || '<p class="no-data">No cached entries</p>';
-            
-            // Consul
-            const watchers = ['services', 'kv', 'tls', 'client_ca'];
-            document.getElementById('consul-watchers').innerHTML = watchers.map(w => {
-                const d = consul[w] || {};
-                return '<div class="node-card">' +
-                    '<div class="node-icon">&#x2601;&#xFE0F;</div>' +
-                    '<div class="node-label">' + w.toUpperCase() + '</div>' +
-                    '<div class="node-stats">Index: ' + (d.last_index || 0) + '<br>Backoff: ' + (d.backoff_secs || 0) + 's<br>Errors: ' + (d.errors || 0) + '</div>' +
-                '</div>';
-            }).join('');
-            
-            // Config
-            if (typeof config === 'object' && config !== null) {
-                document.getElementById('config-list').innerHTML = '<pre style="background:#1a1a1a;padding:1rem;border-radius:8px;overflow:auto;font-size:0.8rem;">' + escapeHtml(JSON.stringify(config, null, 2)) + '</pre>';
+        }
+
+        prevSnapshot = snap;
+    }
+
+    // ===== STATIC DATA REFRESH (10s interval) =====
+    async function refreshStatic() {
+        if (!token) return;
+        const safeFetch = (p, fb) => p.catch(() => fb);
+
+        const [routes, targets, dns, consul, config, logs, certs] = await Promise.all([
+            safeFetch(api('/routes'), {route_count:0, target_count:0}),
+            safeFetch(api('/targets'), {targets:[]}),
+            safeFetch(api('/dns-cache'), {stats:{}, entries:[]}),
+            safeFetch(api('/consul-status'), {}),
+            safeFetch(api('/config'), {}),
+            safeFetch(api('/logs?limit=200'), []),
+            safeFetch(api('/certs'), {certs:[]}),
+        ]);
+
+        cachedLogs = logs || [];
+        cachedConfig = config;
+        renderTargets(targets.targets || []);
+        renderDns(dns);
+        renderConsul(consul);
+        renderRoutes(routes);
+        renderLogs();
+        renderCerts(certs);
+        renderConfig(config);
+        refreshMetrics();
+
+        // Topology data
+        try {
+            topoData = await api('/topology');
+            if (document.getElementById('page-topology').classList.contains('active')) drawTopology();
+        } catch(e) {}
+
+        setTimeout(refreshStatic, 10000);
+    }
+
+    async function refreshMetrics() {
+        try {
+            const r = await fetch(API+'/metrics', {headers:headers()});
+            const text = await r.text();
+            const m = {};
+            text.split('\n').forEach(l => { if (l.includes(' ')) { const n=l.split(' ')[0].replace(/\{.*?\}/,''); const v=parseFloat(l.split(' ').pop()); if(!isNaN(v)) m[n.replace(/sentirum_lb_/,'')]=v; }});
+            // Charts
+            if (charts.latency) {
+                charts.latency.data.labels = ['<1ms','<5ms','<10ms','<25ms','<50ms','<100ms','<250ms','<500ms','<1s','<5s','>5s'];
+                charts.latency.data.datasets[0].data = [m.latency_bucket_1ms||0,m.latency_bucket_5ms||0,m.latency_bucket_10ms||0,m.latency_bucket_25ms||0,m.latency_bucket_50ms||0,m.latency_bucket_100ms||0,m.latency_bucket_250ms||0,m.latency_bucket_500ms||0,m.latency_bucket_1s||0,m.latency_bucket_5s||0,m.latency_bucket_inf||0];
+                charts.latency.update();
             }
-            
-            // Logs
-            if (Array.isArray(logs)) {
-                document.getElementById('logs-container').innerHTML = logs.map(l =>
-                    '<div class="log">' +
-                        '<span class="ts">' + new Date(l.timestamp * 1000).toISOString().slice(11,19) + '</span>' +
-                        '<span class="lvl ' + escapeHtml(l.level && l.level[0] || '') + '">' + escapeHtml(l.level) + '</span>' +
-                        '<span class="msg">' + escapeHtml(l.message) + '</span>' +
-                    '</div>'
-                ).join('');
+            if (charts.status) {
+                charts.status.data.datasets[0].data = [m.status_2xx||0,m.status_3xx||0,m.status_4xx||0,m.status_5xx||0];
+                charts.status.update();
             }
-        }
-        
-        // Real-time updates
-        function startRealtime() {
-            initCharts();
-            // Refresh every 3 seconds
-            setInterval(refreshAll, 3000);
-        }
-        
-        // Log stream toggle
-        function toggleStream() {
-            const btn = document.querySelector('.refresh-btn');
-            if (sse) {
-                sse.close();
-                sse = null;
-                btn.textContent = 'Stream: OFF';
-                btn.style.background = '#1a1a1a';
-            } else {
-                // EventSource doesn't support custom headers; pass token as query param
-                sse = new EventSource(API + '/logs/stream?token=' + encodeURIComponent(token));
-                sse.onmessage = e => {
-                    try {
-                        const l = JSON.parse(e.data);
-                        const container = document.getElementById('logs-container');
-                        const div = document.createElement('div');
-                        div.className = 'log';
-                        div.innerHTML = '<span class="ts">' + new Date(l.timestamp * 1000).toISOString().slice(11,19) + '</span>' +
-                            '<span class="lvl ' + escapeHtml(l.level && l.level[0] || '') + '">' + escapeHtml(l.level) + '</span>' +
-                            '<span class="msg">' + escapeHtml(l.message) + '</span>';
-                        container.appendChild(div);
-                        container.scrollTop = container.scrollHeight;
-                    } catch(e) {}
-                };
-                sse.onerror = () => { sse.close(); sse = null; btn.textContent = 'Stream: OFF'; btn.style.background = '#1a1a1a'; };
-                btn.textContent = 'Stream: ON';
-                btn.style.background = '#22c55e';
-            }
-        }
-        
-        // Init
-        if (token && username) {
-            // Verify token is still valid
-            fetch(API + '/me', { headers: headers() })
-                .then(r => r.json())
-                .then(d => {
-                    if (d.authenticated) showApp();
-                    else {
-                        localStorage.removeItem('admin_token');
-                        localStorage.removeItem('admin_user');
-                    }
-                })
-                .catch(() => {
-                    localStorage.removeItem('admin_token');
-                    localStorage.removeItem('admin_user');
-                });
-        }
-        
-        // Enter key for login
-        document.getElementById('password-input').addEventListener('keypress', e => {
-            if (e.key === 'Enter') doLogin();
+        } catch(e){}
+    }
+
+    function setErrorState(hasError) {
+        const b = document.getElementById('error-banner');
+        const li = document.getElementById('live-indicator');
+        const lt = document.getElementById('live-text');
+        if (hasError) { b.classList.add('visible'); if(li) li.style.background='#ef4444'; if(lt) lt.textContent='DISCONNECTED'; }
+        else { b.classList.remove('visible'); if(li) li.style.background='#22c55e'; if(lt) lt.textContent='LIVE'; }
+    }
+
+    // ===== CHARTS =====
+    function initCharts() {
+        charts.latency = new Chart(document.getElementById('lat-chart'), {
+            type:'bar', data:{labels:[], datasets:[{data:[], backgroundColor:'#333'}]},
+            options:{responsive:true, plugins:{legend:{display:false}}, scales:{y:{ticks:{color:'#999'},grid:{color:'#1a1a1a'}},x:{ticks:{color:'#999'},grid:{display:false}}}}
         });
+        charts.status = new Chart(document.getElementById('status-chart'), {
+            type:'doughnut', data:{labels:['2xx','3xx','4xx','5xx'], datasets:[{data:[0,0,0,0],backgroundColor:['#22c55e','#eab308','#f97316','#ef4444']}]},
+            options:{responsive:true, plugins:{legend:{position:'bottom',labels:{color:'#999'}}}}
+        });
+    }
+
+    // ===== SPARKLINE =====
+    function sparklineSVG(data, width, height, color) {
+        if (!data || data.length < 2) return '';
+        const max = Math.max(...data, 1);
+        const step = width / (data.length - 1);
+        const pts = data.map((v, i) => `${(i*step).toFixed(1)},${(height - (v/max)*height).toFixed(1)}`).join(' ');
+        return `<svg class="sparkline" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5"/></svg>`;
+    }
+
+    // ===== CB TIMELINE =====
+    function cbTimelineHTML(history) {
+        if (!history || history.length === 0) return '<span style="color:#666">-</span>';
+        const segs = history.slice(-8);
+        const totalMs = segs.length > 1 ? (segs[0].timestamp_ms - segs[segs.length-1].timestamp_ms) || 1 : 1;
+        let html = '<div class="cb-timeline" title="';
+        segs.forEach(s => { html += `${s.from}→${s.to} ${fmtTime(s.timestamp_ms)}  `; });
+        html += '">';
+        // Show last state durations as proportional segments
+        segs.forEach((s, i) => {
+            const next = i > 0 ? segs[i-1].timestamp_ms : Date.now();
+            const dur = next - s.timestamp_ms;
+            const pct = Math.max(2, Math.min(98, (dur / totalMs) * 100));
+            html += `<div class="cb-timeline-seg ${s.to === 'closed' ? 'closed' : s.to === 'open' ? 'open' : 'halfopen'}" style="width:${pct}%"></div>`;
+        });
+        html += '</div>';
+        return html;
+    }
+
+    // ===== RENDER TARGETS =====
+    function renderTargets(targets) {
+        const tbody = document.getElementById('targets-table');
+        tbody.innerHTML = targets.map((t, i) => {
+            const h = targetHistory[t.url];
+            const rate = h ? h.rate : 0;
+            const reqData = h ? h.requests.slice(-20) : [];
+            const errData = h ? h.errors.slice(-20) : [];
+            const errClass = (t.stats && t.stats.error_rate_pct || 0) > 5 ? 'err' : (t.stats && t.stats.error_rate_pct || 0) > 1 ? 'warn' : '';
+            const lat = t.stats && t.stats.avg_latency_us ? fmtLat(t.stats.avg_latency_us) : '-';
+            const wPct = t.weight > 0 ? (t.weight * 100).toFixed(0) : 0;
+            const sparkColor = (t.stats && t.stats.error_rate_pct || 0) > 5 ? '#ef4444' : (t.stats && t.stats.error_rate_pct || 0) > 1 ? '#eab308' : '#22c55e';
+            return `<tr class="${errClass} clickable" onclick="toggleTargetDetail(${i})" data-idx="${i}">
+                <td><span style="color:#666;font-size:0.8rem">${i+1}</span></td>
+                <td>${esc(t.service)}</td>
+                <td class="mono">${esc(t.url)}</td>
+                <td><span class="badge">${esc(t.protocol)}</span>${t.tls ? '<span class="badge tls">TLS</span>' : ''}</td>
+                <td><div class="weight-bar"><div class="weight-bar-fill" style="width:${wPct}%"></div></div> <span style="font-size:0.75rem;color:#888">${(t.weight*100).toFixed(0)}%</span></td>
+                <td>${sparklineSVG(reqData, 50, 16, sparkColor)} <span style="font-size:0.8rem">${rate.toFixed(1)}</span></td>
+                <td>${fmt(t.stats && t.stats.errors || 0)}</td>
+                <td style="color:${errClass ? '#ef4444' : '#888'}">${t.stats && t.stats.error_rate_pct || 0}%</td>
+                <td>${lat}</td>
+                <td>${t.active_connections || 0}</td>
+                <td>${cbTimelineHTML(t.circuit_breaker_history)} <span class="cb-badge cb-${esc(t.circuit_breaker)}">${esc(t.circuit_breaker)}</span></td>
+            </tr>`;
+        }).join('');
+        // Store for detail view
+        window._targets = targets;
+    }
+
+    function toggleTargetDetail(idx) {
+        const panel = document.getElementById('target-detail');
+        if (selectedTarget === idx) { selectedTarget = null; panel.classList.remove('open'); return; }
+        selectedTarget = idx;
+        const t = window._targets[idx];
+        if (!t) return;
+        const h = targetHistory[t.url] || { requests:[], errors:[], rate:0 };
+        const reqData = h.requests.slice(-HISTORY_LEN);
+        const errData = h.errors.slice(-HISTORY_LEN);
+
+        let cbHtml = '';
+        if (t.circuit_breaker_history && t.circuit_breaker_history.length > 0) {
+            cbHtml = '<table style="width:100%"><tr><th>Time</th><th>From</th><th>To</th></tr>';
+            t.circuit_breaker_history.slice(0, 15).forEach(s => {
+                cbHtml += `<tr><td style="font-size:0.8rem">${fmtTime(s.timestamp_ms)}</td><td><span class="cb-badge cb-${s.from}">${s.from}</span></td><td><span class="cb-badge cb-${s.to}">${s.to}</span></td></tr>`;
+            });
+            cbHtml += '</table>';
+        } else cbHtml = '<span style="color:#666">No transitions recorded</span>';
+
+        panel.innerHTML = `
+            <div class="card-header"><span class="card-title">${esc(t.service)} &mdash; ${esc(t.url)}</span><button class="action-btn" onclick="selectedTarget=null;document.getElementById('target-detail').classList.remove('open')">Close</button></div>
+            <div class="target-detail-grid">
+                <div class="target-detail-section">
+                    <h4>Properties</h4>
+                    <dl class="target-detail-kv">
+                        <dt>Host / Path</dt><dd>${esc(t.host)}${esc(t.path)}</dd>
+                        <dt>Protocol</dt><dd>${esc(t.protocol)}${t.tls ? ' +TLS' : ''}${t.http2 ? ' +H2' : ''}</dd>
+                        <dt>Source</dt><dd>${esc(t.source)}</dd>
+                        <dt>Weight</dt><dd>${(t.weight*100).toFixed(1)}% (fixed: ${(t.fixed_weight*100).toFixed(1)}%)</dd>
+                        <dt>Circuit Breaker</dt><dd><span class="cb-badge cb-${esc(t.circuit_breaker)}">${esc(t.circuit_breaker)}</span></dd>
+                    </dl>
+                </div>
+                <div class="target-detail-section">
+                    <h4>Stats</h4>
+                    <dl class="target-detail-kv">
+                        <dt>Requests</dt><dd>${fmt(t.stats && t.stats.requests || 0)}</dd>
+                        <dt>Req/sec</dt><dd>${h.rate ? h.rate.toFixed(2) : '-'}</dd>
+                        <dt>Errors</dt><dd>${fmt(t.stats && t.stats.errors || 0)} (${t.stats && t.stats.error_rate_pct || 0}%)</dd>
+                        <dt>Avg Latency</dt><dd>${t.stats && t.stats.avg_latency_us ? fmtLat(t.stats.avg_latency_us) : '-'}</dd>
+                        <dt>Bytes</dt><dd>${fmt(t.stats && t.stats.bytes_total || 0)}</dd>
+                        <dt>Connections</dt><dd>${t.active_connections || 0}</dd>
+                    </dl>
+                </div>
+                <div class="target-detail-section">
+                    <h4>Request Trend (60s)</h4>
+                    ${sparklineSVG(reqData, 280, 40, '#6366f1')}
+                    <div style="margin-top:0.5rem"><h4>Error Trend</h4>${sparklineSVG(errData, 280, 40, '#ef4444')}</div>
+                </div>
+                <div class="target-detail-section">
+                    <h4>Circuit Breaker History</h4>
+                    ${cbHtml}
+                </div>
+            </div>`;
+        panel.classList.add('open');
+        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    // ===== RENDER TOPOLOGY (Canvas) =====
+    function drawTopology() {
+        if (!topoData) return;
+        const canvas = document.getElementById('topology-canvas');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const dpr = window.devicePixelRatio || 1;
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+        ctx.scale(dpr, dpr);
+        const W = rect.width, H = rect.height;
+
+        ctx.clearRect(0, 0, W, H);
+        ctx.save();
+        ctx.translate(W/2 + topoPan.x, 80 + topoPan.y);
+        ctx.scale(topoScale, topoScale);
+
+        // Build layout
+        const lb = topoData.lb || {};
+        const hosts = topoData.hosts || [];
+
+        // LB node
+        const lbX = 0, lbY = 0;
+        ctx.beginPath(); ctx.arc(lbX, lbY, 30, 0, Math.PI*2);
+        ctx.fillStyle = '#6366f1'; ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('LB', lbX, lbY);
+        ctx.fillStyle = '#888'; ctx.font = '10px sans-serif';
+        ctx.fillText(`${fmt(lb.requests||0)} req · ${lb.active_connections||0} conn`, lbX, lbY + 42);
+
+        let nodeIdx = 0;
+        hosts.forEach((hostObj, hi) => {
+            const routes = hostObj.routes || [];
+            routes.forEach((routeObj, ri) => {
+                const targets = routeObj.targets || [];
+                const baseY = 160 + nodeIdx * 0;
+                const xSpread = Math.min(targets.length * 140, W * 0.7);
+                const startX = -xSpread / 2;
+
+                targets.forEach((t, ti) => {
+                    const tx = startX + ti * 140 + 70;
+                    const ty = 200 + (hi * 100) + (ri * 80);
+                    const cbState = t.circuit_breaker || 'closed';
+                    const color = cbState === 'open' ? '#ef4444' : cbState === 'halfopen' ? '#eab308' : '#22c55e';
+
+                    // Edge
+                    const maxConns = Math.max(...targets.map(tt => tt.active_connections || 0), 1);
+                    const thickness = 1 + ((t.active_connections || 0) / maxConns) * 5;
+                    ctx.beginPath();
+                    ctx.moveTo(lbX, lbY + 30);
+                    ctx.quadraticCurveTo(lbX, ty - 40, tx, ty - 20);
+                    ctx.strokeStyle = color + '66';
+                    ctx.lineWidth = thickness;
+                    ctx.stroke();
+
+                    // Node circle
+                    const radius = 20 + Math.min((t.active_connections || 0) * 0.5, 15);
+                    ctx.beginPath(); ctx.arc(tx, ty, radius, 0, Math.PI*2);
+                    ctx.fillStyle = color + '33'; ctx.fill();
+                    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+
+                    // Label
+                    ctx.fillStyle = '#e0e0e0'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
+                    ctx.fillText(t.service || '', tx, ty - 2);
+                    ctx.fillStyle = '#888'; ctx.font = '9px sans-serif';
+                    ctx.fillText(`${t.active_connections||0} conn`, tx, ty + 12);
+
+                    nodeIdx++;
+                });
+            });
+        });
+
+        ctx.restore();
+
+        // Pan & zoom with mouse
+        if (!canvas._wired) {
+            canvas._wired = true;
+            let dragging = false, lastX, lastY;
+            canvas.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+            canvas.addEventListener('mousemove', e => { if (dragging) { topoPan.x += e.clientX - lastX; topoPan.y += e.clientY - lastY; lastX = e.clientX; lastY = e.clientY; drawTopology(); } });
+            canvas.addEventListener('mouseup', () => { dragging = false; });
+            canvas.addEventListener('wheel', e => { e.preventDefault(); const f = e.deltaY < 0 ? 1.1 : 0.9; topoScale = Math.max(0.3, Math.min(3, topoScale * f)); drawTopology(); });
+        }
+    }
+    function topoZoom(f) { topoScale = Math.max(0.3, Math.min(3, topoScale * f)); drawTopology(); }
+    function topoReset() { topoScale = 1; topoPan = {x:0,y:0}; drawTopology(); }
+
+    // ===== RENDER DNS =====
+    function renderDns(dns) {
+        document.getElementById('dns-stats').innerHTML =
+            `<div class="stat"><label>Entries</label><div class="val">${dns.stats && dns.stats.total_entries || 0}</div></div>` +
+            `<div class="stat"><label>Hits</label><div class="val ok">${dns.stats && dns.stats.hits || 0}</div></div>` +
+            `<div class="stat"><label>Misses</label><div class="val">${dns.stats && dns.stats.misses || 0}</div></div>` +
+            `<div class="stat"><label>Hit Rate</label><div class="val ${((dns.stats && dns.stats.hit_rate || 0) > 80 ? 'ok' : 'warn')}">${dns.stats && dns.stats.hit_rate || 0}%</div></div>`;
+        document.getElementById('dns-entries').innerHTML = (dns.entries || []).map(e =>
+            `<div class="card" style="margin-top:0.5rem"><strong>${esc(e.host)}</strong> &#x2192; ${esc(e.addrs && e.addrs.join(', '))} <span style="color:#999;font-size:0.8rem;margin-left:1rem">TTL: ${e.ttl_remaining_secs}s${e.is_negative ? ' (NXDOMAIN)' : ''}</span></div>`
+        ).join('') || '<p class="no-data">No cached entries</p>';
+    }
+
+    // ===== RENDER CONSUL =====
+    function renderConsul(consul) {
+        const watchers = ['services','kv','tls','client_ca'];
+        document.getElementById('consul-watchers').innerHTML = watchers.map(w => {
+            const d = consul[w] || {};
+            const errs = d.errors || 0;
+            const statusColor = errs > 10 ? '#ef4444' : errs > 0 ? '#eab308' : '#22c55e';
+            return `<div class="node-card"><div class="node-icon">&#x2601;&#xFE0F;</div><div class="node-label">${w.toUpperCase()}</div><div class="node-stats">Index: ${d.last_index||0}<br>Backoff: ${d.backoff_secs||0}s<br>Errors: <span style="color:${statusColor}">${errs}</span></div></div>`;
+        }).join('');
+    }
+
+    // ===== RENDER ROUTES =====
+    function renderRoutes(data) {
+        const routes = data.routes || [];
+        if (routes.length === 0) { document.getElementById('routes-list').innerHTML = '<p class="no-data">No routes configured</p>'; return; }
+        // Group by host
+        const byHost = {};
+        routes.forEach(r => {
+            const h = r.host || '*';
+            if (!byHost[h]) byHost[h] = [];
+            byHost[h].push(r);
+        });
+        let html = '';
+        Object.keys(byHost).sort().forEach(host => {
+            html += `<div style="margin-bottom:1rem"><h3 style="font-size:0.9rem;color:#6366f1;margin-bottom:0.5rem">${esc(host)}</h3>`;
+            html += '<table><tr><th>Path</th><th>Targets</th><th>Matcher</th></tr>';
+            byHost[host].forEach(r => {
+                const targets = (r.targets || []).map(t => `<span class="badge">${esc(t.service)}</span> ${esc(t.url)}`).join('<br>');
+                html += `<tr><td class="mono">${esc(r.path)}</td><td>${targets}</td><td>${esc(r.matcher)}</td></tr>`;
+            });
+            html += '</table></div>';
+        });
+        document.getElementById('routes-list').innerHTML = html;
+    }
+
+    // ===== LOGS =====
+    function renderLogs() {
+        const container = document.getElementById('logs-container');
+        const filtered = filterCachedLogs();
+        container.innerHTML = filtered.slice(0, 500).map(l => {
+            const lvlChar = (l.level && l.level[0]) || 'I';
+            const isHighlight = logSearchTerm && l.message && l.message.toLowerCase().includes(logSearchTerm);
+            return `<div class="log${isHighlight ? ' highlight' : ''}"><span class="ts">${l.timestamp ? fmtTime(l.timestamp*1000) : ''}</span><span class="lvl ${lvlChar}">${esc(l.level)}</span><span class="msg">${esc(l.message)}</span></div>`;
+        }).join('');
+    }
+
+    function filterCachedLogs() {
+        return cachedLogs.filter(l => {
+            if (!activeLevels.has(l.level)) return false;
+            if (logSearchTerm && !(l.message && l.message.toLowerCase().includes(logSearchTerm))) return false;
+            return true;
+        });
+    }
+
+    function filterLogs() {
+        logSearchTerm = (document.getElementById('log-search').value || '').toLowerCase();
+        renderLogs();
+    }
+
+    function toggleLevel(btn) {
+        const level = btn.dataset.level;
+        if (activeLevels.has(level)) { activeLevels.delete(level); btn.classList.remove('active'); }
+        else { activeLevels.add(level); btn.classList.add('active'); }
+        renderLogs();
+    }
+
+    function toggleStream() {
+        const btn = document.getElementById('stream-btn');
+        if (logSse) {
+            logSse.close(); logSse = null;
+            btn.classList.remove('on'); btn.textContent = 'Stream: OFF';
+        } else {
+            logSse = new EventSource(API + '/logs/stream?token=' + encodeURIComponent(token));
+            logSse.onmessage = e => {
+                try {
+                    const l = JSON.parse(e.data);
+                    cachedLogs.unshift(l);
+                    if (cachedLogs.length > 2000) cachedLogs.length = 2000;
+                    if (activeLevels.has(l.level) && (!logSearchTerm || (l.message && l.message.toLowerCase().includes(logSearchTerm)))) {
+                        const c = document.getElementById('logs-container');
+                        const div = document.createElement('div');
+                        div.className = 'log' + (logSearchTerm && l.message && l.message.toLowerCase().includes(logSearchTerm) ? ' highlight' : '');
+                        div.innerHTML = `<span class="ts">${fmtTime(l.timestamp*1000)}</span><span class="lvl ${(l.level||'I')[0]}">${esc(l.level)}</span><span class="msg">${esc(l.message)}</span>`;
+                        c.insertBefore(div, c.firstChild);
+                        if (c.children.length > 500) c.removeChild(c.lastChild);
+                    }
+                } catch(err){}
+            };
+            logSse.onerror = () => { logSse.close(); logSse=null; btn.classList.remove('on'); btn.textContent='Stream: OFF'; };
+            btn.classList.add('on'); btn.textContent = 'Stream: ON';
+        }
+    }
+
+    // ===== CONFIG =====
+    function renderConfig(config) {
+        if (!config || typeof config !== 'object') { document.getElementById('config-list').innerHTML = '<p class="no-data">No config loaded</p>'; return; }
+        const sensitive = ['admin_token','token'];
+        const defaults = { workers: 1, poll_interval: '0s', strategy: 'round-robin', matcher: 'prefix', no_route_status: 404, connect_timeout: '5s', read_timeout: '60s', write_timeout: '60s', idle_timeout: '120s', enable_h2c: false, pool_size: 128, max_connections: 0, circuit_breaker_enabled: true, circuit_breaker_error_threshold: 50, circuit_breaker_window_size: 100, circuit_breaker_recovery_timeout: 30, circuit_breaker_half_open_max: 3, dns_cache_ttl: 30, dns_negative_cache_ttl: 10 };
+
+        let html = '<div class="config-diff">';
+        function renderObj(obj, prefix) {
+            Object.keys(obj).sort().forEach(k => {
+                const fullKey = prefix ? prefix + '.' + k : k;
+                const val = obj[k];
+                if (val && typeof val === 'object' && !Array.isArray(val)) { renderObj(val, fullKey); return; }
+                const isSensitive = sensitive.some(s => k.toLowerCase().includes(s));
+                const isDefault = defaults[k] !== undefined && val === defaults[k];
+                const cls = isSensitive ? 'masked' : isDefault ? '' : 'changed';
+                const display = isSensitive ? '••••••' : (typeof val === 'boolean' ? (val ? 'true' : 'false') : String(val));
+                html += `<span class="key">${esc(fullKey)}</span>: <span class="${cls}">${esc(display)}</span>\n`;
+            });
+        }
+        renderObj(config, '');
+        html += '</div>';
+        document.getElementById('config-list').innerHTML = html;
+    }
+
+    // ===== CERTS =====
+    function renderCerts(data) {
+        if (!data || !data.certs || data.certs.length === 0) { document.getElementById('certs-list').innerHTML = '<p class="no-data">No TLS certificates loaded</p>'; return; }
+        document.getElementById('certs-list').innerHTML = data.certs.map(c => {
+            const daysLeft = c.days_until_expiry || 0;
+            const cls = daysLeft < 7 ? 'err' : daysLeft < 30 ? 'warn' : '';
+            return `<div class="card cert-card"><div><strong>${esc(c.cn || c.subject || 'Unknown')}</strong><div style="font-size:0.8rem;color:#888;margin-top:0.25rem">Source: ${esc(c.source||'file')} · Expires: ${esc(c.not_after||'?')}</div></div><div class="cert-days ${cls}">${daysLeft}d</div></div>`;
+        }).join('');
+    }
+
+    // ===== EXPORT =====
+    function exportRoutes() { downloadJSON(window._routes || {}, 'sentirum-routes.json'); }
+    function exportConfig() { downloadJSON(cachedConfig || {}, 'sentirum-config.json'); }
+    function downloadJSON(data, filename) {
+        const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+    }
+
+    // ===== INIT =====
+    if (token && username) {
+        fetch(API + '/me', { headers: headers() })
+            .then(r => r.json())
+            .then(d => { if (d.authenticated) showApp(); else { localStorage.removeItem('admin_token'); localStorage.removeItem('admin_user'); } })
+            .catch(() => { localStorage.removeItem('admin_token'); localStorage.removeItem('admin_user'); });
+    }
+    document.getElementById('password-input').addEventListener('keypress', e => { if (e.key === 'Enter') doLogin(); });
     </script>
 </body>
 </html>

@@ -77,6 +77,14 @@ pub enum CircuitState {
     HalfOpen,
 }
 
+/// Record of a circuit breaker state transition
+#[derive(Debug, Clone, Serialize)]
+pub struct CircuitTransition {
+    pub from: CircuitState,
+    pub to: CircuitState,
+    pub timestamp_ms: u64,
+}
+
 
 /// Immutable circuit breaker configuration
 #[derive(Debug, Clone, Serialize)]
@@ -126,6 +134,8 @@ struct CircuitInner {
     half_open_requests: usize,
     /// Number of successful probe requests in half-open state
     half_open_successes: usize,
+    /// History of recent state transitions (ring buffer, max 20)
+    history: Vec<CircuitTransition>,
 }
 
 impl CircuitBreaker {
@@ -143,6 +153,7 @@ impl CircuitBreaker {
                 opened_at_ms: 0,
                 half_open_requests: 0,
                 half_open_successes: 0,
+                history: Vec::with_capacity(20),
             })),
             config,
         }
@@ -160,7 +171,9 @@ impl CircuitBreaker {
                 let elapsed = now_ms.saturating_sub(inner.opened_at_ms);
                 let recovery_ms = self.config.recovery_timeout_secs * 1000;
                 if elapsed >= recovery_ms {
+                    let from = inner.state;
                     inner.state = CircuitState::HalfOpen;
+                    Self::record_transition(&mut inner, from, CircuitState::HalfOpen);
                     inner.half_open_requests = 0;
                     inner.half_open_successes = 0;
                     tracing::info!(
@@ -190,7 +203,9 @@ impl CircuitBreaker {
                 inner.half_open_successes += 1;
                 if inner.half_open_successes >= self.config.half_open_max_requests {
                     // All probes succeeded → close the circuit
+                    let from = inner.state;
                     inner.state = CircuitState::Closed;
+                    Self::record_transition(&mut inner, from, CircuitState::Closed);
                     inner.window.clear();
                     tracing::info!(
                         successes = inner.half_open_successes,
@@ -214,7 +229,9 @@ impl CircuitBreaker {
                 let error_count = inner.window.iter().filter(|&&e| e).count();
                 let threshold = self.config.window_size * self.config.error_threshold as usize / 100;
                 if error_count >= threshold && inner.window.len() >= self.config.window_size {
+                    let from = inner.state;
                     inner.state = CircuitState::Open;
+                    Self::record_transition(&mut inner, from, CircuitState::Open);
                     inner.opened_at_ms = Self::now_ms();
                     tracing::warn!(
                         error_rate = format!("{:.1}%", 100.0 * error_count as f64 / self.config.window_size as f64),
@@ -227,7 +244,9 @@ impl CircuitBreaker {
             }
             CircuitState::HalfOpen => {
                 // Any error in half-open → reopen immediately
+                let from = inner.state;
                 inner.state = CircuitState::Open;
+                Self::record_transition(&mut inner, from, CircuitState::Open);
                 inner.opened_at_ms = Self::now_ms();
                 tracing::warn!("Circuit breaker REOPENED — probe failed");
             }
@@ -255,6 +274,22 @@ impl CircuitBreaker {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64
+    }
+
+    fn record_transition(inner: &mut CircuitInner, from: CircuitState, to: CircuitState) {
+        if inner.history.len() >= 20 {
+            inner.history.remove(0);
+        }
+        inner.history.push(CircuitTransition {
+            from,
+            to,
+            timestamp_ms: Self::now_ms(),
+        });
+    }
+
+    /// Get the history of recent state transitions (for admin/metrics)
+    pub fn transition_history(&self) -> Vec<CircuitTransition> {
+        self.state.lock().history.clone()
     }
 }
 

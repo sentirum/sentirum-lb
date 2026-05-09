@@ -122,6 +122,8 @@ pub struct LogsQuery {
     pub limit: Option<usize>,
     /// Minimum log level: "ERROR", "WARN", "INFO", "DEBUG", "TRACE".
     pub level: Option<String>,
+    /// Text search filter (case-insensitive substring match on message)
+    pub search: Option<String>,
 }
 
 /// Build the admin API router
@@ -594,68 +596,79 @@ async fn topology_handler(State(state): State<AdminState>) -> axum::Json<serde_j
     let table = state.route_table.get();
     let hosts = table.hosts();
     let metrics = global();
-    
-    let mut nodes = Vec::new();
-    let mut edges = Vec::new();
-    
-    // LB node
-    nodes.push(serde_json::json!({
+    let ordering = Ordering::Relaxed;
+
+    let total_requests = metrics.requests_total.load(ordering);
+    let total_errors = metrics.requests_error_total.load(ordering);
+    let error_rate = if total_requests > 0 {
+        (total_errors as f64 / total_requests as f64 * 100.0).round()
+    } else {
+        0.0
+    };
+
+    let lb = serde_json::json!({
         "id": "lb",
-        "type": "lb",
-        "label": "Sentirum LB",
-        "x": 400,
-        "y": 50,
-        "stats": {
-            "requests": metrics.requests_total.load(Ordering::Relaxed),
-            "active_connections": metrics.active_connections.load(Ordering::Relaxed),
-            "error_rate": if metrics.requests_total.load(Ordering::Relaxed) > 0 {
-                (metrics.requests_error_total.load(Ordering::Relaxed) as f64 / metrics.requests_total.load(Ordering::Relaxed) as f64 * 100.0).round() as u64
-            } else { 0 },
-        }
-    }));
-    
-    // Targets
-    let mut target_idx = 0;
+        "requests": total_requests,
+        "active_connections": metrics.active_connections.load(ordering),
+        "error_rate": error_rate,
+    });
+
+    let mut host_entries = Vec::new();
     for host in hosts {
+        let mut route_entries = Vec::new();
         if let Some(routes) = table.get_routes(host) {
             for route in routes.iter() {
+                let matcher = if route.glob.is_some() { "glob" } else { "prefix" };
+                let mut target_entries = Vec::new();
                 for target in route.targets.iter() {
                     let cb_state = target.health_tracker.circuit_breaker().current_state();
-                    let active_conns = target.active_connections.load(Ordering::Relaxed);
-                    
-                    let y = 180 + (target_idx % 4) * 100;
-                    let x = 100 + (target_idx / 4) * 200;
-                    
-                    nodes.push(serde_json::json!({
-                        "id": format!("target-{}", target_idx),
-                        "type": "target",
-                        "label": target.service,
+                    let active_conns = target.active_connections.load(ordering);
+                    let reqs = target.stats.requests_total.load(ordering);
+                    let errs = target.stats.errors_total.load(ordering);
+                    let err_pct = if reqs > 0 {
+                        (errs as f64 / reqs as f64 * 100.0).round() as u64
+                    } else {
+                        0
+                    };
+                    let avg_lat = if reqs > 0 {
+                        target.stats.latency_sum_us.load(ordering) / reqs
+                    } else {
+                        0
+                    };
+
+                    target_entries.push(serde_json::json!({
+                        "service": target.service,
                         "url": target.url,
-                        "x": x,
-                        "y": y,
                         "protocol": format!("{:?}", target.parsed_protocol).to_lowercase(),
                         "tls": target.parsed_tls,
-                        "cb_state": format!("{:?}", cb_state).to_lowercase(),
+                        "weight": target.weight,
+                        "active_connections": active_conns,
+                        "circuit_breaker": format!("{:?}", cb_state).to_lowercase(),
                         "stats": {
-                            "active_connections": active_conns,
+                            "requests": reqs,
+                            "errors": errs,
+                            "error_rate_pct": err_pct,
+                            "avg_latency_us": avg_lat,
+                            "bytes_total": target.stats.bytes_total.load(ordering),
                         }
                     }));
-                    
-                    edges.push(serde_json::json!({
-                        "from": "lb",
-                        "to": format!("target-{}", target_idx),
-                        "cb_state": format!("{:?}", cb_state).to_lowercase(),
-                    }));
-                    
-                    target_idx += 1;
                 }
+                route_entries.push(serde_json::json!({
+                    "path": route.path,
+                    "matcher": matcher,
+                    "targets": target_entries,
+                }));
             }
         }
+        host_entries.push(serde_json::json!({
+            "host": host,
+            "routes": route_entries,
+        }));
     }
-    
+
     axum::Json(serde_json::json!({
-        "nodes": nodes,
-        "edges": edges,
+        "lb": lb,
+        "hosts": host_entries,
     }))
 }
 
@@ -746,6 +759,16 @@ async fn targets_handler(State(state): State<AdminState>) -> axum::Json<serde_js
                     let error_rate = if requests > 0 { (errors as f64 / requests as f64 * 100.0).round() as u64 } else { 0 };
                     let avg_latency = stats.avg_latency_us();
                     
+
+                    let cb_history = target.health_tracker.circuit_breaker().transition_history();
+                    let cb_transitions: Vec<serde_json::Value> = cb_history.iter().rev().take(20).map(|t| {
+                        serde_json::json!({
+                            "from": format!("{:?}", t.from).to_lowercase(),
+                            "to": format!("{:?}", t.to).to_lowercase(),
+                            "timestamp_ms": t.timestamp_ms,
+                        })
+                    }).collect();
+
                     targets.push(serde_json::json!({
                         "host": host,
                         "path": &route.path,
@@ -754,8 +777,12 @@ async fn targets_handler(State(state): State<AdminState>) -> axum::Json<serde_js
                         "protocol": format!("{:?}", target.parsed_protocol).to_lowercase(),
                         "tls": target.parsed_tls,
                         "http2": target.parsed_protocol.requires_http2(),
+                        "weight": target.weight,
+                        "fixed_weight": target.fixed_weight,
+                        "source": format!("{:?}", target.source).to_lowercase(),
                         "active_connections": active_conns,
                         "circuit_breaker": format!("{:?}", cb_state).to_lowercase(),
+                        "circuit_breaker_history": cb_transitions,
                         "stats": {
                             "requests": requests,
                             "errors": errors,
@@ -782,9 +809,10 @@ async fn logs_handler(
 ) -> axum::Json<Vec<crate::admin::logs::LogEntry>> {
     let limit = params.limit.unwrap_or(100).min(1000);
     let level = params.level.as_deref();
+    let search = params.search.as_deref();
 
     if let Some(buffer) = &state.log_buffer {
-        axum::Json(buffer.recent(limit, level))
+        axum::Json(buffer.recent(limit, level, search))
     } else {
         axum::Json(Vec::new())
     }

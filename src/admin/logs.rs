@@ -89,7 +89,7 @@ impl LogBuffer {
     }
 
     /// Get the last `limit` entries, optionally filtered by minimum level.
-    pub fn recent(&self, limit: usize, min_level: Option<&str>) -> Vec<LogEntry> {
+    pub fn recent(&self, limit: usize, min_level: Option<&str>, search: Option<&str>) -> Vec<LogEntry> {
         let entries = self.entries.lock();
         let len = *self.len.lock();
 
@@ -108,6 +108,11 @@ impl LogBuffer {
             let entry = &entries[idx];
             if let Some(min_ord) = min_level_order {
                 if level_order(&entry.level).unwrap_or(0) > min_ord {
+                    continue;
+                }
+            }
+            if let Some(s) = search {
+                if !entry.message.to_lowercase().contains(&s.to_lowercase()) {
                     continue;
                 }
             }
@@ -281,7 +286,7 @@ mod tests {
         }
 
         assert_eq!(buffer.len(), 5);
-        let recent = buffer.recent(3, None);
+        let recent = buffer.recent(3, None, None);
         assert_eq!(recent.len(), 3);
         assert_eq!(recent[0].message, "msg 4");
         assert_eq!(recent[2].message, "msg 2");
@@ -302,7 +307,7 @@ mod tests {
         }
 
         assert_eq!(buffer.len(), RING_BUFFER_CAPACITY);
-        let recent = buffer.recent(1, None);
+        let recent = buffer.recent(1, None, None);
         // Should get the last pushed entry.
         assert_eq!(recent[0].ts, (RING_BUFFER_CAPACITY + 9) as u64);
     }
@@ -331,7 +336,7 @@ mod tests {
         });
 
         // min_level=WARN should include ERROR and WARN, exclude INFO.
-        let recent = buffer.recent(10, Some("WARN"));
+        let recent = buffer.recent(10, Some("WARN"), None);
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].level, "WARN");
         assert_eq!(recent[1].level, "ERROR");

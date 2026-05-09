@@ -46,14 +46,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    weight 0 are excluded (canary drain). Falls back to simple min-connections when
    no weights are configured (Fabio-compatible).
 
+
 ### Operations
 
 - **Session cleanup visibility** — background cleanup logs evicted count and remaining
    session map size for operational monitoring.
 - **Weight overflow warning** — `compute_weights` now logs a warning when fixed weights
    sum exceeds 1.0, alerting operators that dynamic targets will receive no traffic.
+- **Circuit breaker state as Prometheus gauge** — new `sentirum_lb_target_circuit_breaker_state`
+   metric per target (0=closed, 1=half-open, 2=open).
+- **Circuit breaker transition history** — `CircuitBreaker` now records the last 20 state
+   transitions with timestamps, exposed via `/admin/targets` for dashboard visualization.
+- **Log search filtering** — `/admin/logs` endpoint accepts `?search=` query parameter for
+   case-insensitive substring filtering on log messages.
+- **Topology endpoint enriched** — `/admin/topology` now returns host→route→target hierarchy
+   with weight, stats, and CB state per target instead of flat node/edge lists.
+- **Target detail in API** — `/admin/targets` now includes `weight`, `fixed_weight`, `source`,
+   and `circuit_breaker_history` fields per target.
 
+### Dashboard (Admin UI)
 
+- **Real-time SSE metrics** — replaced 3s polling with `EventSource` consuming the existing
+   `/admin/metrics/stream` endpoint. Overview stats update every second with delta-based
+   request/sec and error rate calculations.
+- **Per-target sparklines** — inline SVG sparkline graphs showing request rate trend (last 60s)
+   directly in the targets table.
+- **Circuit breaker timeline** — visual state transition bar per target showing recent
+   Closed/Open/HalfOpen history. Full transition table in target detail expansion.
+- **Canvas force-directed topology** — interactive topology graph with pan/zoom/scroll,
+   host-grouped layout, edge thickness proportional to connection count, node color by CB state.
+- **Log filtering** — level filter buttons (ERROR/WARN/INFO/DEBUG/TRACE), text search with
+   case-insensitive substring matching, search term highlighting.
+- **Target detail expansion** — click any target row to expand full details: properties, stats,
+   request/error trend sparklines (60s), weight breakdown, CB transition history table.
+- **Weight visualization** — inline weight bar per target showing traffic distribution percentage.
+- **Config diff viewer** — runtime config display highlights non-default values, masks sensitive
+   fields (tokens, passwords).
+- **TLS certificate page** — new Certs page showing loaded certificates with expiry countdown,
+   color-coded warnings (<30 days yellow, <7 days red).
+- **JSON export** — export routes and configuration as JSON files for troubleshooting.
+- **Certs nav entry** — added certificate management to sidebar navigation.
 
 
 ## [1.1.1] - 2025-05-08
