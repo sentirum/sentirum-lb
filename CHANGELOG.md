@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-05-09
+
+
+### Added
+
+- **CB-aware target fallback** — when the picker selects a circuit-breaker-open target,
+  the proxy now scans remaining targets for a healthy alternative before returning 503.
+  Previously a single CB-open target would immediately fail the request even when healthy
+  targets were available on the same route.
+- **`/admin` redirect** — `GET /admin` (no trailing slash) now redirects to `/admin/`
+  with `308 Permanent Redirect`, fixing the JSON auth error that appeared when typing
+  the admin URL without a trailing slash.
+- **TCP/NATS Docker test infrastructure** — test environment now includes a NATS
+  container (`nats:2.10-alpine` with JetStream) and a TCP route through the load balancer
+  for end-to-end NATS protocol testing.
+- **Comprehensive edge test suite** — `docker/test/edge-test.sh` with 11 sections
+  (Auth, Routes, Admin API, SSE, TCP/NATS, Load, Security, Consistency, Errors,
+  Round-trip, SSE Stability) covering 58+ test cases.
+
+### Fixed
+
+- **Dashboard JS syntax error** — `refreshStatic()` closing brace was missing, causing
+  all subsequent JS functions (including `doLogin`) to be swallowed by the parser.
+  The login screen showed `doLogin is not defined` in the browser console.
+- **Prometheus histogram parsing** — `refreshMetrics()` now correctly parses Prometheus
+  exposition format with labeled metrics (`{le="0.001"}`, `{code="2xx"}`). Previously
+  the parser stripped labels and used wrong key names, causing latency and status code
+  charts to show zero data.
+- **Latency distribution chart** — histogram buckets are now converted from cumulative
+  to per-bucket deltas for accurate bar chart rendering. Bar color changed from
+  invisible `#27272a` to accent `#818cf8`.
+- **Targets table flickering** — replaced full `innerHTML` rebuild with in-place DOM
+  updates when the target list structure hasn't changed. Cells are updated individually
+  without destroying and recreating the entire table, eliminating layout shift on every
+  SSE tick.
+- **SSE URL decode for session tokens** — session tokens containing `/` and `=` (e.g.,
+  `h/Vv6exl...uzg=`) were URL-encoded by the browser but compared raw against the
+  session store, causing 401 on SSE and log stream endpoints. Added inline percent-decode.
+- **Dashboard trend indicators** — in-place target updates now include trend arrows
+  (▲/▼) for request rate, error %, latency, and connections using delta tracking.
+- **CSS transitions** — stat-card values and table cells now have smooth 300-400ms
+  color transitions instead of abrupt changes.
+
+### Changed
+
+- **TCP proxy production status** — TCP modes (`tcp`, `tcp+sni`, `https+tcp+sni`,
+  `tcp-dynamic`) are now production-tested with NATS protocol validation including
+  INFO, PING/PONG, CONNECT/SUB/PUB/UNSUB, queue groups, 50KB payloads, 20 concurrent
+  connections, binary garbage, and slow streams. Updated documentation accordingly.
+
+### Testing
+
+- **91/93 protocol edge-case tests passing** — comprehensive test coverage for NATS TCP
+  (25/25), gRPC/RPC (29/29), WebSocket/H2 (24/24), WebSocket deep (13/15 — 2 fails
+  due to upstream http-echo not supporting WS server).
+- **Edge test shell compatibility** — replaced `curl -sf` with `curl -s`, removed
+  `curl -o /dev/null` (Pingora keep-alive hang), replaced `timeout` (unavailable on macOS)
+  with `curl --max-time` and `nc -w`.
+
 ## [1.1.2] - 2026-05-08
 
 

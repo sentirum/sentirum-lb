@@ -15,9 +15,9 @@ Default runtime behavior is now **Consul-first**: you can start without a config
 - Multiple balancing strategies: `round-robin`, `random`, `least-connections`
 - Matchers: `prefix`, `iprefix`, `glob`
 - Optional TLS termination for downstream traffic
-- **Circuit breaker** for upstream failure protection (per-target, with closed/open/half-open states)
-- **DNS caching** with TTL-based positive caching and negative caching
+- **Circuit breaker** for upstream failure protection (per-target, with closed/open/half-open states) with automatic healthy-target fallback
 - **Service filtering** via whitelist/blacklist for Consul service discovery
+- **DNS caching** with TTL-based positive caching and negative caching
 - Fabio-style raw TCP proxy modes: `tcp`, `tcp+sni`, `https+tcp+sni`, and `tcp-dynamic`
 - Downstream h2c support for cleartext gRPC clients
 - Upstream protocol-aware proxying for HTTP, HTTPS, gRPC, gRPCS, WS, and WSS
@@ -448,8 +448,7 @@ Implemented today:
 
 ### Notes
 
-- Raw TCP proxy modes (`tcp`, `tcp+sni`, `https+tcp+sni`, `tcp-dynamic`) are implemented but not yet production-tested — canary validation recommended before relying on them in production
-
+- Raw TCP proxy modes (`tcp`, `tcp+sni`, `https+tcp+sni`, `tcp-dynamic`) are production-tested with NATS protocol validation (INFO, PING/PONG, CONNECT/SUB/PUB/UNSUB, queue groups, 50KB payloads, 20+ concurrent connections, binary garbage, slow streams)
 ## License
 
 MIT

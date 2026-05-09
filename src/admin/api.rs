@@ -130,6 +130,7 @@ pub struct LogsQuery {
 pub fn build_router(state: AdminState) -> Router {
     // Public routes (no auth required)
     let public = Router::new()
+        .route("/admin", get(|| async { axum::response::Redirect::permanent("/admin/") }))
         .route("/admin/", get(dashboard_handler))
         .route("/admin/dashboard", get(dashboard_handler))
         .route("/admin/login", post(login_handler))
@@ -346,13 +347,13 @@ async fn metrics_stream_handler(
         let mut timer = interval(Duration::from_secs(1));
         
         // Send initial connection message
-        yield Ok::<_, Infallible>(Event::default().data("event: connected\n\n"));
+        yield Ok::<_, Infallible>(Event::default().data("connected"));
         
         loop {
             timer.tick().await;
             let snapshot = make_snapshot(&state_clone).await;
             let data = serde_json::to_string(&snapshot).unwrap_or_default();
-            yield Ok(Event::default().data(format!("data: {}\n\n", data)));
+            yield Ok(Event::default().data(data));
         }
     };
     
@@ -959,6 +960,16 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     equal_len && result == 0
 }
 
+/// Decode a single hex byte (0-9, A-F, a-f) to its numeric value.
+fn hex_val(b: u8) -> u8 {
+    match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        b'A'..=b'F' => b - b'A' + 10,
+        _ => 0,
+    }
+}
+
 async fn admin_auth_middleware(
     State(state): State<AdminState>,
     headers: HeaderMap,
@@ -1011,7 +1022,25 @@ async fn admin_auth_middleware(
                 qs.split('&')
                     .filter_map(|pair| pair.split_once('='))
                     .find(|(k, _)| *k == "token")
-                    .map(|(_, v)| v.to_string())
+                    .map(|(_, v)| {
+                        // Decode percent-encoded token value.
+                        // Session tokens may contain '/' and '=' which get URL-encoded by the browser.
+                        let mut decoded = String::with_capacity(v.len());
+                        let mut bytes = v.bytes();
+                        while let Some(b) = bytes.next() {
+                            if b == b'%' {
+                                let hi = bytes.next().unwrap_or(b'0');
+                                let lo = bytes.next().unwrap_or(b'0');
+                                let val = hex_val(hi) << 4 | hex_val(lo);
+                                decoded.push(val as char);
+                            } else if b == b'+' {
+                                decoded.push(' ');
+                            } else {
+                                decoded.push(b as char);
+                            }
+                        }
+                        decoded
+                    })
             })
             .map(|token| {
                 // Check against admin_token (constant-time).

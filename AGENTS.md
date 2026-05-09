@@ -36,7 +36,8 @@ This file gives coding agents and contributors a fast map of the repository and 
 
 - `src/admin/api.rs`
   - operational inspection endpoints
-
+  - `/admin` redirect to `/admin/` (trailing slash)
+  - SSE URL percent-decode for session token auth
 - `src/metrics/prometheus.rs`
   - in-process counters/gauges/histogram buckets
 
@@ -94,7 +95,7 @@ If you introduce a new config field, wire it into runtime behavior and cover it 
 ## Route and proxy semantics
 
 - No-match responses use `proxy.no_route_status`
-- Circuit breaker: when `proxy.circuit_breaker_enabled` is true, failing upstream targets are temporarily bypassed with 503
+- Circuit breaker: when `proxy.circuit_breaker_enabled` is true, failing upstream targets are temporarily bypassed with 503; when a picked target has an open circuit breaker, the proxy attempts to find a healthy fallback on the same route before returning 503
 - Circuit breaker states: Closed → Open (on error threshold) → HalfOpen (after recovery_timeout) → Closed (on probe success)
 - DNS cache: `proxy.dns_cache_ttl` controls positive cache TTL (default 30s); `proxy.dns_negative_cache_ttl` controls negative cache TTL (default 10s)
 - `iprefix` is case-insensitive prefix matching
@@ -155,7 +156,10 @@ If you change user-facing behavior, also update:
 
 ## Known non-goals / placeholders
 
-- Raw TCP proxy mode supports plain TCP, TCP+SNI routing, dynamic listeners, and PROXY protocol v1; avoid documenting multiplexed HTTPS+TCP+SNI as production-ready until further hardening under load
+- Raw TCP proxy mode supports plain TCP, TCP+SNI routing, dynamic listeners, and PROXY protocol v1; production-tested with NATS protocol (INFO, PING/PONG, CONNECT/SUB/PUB/UNSUB, queue groups, 50KB payloads, 20 concurrent connections)
+- Active health checking (probing) is not implemented — passive health checking via circuit breaker only
+- Per-route rate limiting is not implemented — `max_connections` provides basic per-target enforcement
+- OCSP stapling is not explicitly configured (may be handled by rustls defaults)
 
 ## Commit hygiene
 

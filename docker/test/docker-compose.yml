@@ -1,9 +1,6 @@
 version: "3.8"
 
 services:
-  # ============================================================
-  # Consul (dev mode — no persistence, single node)
-  # ============================================================
   consul:
     image: hashicorp/consul:1.19
     command: agent -dev -client=0.0.0.0 -log-level=warn
@@ -15,10 +12,6 @@ services:
       timeout: 3s
       retries: 10
 
-  # ============================================================
-  # Upstream mock services (simple HTTP echo servers)
-  # Each returns a JSON identifying which backend handled the request.
-  # ============================================================
   upstream-web-blue:
     image: hashicorp/http-echo:0.2.3
     entrypoint: ["/http-echo"]
@@ -39,9 +32,13 @@ services:
     entrypoint: ["/http-echo"]
     command: ["-text", "{\"service\":\"static\",\"port\":3000}", "-listen", ":3000"]
 
-  # ============================================================
-  # Sentirum LB
-  # ============================================================
+  nats:
+    image: nats:2.10-alpine
+    command: ["--jetstream", "--store_dir", "/data", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
   sentirum-lb:
     build:
       context: ../..
@@ -50,8 +47,9 @@ services:
       --config /app/config.toml
       --routes /app/routes.txt
     ports:
-      - "9999:9999"   # HTTP proxy
-      - "9998:9998"   # Admin API
+      - "9999:9999"
+      - "9998:9998"
+      - "9222:9222"
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./routes.txt:/app/routes.txt:ro
@@ -65,4 +63,6 @@ services:
       upstream-api:
         condition: service_started
       upstream-static:
+        condition: service_started
+      nats:
         condition: service_started

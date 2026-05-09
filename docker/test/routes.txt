@@ -13,3 +13,6 @@ route add static static.example.com/ http://upstream-static:3000/ opts "strip=/s
 
 # Catch-all for no-host routes
 route add catchall / http://upstream-web-blue:8080/ opts "ssrfskipverify=true"
+
+# TCP proxy — route port 9222 to NATS
+route add nats :9222 tcp://nats:4222 opts "ssrfskipverify=true proto=tcp"

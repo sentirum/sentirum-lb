@@ -52,5 +52,6 @@ source = ""
 listen = ""
 
 [tcp]
-mode = ""
-listen = ""
+mode = "tcp"
+listen = "0.0.0.0:9222"
+refresh = "2s"

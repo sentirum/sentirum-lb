@@ -163,9 +163,34 @@ impl SentirumProxy {
         if let Some(route) = table.lookup_route(host, path, &self.matcher)
             && !route.w_targets.is_empty()
         {
-            return self
-                .picker
-                .pick(&route.targets, &route.w_targets, &route.rr_counter);
+            let cb_enabled = self.config.proxy.circuit_breaker_enabled;
+
+            // Primary pick from picker
+            if let Some(target) = self.picker.pick(&route.targets, &route.w_targets, &route.rr_counter) {
+                if !cb_enabled || target.health_tracker.circuit_breaker().allow_request() {
+                    return Some(target);
+                }
+
+                // Picker chose a CB-open target; try to find a healthy alternative.
+                // Scan all targets to find a healthy fallback.
+                let mut best_fallback: Option<std::sync::Arc<crate::route::target::Target>> = None;
+                for t in &route.targets {
+                    if t.url == target.url { continue; } // skip the one picker already chose
+                    if !t.health_tracker.circuit_breaker().allow_request() { continue; }
+                    best_fallback = Some(Arc::clone(t));
+                    break;
+                }
+                if best_fallback.is_some() {
+                    tracing::debug!(
+                        host,
+                        path,
+                        skipped_url = %target.url,
+                        fallback_url = %best_fallback.as_ref().unwrap().url,
+                        "Circuit breaker open on picked target; using fallback"
+                    );
+                }
+                return best_fallback.or(Some(target));
+            }
         }
 
         None
