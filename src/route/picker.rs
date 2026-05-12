@@ -101,8 +101,6 @@ impl Picker for RandomPicker {
 /// Memory ordering: Acquire on load pairs with Release in
 /// `Target::try_acquire_connection_slot`, forming a proper inter-thread
 /// ordering boundary without requiring full SeqCst serialization.
-
-
 pub struct LeastConnectionsPicker;
 
 impl Picker for LeastConnectionsPicker {
@@ -150,6 +148,24 @@ impl Picker for LeastConnectionsPicker {
         }
 
         best
+    }
+}
+
+/// Pick a target directly from a strategy name without allocating a boxed picker.
+pub fn pick_target_by_strategy(
+    strategy: &str,
+    targets: &[Arc<Target>],
+    w_targets: &[Arc<Target>],
+    counter: &std::sync::atomic::AtomicU64,
+) -> Option<Arc<Target>> {
+    match strategy {
+        "round-robin" | "rr" | "" => RoundRobinPicker.pick(targets, w_targets, counter),
+        "random" | "rnd" => RandomPicker::new().pick(targets, w_targets, counter),
+        "least-connections" | "lc" => LeastConnectionsPicker.pick(targets, w_targets, counter),
+        _ => {
+            tracing::warn!("Unknown picker '{}', defaulting to round-robin", strategy);
+            RoundRobinPicker.pick(targets, w_targets, counter)
+        }
     }
 }
 

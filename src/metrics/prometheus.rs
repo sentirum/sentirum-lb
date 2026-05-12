@@ -447,6 +447,10 @@ impl Metrics {
         let route_reload_total_static = self.route_reload_total_static.load(Ordering::Relaxed);
         let route_reload_total_kv = self.route_reload_total_kv.load(Ordering::Relaxed);
         let route_reload_total_service = self.route_reload_total_service.load(Ordering::Relaxed);
+        let circuit_breaker_open_total = self.circuit_breaker_open_total.load(Ordering::Relaxed);
+        let circuit_breaker_reopen_total = self.circuit_breaker_reopen_total.load(Ordering::Relaxed);
+        let circuit_breaker_close_total = self.circuit_breaker_close_total.load(Ordering::Relaxed);
+        let circuit_breaker_fastfail_total = self.circuit_breaker_fastfail_total.load(Ordering::Relaxed);
         let watcher_backoff_services = self
             .consul_watcher_backoff_seconds_services
             .load(Ordering::Relaxed);
@@ -566,6 +570,16 @@ sentirum_lb_route_reload_total{{source="static"}} {route_reload_total_static}
 sentirum_lb_route_reload_total{{source="kv"}} {route_reload_total_kv}
 sentirum_lb_route_reload_total{{source="service"}} {route_reload_total_service}
 
+# HELP sentirum_lb_circuit_breaker_transitions_total Circuit breaker state transitions by kind
+# TYPE sentirum_lb_circuit_breaker_transitions_total counter
+sentirum_lb_circuit_breaker_transitions_total{{transition="open"}} {circuit_breaker_open_total}
+sentirum_lb_circuit_breaker_transitions_total{{transition="reopen"}} {circuit_breaker_reopen_total}
+sentirum_lb_circuit_breaker_transitions_total{{transition="close"}} {circuit_breaker_close_total}
+
+# HELP sentirum_lb_circuit_breaker_fastfail_total Circuit breaker fast-fail responses
+# TYPE sentirum_lb_circuit_breaker_fastfail_total counter
+sentirum_lb_circuit_breaker_fastfail_total {circuit_breaker_fastfail_total}
+
 # HELP sentirum_lb_consul_watcher_backoff_seconds Current Consul watcher backoff in seconds
 # TYPE sentirum_lb_consul_watcher_backoff_seconds gauge
 sentirum_lb_consul_watcher_backoff_seconds{{watcher="services"}} {watcher_backoff_services}
@@ -646,6 +660,10 @@ sentirum_lb_request_duration_seconds_count {count}
             route_reload_total_static = route_reload_total_static,
             route_reload_total_kv = route_reload_total_kv,
             route_reload_total_service = route_reload_total_service,
+            circuit_breaker_open_total = circuit_breaker_open_total,
+            circuit_breaker_reopen_total = circuit_breaker_reopen_total,
+            circuit_breaker_close_total = circuit_breaker_close_total,
+            circuit_breaker_fastfail_total = circuit_breaker_fastfail_total,
             watcher_backoff_services = watcher_backoff_services,
             watcher_backoff_kv = watcher_backoff_kv,
             watcher_backoff_tls = watcher_backoff_tls,

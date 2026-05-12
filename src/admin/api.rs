@@ -11,7 +11,7 @@
 //! - `GET /admin/logs` — Recent log entries (JSON)
 //! - `GET /admin/logs/stream` — Live log stream (SSE)
 
-use crate::config::Config;
+use crate::config::{Config, SharedConfig};
 use crate::route::target::CircuitState;
 use crate::proxy::tls::{DynamicCertStore, DynamicClientCaStore};
 use crate::route::registry::ManagedRouteTable;
@@ -63,6 +63,10 @@ pub struct ProxyConfigUpdate {
     #[serde(default)]
     pub matcher: Option<String>,
     #[serde(default)]
+    pub request_id_header: Option<String>,
+    #[serde(default)]
+    pub no_route_status: Option<u16>,
+    #[serde(default)]
     pub connect_timeout: Option<String>,
     #[serde(default)]
     pub read_timeout: Option<String>,
@@ -71,9 +75,23 @@ pub struct ProxyConfigUpdate {
     #[serde(default)]
     pub idle_timeout: Option<String>,
     #[serde(default)]
+    pub enable_h2c: Option<bool>,
+    #[serde(default)]
+    pub upstream_h2_max_streams: Option<usize>,
+    #[serde(default)]
+    pub upstream_h2_ping_interval: Option<String>,
+    #[serde(default)]
     pub pool_size: Option<usize>,
     #[serde(default)]
     pub max_connections: Option<usize>,
+    #[serde(default)]
+    pub dns_cache_ttl: Option<u64>,
+    #[serde(default)]
+    pub dns_negative_cache_ttl: Option<u64>,
+    #[serde(default)]
+    pub trusted_proxies: Option<Vec<String>>,
+    #[serde(default)]
+    pub circuit_breaker_enabled: Option<bool>,
     #[serde(default)]
     pub circuit_breaker_error_threshold: Option<u8>,
     #[serde(default)]
@@ -114,7 +132,8 @@ pub struct SessionEntry {
 /// Shared state for admin API handlers
 #[derive(Clone)]
 pub struct AdminState {
-    pub config: Arc<RwLock<Config>>,
+    pub config: SharedConfig,
+    pub startup_config: Arc<Config>,
     pub route_table: Arc<ManagedRouteTable>,
     pub tls_store: Option<Arc<DynamicCertStore>>,
     pub client_ca_store: Option<Arc<DynamicClientCaStore>>,
@@ -163,6 +182,8 @@ pub struct MetricsSnapshot {
 
 #[derive(Serialize)]
 pub struct TargetMetrics {
+    pub host: String,
+    pub path: String,
     pub service: String,
     pub url: String,
     pub protocol: String,
@@ -202,6 +223,7 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/metrics", get(metrics_handler))
         .route("/admin/config", get(config_handler))
         .route("/admin/config", put(config_update_handler))
+        .route("/admin/config/reset", post(config_reset_handler))
         .route("/admin/certs", get(certs_handler))
         .route("/admin/logs", get(logs_handler))
         .route("/admin/targets", get(targets_handler))
@@ -212,10 +234,9 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/logs/stream", get(logs_stream_handler))
         .route("/admin/metrics/stream", get(metrics_stream_handler));
 
-    let no_auth = {
-        let config = state.config.try_read().expect("config lock");
-        config.server.admin_token.is_empty() && config.server.admin_users.is_empty()
-    };
+    let config = state.config.load();
+    let no_auth = config.server.admin_token.is_empty() && config.server.admin_users.is_empty();
+    drop(config);
     if no_auth {
         public.merge(protected).with_state(state)
     } else {
@@ -263,7 +284,7 @@ async fn login_handler(
     }
 
     // Check against configured users (with bcrypt verification)
-    let config = state.config.read().await;
+    let config = state.config.load();
     let valid = config.server.admin_users.iter()
         .any(|u| u.username == req.username && verify_password(&req.password, &u.password));
     
@@ -380,6 +401,8 @@ async fn metrics_stream_handler(
                     for target in route.targets.iter() {
                         let stats = target.stats.as_ref();
                         targets.push(TargetMetrics {
+                            host: host.to_string(),
+                            path: route.path.clone(),
                             service: target.service.clone(),
                             url: target.url.clone(),
                             protocol: format!("{:?}", target.parsed_protocol).to_lowercase(),
@@ -456,11 +479,15 @@ async fn routes_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
     let route_count = table.route_count();
     let target_count = table.target_count();
     let hosts = table.hosts();
+    let config = state.config.load();
+    let default_matcher = config.proxy.matcher.clone();
+    drop(config);
 
     let routes_info: Vec<serde_json::Value> = hosts
         .iter()
         .flat_map(|host| {
             let routes = table.get_routes(host).unwrap();
+            let default_matcher = default_matcher.clone();
             routes.iter().map(move |route| {
                 let targets: Vec<serde_json::Value> = route
                     .targets
@@ -479,9 +506,16 @@ async fn routes_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
                     })
                     .collect();
 
+                let matcher = if route.glob.is_some() {
+                    "glob".to_string()
+                } else {
+                    default_matcher.clone()
+                };
+
                 serde_json::json!({
                     "host": host,
                     "path": route.path,
+                    "matcher": matcher,
                     "targets": targets,
                 })
             })
@@ -506,7 +540,7 @@ async fn metrics_handler() -> impl axum::response::IntoResponse {
 }
 
 async fn certs_handler(State(state): State<AdminState>) -> axum::Json<serde_json::Value> {
-    let config = state.config.read().await;
+    let config = state.config.load();
     let tls_source = match crate::proxy::tls::TlsMode::resolve(&config.tls) {
         Ok(Some(crate::proxy::tls::TlsMode::File(_))) => "file",
         Ok(Some(crate::proxy::tls::TlsMode::ConsulKv(_))) => "consul_kv",
@@ -543,8 +577,28 @@ async fn certs_handler(State(state): State<AdminState>) -> axum::Json<serde_json
     }))
 }
 
-async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_json::Value> {
-    let config = state.config.read().await;
+fn runtime_config_capabilities() -> serde_json::Value {
+    serde_json::json!({
+        "strategy": true,
+        "matcher": true,
+        "request_id_header": true,
+        "no_route_status": true,
+        "timeouts": true,
+        "max_connections": true,
+        "dns_cache_ttl": true,
+        "circuit_breaker": true,
+        "upstream_http2": true,
+        "pool_size": false,
+        "enable_h2c": false,
+        "trusted_proxies": false,
+        "health_check": false,
+        "rate_limit": false,
+        "logging_level": false,
+        "logging_format": false
+    })
+}
+
+fn public_config_json(config: &Config) -> serde_json::Value {
     let tls_source = match crate::proxy::tls::TlsMode::resolve(&config.tls) {
         Ok(Some(crate::proxy::tls::TlsMode::File(_))) => "file",
         Ok(Some(crate::proxy::tls::TlsMode::ConsulKv(_))) => "consul_kv",
@@ -552,147 +606,227 @@ async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_jso
         Err(_) => "invalid",
     };
 
-    axum::Json(serde_json::json!({
+    serde_json::json!({
         "server": {
-            "listen": config.server.listen,
-            "admin_listen": config.server.admin_listen,
+            "listen": config.server.listen.clone(),
+            "admin_listen": config.server.admin_listen.clone(),
             "workers": config.server.workers,
         },
         "consul": {
-            "address": config.consul.address,
-            "scheme": config.consul.scheme,
-            "kv_prefix": config.consul.kv_prefix,
-            "tag_prefix": config.consul.tag_prefix,
+            "address": config.consul.address.clone(),
+            "scheme": config.consul.scheme.clone(),
+            "kv_prefix": config.consul.kv_prefix.clone(),
+            "tag_prefix": config.consul.tag_prefix.clone(),
         },
         "proxy": {
-            "strategy": config.proxy.strategy,
-            "matcher": config.proxy.matcher,
-            "connect_timeout": config.proxy.connect_timeout,
-            "read_timeout": config.proxy.read_timeout,
-            "write_timeout": config.proxy.write_timeout,
-            "idle_timeout": config.proxy.idle_timeout,
+            "strategy": config.proxy.strategy.clone(),
+            "matcher": config.proxy.matcher.clone(),
+            "request_id_header": config.proxy.request_id_header.clone(),
+            "no_route_status": config.proxy.no_route_status,
+            "connect_timeout": config.proxy.connect_timeout.clone(),
+            "read_timeout": config.proxy.read_timeout.clone(),
+            "write_timeout": config.proxy.write_timeout.clone(),
+            "idle_timeout": config.proxy.idle_timeout.clone(),
             "enable_h2c": config.proxy.enable_h2c,
             "upstream_h2_max_streams": config.proxy.upstream_h2_max_streams,
-            "upstream_h2_ping_interval": config.proxy.upstream_h2_ping_interval,
+            "upstream_h2_ping_interval": config.proxy.upstream_h2_ping_interval.clone(),
             "pool_size": config.proxy.pool_size,
             "max_connections": config.proxy.max_connections,
+            "dns_cache_ttl": config.proxy.dns_cache_ttl,
+            "dns_negative_cache_ttl": config.proxy.dns_negative_cache_ttl,
+            "trusted_proxies": config.proxy.trusted_proxies.clone(),
+            "circuit_breaker_enabled": config.proxy.circuit_breaker_enabled,
+            "circuit_breaker_error_threshold": config.proxy.circuit_breaker_error_threshold,
+            "circuit_breaker_window_size": config.proxy.circuit_breaker_window_size,
+            "circuit_breaker_recovery_timeout": config.proxy.circuit_breaker_recovery_timeout,
+            "circuit_breaker_half_open_max": config.proxy.circuit_breaker_half_open_max,
+            "health_check_interval": config.proxy.health_check_interval.clone(),
+            "health_check_timeout": config.proxy.health_check_timeout.clone(),
+            "health_check_fall": config.proxy.health_check_fall,
+            "health_check_rise": config.proxy.health_check_rise,
+            "rate_limit_per_target": config.proxy.rate_limit_per_target,
+            "rate_limit_burst": config.proxy.rate_limit_burst,
         },
         "tls": {
             "source": tls_source,
-            "listen": config.tls.listen,
+            "listen": config.tls.listen.clone(),
             "strict_sni": config.tls.strict_sni,
             "require_initial_snapshot": config.tls.require_initial_snapshot,
-            "cert_path": config.tls.cert_path,
-            "key_path": config.tls.key_path,
-            "consul_cert_prefix": config.tls.consul_cert_prefix,
-            "client_auth": config.tls.client_auth,
-            "client_ca_source": config.tls.client_ca_source,
-            "client_ca_path": config.tls.client_ca_path,
-            "client_ca_consul_prefix": config.tls.client_ca_consul_prefix,
-            "client_ca_upgrade_cn": config.tls.client_ca_upgrade_cn,
+            "cert_path": config.tls.cert_path.clone(),
+            "key_path": config.tls.key_path.clone(),
+            "consul_cert_prefix": config.tls.consul_cert_prefix.clone(),
+            "client_auth": config.tls.client_auth.clone(),
+            "client_ca_source": config.tls.client_ca_source.clone(),
+            "client_ca_path": config.tls.client_ca_path.clone(),
+            "client_ca_consul_prefix": config.tls.client_ca_consul_prefix.clone(),
+            "client_ca_upgrade_cn": config.tls.client_ca_upgrade_cn.clone(),
         },
         "tcp": {
-            "mode": config.tcp.mode,
-            "listen": config.tcp.listen,
-            "refresh": config.tcp.refresh,
+            "mode": config.tcp.mode.clone(),
+            "listen": config.tcp.listen.clone(),
+            "refresh": config.tcp.refresh.clone(),
         },
-    }))
+    })
 }
 
+async fn config_handler(State(state): State<AdminState>) -> axum::Json<serde_json::Value> {
+    let config = state.config.load();
+    let mut json = public_config_json(&config);
+    json["meta"] = serde_json::json!({
+        "runtime": runtime_config_capabilities(),
+        "startup": public_config_json(&state.startup_config),
+        "reset_mode": "startup_snapshot"
+    });
+    axum::Json(json)
+}
+
+fn circuit_breaker_config_from_proxy(
+    proxy: &crate::config::ProxyConfig,
+) -> Option<crate::route::target::CircuitBreakerConfig> {
+    proxy
+        .circuit_breaker_enabled
+        .then_some(crate::route::target::CircuitBreakerConfig {
+            error_threshold: proxy.circuit_breaker_error_threshold,
+            window_size: proxy.circuit_breaker_window_size,
+            recovery_timeout_secs: proxy.circuit_breaker_recovery_timeout,
+            half_open_max_requests: proxy.circuit_breaker_half_open_max,
+        })
+}
+
+fn unsupported_runtime_updates(update: &ConfigUpdateRequest) -> Vec<&'static str> {
+    let mut unsupported = Vec::new();
+
+    if let Some(proxy) = &update.proxy {
+        if proxy.enable_h2c.is_some() {
+            unsupported.push("proxy.enable_h2c");
+        }
+        if proxy.pool_size.is_some() {
+            unsupported.push("proxy.pool_size");
+        }
+        if proxy.trusted_proxies.is_some() {
+            unsupported.push("proxy.trusted_proxies");
+        }
+        if proxy.health_check_interval.is_some()
+            || proxy.health_check_timeout.is_some()
+            || proxy.health_check_fall.is_some()
+            || proxy.health_check_rise.is_some()
+        {
+            unsupported.push("proxy.health_check_*");
+        }
+        if proxy.rate_limit_per_target.is_some() || proxy.rate_limit_burst.is_some() {
+            unsupported.push("proxy.rate_limit_*");
+        }
+    }
+
+    if let Some(logging) = &update.logging {
+        if logging.level.is_some() {
+            unsupported.push("logging.level");
+        }
+        if logging.format.is_some() {
+            unsupported.push("logging.format");
+        }
+    }
+
+    unsupported
+}
 
 /// PUT /admin/config - Update runtime configuration
 async fn config_update_handler(
     State(state): State<AdminState>,
     Json(update): Json<ConfigUpdateRequest>,
 ) -> axum::Json<serde_json::Value> {
-    let mut new_proxy;
-    let mut new_logging;
-    let temp_config;
-    {
-        let config = state.config.read().await;
-        new_proxy = config.proxy.clone();
-        new_logging = config.logging.clone();
-
-        // Apply proxy updates
-        if let Some(proxy) = &update.proxy {
-            if let Some(v) = &proxy.strategy {
-                new_proxy.strategy = v.clone();
-            }
-            if let Some(v) = &proxy.matcher {
-                new_proxy.matcher = v.clone();
-            }
-            if let Some(v) = &proxy.connect_timeout {
-                new_proxy.connect_timeout = v.clone();
-            }
-            if let Some(v) = &proxy.read_timeout {
-                new_proxy.read_timeout = v.clone();
-            }
-            if let Some(v) = &proxy.write_timeout {
-                new_proxy.write_timeout = v.clone();
-            }
-            if let Some(v) = &proxy.idle_timeout {
-                new_proxy.idle_timeout = v.clone();
-            }
-            if let Some(v) = proxy.pool_size {
-                new_proxy.pool_size = v;
-            }
-            if let Some(v) = proxy.max_connections {
-                new_proxy.max_connections = v;
-            }
-            if let Some(v) = proxy.circuit_breaker_error_threshold {
-                new_proxy.circuit_breaker_error_threshold = v;
-            }
-            if let Some(v) = proxy.circuit_breaker_window_size {
-                new_proxy.circuit_breaker_window_size = v;
-            }
-            if let Some(v) = proxy.circuit_breaker_recovery_timeout {
-                new_proxy.circuit_breaker_recovery_timeout = v;
-            }
-            if let Some(v) = proxy.circuit_breaker_half_open_max {
-                new_proxy.circuit_breaker_half_open_max = v;
-            }
-            if let Some(v) = &proxy.health_check_interval {
-                new_proxy.health_check_interval = v.clone();
-            }
-            if let Some(v) = &proxy.health_check_timeout {
-                new_proxy.health_check_timeout = v.clone();
-            }
-            if let Some(v) = proxy.health_check_fall {
-                new_proxy.health_check_fall = v;
-            }
-            if let Some(v) = proxy.health_check_rise {
-                new_proxy.health_check_rise = v;
-            }
-            if let Some(v) = proxy.rate_limit_per_target {
-                new_proxy.rate_limit_per_target = v;
-            }
-            if let Some(v) = proxy.rate_limit_burst {
-                new_proxy.rate_limit_burst = v;
-            }
-        }
-
-        // Apply logging updates
-        if let Some(logging) = &update.logging {
-            if let Some(v) = &logging.level {
-                new_logging.level = v.clone();
-            }
-            if let Some(v) = &logging.format {
-                new_logging.format = v.clone();
-            }
-        }
-
-        // Create a temporary config for validation
-        temp_config = Config {
-            server: config.server.clone(),
-            consul: config.consul.clone(),
-            proxy: new_proxy.clone(),
-            logging: new_logging.clone(),
-            tls: config.tls.clone(),
-            tcp: config.tcp.clone(),
-        };
+    let unsupported = unsupported_runtime_updates(&update);
+    if !unsupported.is_empty() {
+        return axum::Json(serde_json::json!({
+            "success": false,
+            "error": format!(
+                "Runtime update is not supported for: {}",
+                unsupported.join(", ")
+            ),
+        }));
     }
 
-    // Validate outside the read lock
+    let current = state.config.load();
+    let mut new_proxy = current.proxy.clone();
+    let mut new_logging = current.logging.clone();
+
+    if let Some(proxy) = &update.proxy {
+        if let Some(v) = &proxy.strategy {
+            new_proxy.strategy = v.clone();
+        }
+        if let Some(v) = &proxy.matcher {
+            new_proxy.matcher = v.clone();
+        }
+        if let Some(v) = &proxy.request_id_header {
+            new_proxy.request_id_header = v.clone();
+        }
+        if let Some(v) = proxy.no_route_status {
+            new_proxy.no_route_status = v;
+        }
+        if let Some(v) = &proxy.connect_timeout {
+            new_proxy.connect_timeout = v.clone();
+        }
+        if let Some(v) = &proxy.read_timeout {
+            new_proxy.read_timeout = v.clone();
+        }
+        if let Some(v) = &proxy.write_timeout {
+            new_proxy.write_timeout = v.clone();
+        }
+        if let Some(v) = &proxy.idle_timeout {
+            new_proxy.idle_timeout = v.clone();
+        }
+        if let Some(v) = proxy.upstream_h2_max_streams {
+            new_proxy.upstream_h2_max_streams = v;
+        }
+        if let Some(v) = &proxy.upstream_h2_ping_interval {
+            new_proxy.upstream_h2_ping_interval = v.clone();
+        }
+        if let Some(v) = proxy.max_connections {
+            new_proxy.max_connections = v;
+        }
+        if let Some(v) = proxy.dns_cache_ttl {
+            new_proxy.dns_cache_ttl = v;
+        }
+        if let Some(v) = proxy.dns_negative_cache_ttl {
+            new_proxy.dns_negative_cache_ttl = v;
+        }
+        if let Some(v) = proxy.circuit_breaker_enabled {
+            new_proxy.circuit_breaker_enabled = v;
+        }
+        if let Some(v) = proxy.circuit_breaker_error_threshold {
+            new_proxy.circuit_breaker_error_threshold = v;
+        }
+        if let Some(v) = proxy.circuit_breaker_window_size {
+            new_proxy.circuit_breaker_window_size = v;
+        }
+        if let Some(v) = proxy.circuit_breaker_recovery_timeout {
+            new_proxy.circuit_breaker_recovery_timeout = v;
+        }
+        if let Some(v) = proxy.circuit_breaker_half_open_max {
+            new_proxy.circuit_breaker_half_open_max = v;
+        }
+    }
+
+    if let Some(logging) = &update.logging {
+        if let Some(v) = &logging.level {
+            new_logging.level = v.clone();
+        }
+        if let Some(v) = &logging.format {
+            new_logging.format = v.clone();
+        }
+    }
+
+    let temp_config = Config {
+        server: current.server.clone(),
+        consul: current.consul.clone(),
+        proxy: new_proxy.clone(),
+        logging: new_logging.clone(),
+        tls: current.tls.clone(),
+        tcp: current.tcp.clone(),
+    };
+    let old_cb_config = circuit_breaker_config_from_proxy(&current.proxy);
+    drop(current);
+
     if let Some(validation_error) = temp_config.validate() {
         return axum::Json(serde_json::json!({
             "success": false,
@@ -700,17 +834,94 @@ async fn config_update_handler(
         }));
     }
 
-    // Apply under write lock
-    {
-        let mut config = state.config.write().await;
-        config.proxy = new_proxy;
-        config.logging = new_logging;
+    let new_cb_config = circuit_breaker_config_from_proxy(&temp_config.proxy);
+    let dns_ttl = temp_config.proxy.dns_cache_ttl;
+    let dns_negative_ttl = temp_config.proxy.dns_negative_cache_ttl;
+    state.config.store(Arc::new(temp_config));
+    crate::route::target::global_dns_cache().set_ttl(dns_ttl, dns_negative_ttl);
+
+    if old_cb_config != new_cb_config {
+        state.route_table.reconfigure_circuit_breaker(new_cb_config);
     }
 
     axum::Json(serde_json::json!({
         "success": true,
         "message": "Configuration updated successfully",
+        "runtime": {
+            "strategy": true,
+            "matcher": true,
+            "request_id_header": true,
+            "no_route_status": true,
+            "timeouts": true,
+            "max_connections": true,
+            "dns_cache_ttl": true,
+            "circuit_breaker": true,
+            "upstream_http2": true,
+            "pool_size": false,
+            "enable_h2c": false,
+            "trusted_proxies": false,
+            "health_check": false,
+            "rate_limit": false,
+            "logging_level": false,
+            "logging_format": false
+        }
     }))
+}
+/// POST /admin/config/reset — Reset runtime config to startup defaults.
+/// This resets all live proxy settings back to the values the process was started with.
+/// Returns the full reset config so the UI can update.
+async fn config_reset_handler(
+    State(state): State<AdminState>,
+) -> axum::Json<serde_json::Value> {
+    let startup = state.startup_config.clone();
+
+    // Persist current CB config before swapping so we can compare after.
+    let old_cb_config = circuit_breaker_config_from_proxy(&state.config.load().proxy);
+
+    // Rebuild config from startup values.
+    let new_proxy = startup.proxy.clone();
+    let new_logging = startup.logging.clone();
+    let new_config = Config {
+        server: startup.server.clone(),
+        consul: startup.consul.clone(),
+        proxy: new_proxy.clone(),
+        logging: new_logging.clone(),
+        tls: startup.tls.clone(),
+        tcp: startup.tcp.clone(),
+    };
+
+    // Validate before applying.
+    if let Some(validation_error) = new_config.validate() {
+        return axum::Json(serde_json::json!({
+            "success": false,
+            "error": format!("Validation failed: {}", validation_error),
+        }));
+    }
+
+    let new_cb_config = circuit_breaker_config_from_proxy(&new_config.proxy);
+    let dns_ttl = new_config.proxy.dns_cache_ttl;
+    let dns_negative_ttl = new_config.proxy.dns_negative_cache_ttl;
+
+    // Swap the live config atomically.
+    state.config.store(Arc::new(new_config));
+
+    // DNS TTL may have changed — push the new values through.
+    crate::route::target::global_dns_cache().set_ttl(dns_ttl, dns_negative_ttl);
+
+    // If CB settings changed, rebuild the managed route table so targets pick up new config.
+    if old_cb_config != new_cb_config {
+        state.route_table.reconfigure_circuit_breaker(new_cb_config);
+    }
+
+    // Return the startup config as the current config so the UI reflects the reset.
+    let after = state.config.load();
+    let mut json = public_config_json(&after);
+    json["meta"] = serde_json::json!({
+        "runtime": runtime_config_capabilities(),
+        "startup": public_config_json(&state.startup_config),
+        "reset_mode": "startup_snapshot"
+    });
+    axum::Json(json)
 }
 
 
@@ -854,13 +1065,22 @@ async fn topology_handler(State(state): State<AdminState>) -> axum::Json<serde_j
 
 
 async fn targets_metrics_handler(State(state): State<AdminState>) -> impl axum::response::IntoResponse {
-    
-    
     let table = state.route_table.get();
     let hosts = table.hosts();
-    
-    let mut output = String::new();
-    
+
+    let mut output = String::from(
+        "# HELP sentirum_lb_target_requests_total Requests per target\n\
+# TYPE sentirum_lb_target_requests_total counter\n\
+# HELP sentirum_lb_target_errors_total Errors per target\n\
+# TYPE sentirum_lb_target_errors_total counter\n\
+# HELP sentirum_lb_target_latency_us_total Total latency per target\n\
+# TYPE sentirum_lb_target_latency_us_total counter\n\
+# HELP sentirum_lb_target_bytes_total Bytes per target\n\
+# TYPE sentirum_lb_target_bytes_total counter\n\
+# HELP sentirum_lb_target_circuit_breaker_state Circuit breaker state (0=closed, 1=half-open, 2=open)\n\
+# TYPE sentirum_lb_target_circuit_breaker_state gauge\n",
+    );
+
     for host in hosts {
         if let Some(routes) = table.get_routes(host) {
             for route in routes.iter() {
@@ -871,31 +1091,23 @@ async fn targets_metrics_handler(State(state): State<AdminState>) -> impl axum::
                     let latency_sum = stats.latency_sum_us.load(Ordering::Relaxed);
                     let bytes = stats.bytes_total.load(Ordering::Relaxed);
                     let cb_state = target.health_tracker.circuit_breaker().current_state();
-                    
+
                     let svc = escape_prometheus_label(&target.service);
                     let h = escape_prometheus_label(host);
                     let p = escape_prometheus_label(&route.path);
                     let proto = escape_prometheus_label(&format!("{:?}", target.parsed_protocol).to_lowercase());
 
-                    output.push_str("# HELP sentirum_lb_target_requests_total Requests per target\n");
-                    output.push_str("# TYPE sentirum_lb_target_requests_total counter\n");
                     output.push_str(&format!(
-                        "sentirum_lb_target_requests_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {requests}\n\n"
+                        "sentirum_lb_target_requests_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {requests}\n"
                     ));
-                    output.push_str("# HELP sentirum_lb_target_errors_total Errors per target\n");
-                    output.push_str("# TYPE sentirum_lb_target_errors_total counter\n");
                     output.push_str(&format!(
-                        "sentirum_lb_target_errors_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {errors}\n\n"
+                        "sentirum_lb_target_errors_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {errors}\n"
                     ));
-                    output.push_str("# HELP sentirum_lb_target_latency_us_total Total latency per target\n");
-                    output.push_str("# TYPE sentirum_lb_target_latency_us_total counter\n");
                     output.push_str(&format!(
-                        "sentirum_lb_target_latency_us_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {latency_sum}\n\n"
+                        "sentirum_lb_target_latency_us_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {latency_sum}\n"
                     ));
-                    output.push_str("# HELP sentirum_lb_target_bytes_total Bytes per target\n");
-                    output.push_str("# TYPE sentirum_lb_target_bytes_total counter\n");
                     output.push_str(&format!(
-                        "sentirum_lb_target_bytes_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {bytes}\n\n"
+                        "sentirum_lb_target_bytes_total{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {bytes}\n"
                     ));
 
                     let cb_value = match cb_state {
@@ -903,16 +1115,14 @@ async fn targets_metrics_handler(State(state): State<AdminState>) -> impl axum::
                         CircuitState::Open => 2,
                         CircuitState::HalfOpen => 1,
                     };
-                    output.push_str("# HELP sentirum_lb_target_circuit_breaker_state Circuit breaker state (0=closed, 1=half-open, 2=open)\n");
-                    output.push_str("# TYPE sentirum_lb_target_circuit_breaker_state gauge\n");
                     output.push_str(&format!(
-                        "sentirum_lb_target_circuit_breaker_state{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {cb_value}\n\n"
+                        "sentirum_lb_target_circuit_breaker_state{{service=\"{svc}\",host=\"{h}\",path=\"{p}\",protocol=\"{proto}\"}} {cb_value}\n"
                     ));
                 }
             }
         }
     }
-    
+
     (
         [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
         output
@@ -1072,24 +1282,29 @@ impl SessionCleanupBackground {
 
 /// Run the admin API server using axum
 pub async fn run_admin_server(
-    config: Arc<Config>,
+    config: SharedConfig,
     route_table: Arc<ManagedRouteTable>,
     tls_store: Option<Arc<DynamicCertStore>>,
     client_ca_store: Option<Arc<DynamicClientCaStore>>,
     log_buffer: Option<Arc<crate::admin::logs::LogBuffer>>,
 ) {
-    let addr = config.server.admin_listen.clone();
+    let config_snapshot = config.load();
+    let addr = config_snapshot.server.admin_listen.clone();
 
-    let has_any_auth = !config.server.admin_token.is_empty() || !config.server.admin_users.is_empty();
+    let has_any_auth =
+        !config_snapshot.server.admin_token.is_empty() || !config_snapshot.server.admin_users.is_empty();
     if !has_any_auth && !is_loopback_bind(&addr) {
         tracing::error!(addr = %addr, "Refusing to expose admin API without admin_token or admin_users on non-loopback address");
         return;
     }
 
-    let auth_enabled = !config.server.admin_token.is_empty() || !config.server.admin_users.is_empty();
-    let config = Arc::new(RwLock::new((*config).clone()));
+    let auth_enabled =
+        !config_snapshot.server.admin_token.is_empty() || !config_snapshot.server.admin_users.is_empty();
+    let startup_config = Arc::clone(&config_snapshot);
+    drop(config_snapshot);
     let state = AdminState {
-        config,
+        config: config.clone(),
+        startup_config,
         route_table,
         tls_store,
         client_ca_store,
@@ -1158,7 +1373,7 @@ async fn admin_auth_middleware(
 ) -> Result<Response, (StatusCode, axum::Json<serde_json::Value>)> {
     // Path A: static admin_token via Bearer or X-Admin-Token header.
     // Only valid when admin_token is actually configured (non-empty).
-    let config = state.config.read().await;
+    let config = state.config.load();
     let expected = config.server.admin_token.clone();
     let token_auth = if !expected.is_empty() {
         headers
@@ -1310,8 +1525,8 @@ mod tests {
     use http::Request;
     use tower::ServiceExt; // for oneshot()
 
-    fn make_test_config() -> Arc<RwLock<Config>> {
-        Arc::new(RwLock::new(Config {
+    fn make_test_config() -> SharedConfig {
+        crate::config::shared_config(Config {
             server: ServerConfig {
                 listen: ":9999".to_string(),
                 admin_listen: "127.0.0.1:9998".to_string(),
@@ -1338,12 +1553,15 @@ mod tests {
             logging: LoggingConfig::default(),
             tls: TlsConfig::default(),
             tcp: TcpConfig::default(),
-        }))
+        })
     }
 
     fn make_test_state() -> AdminState {
+        let config = make_test_config();
+        let startup_config = Arc::clone(&config.load());
         AdminState {
-            config: make_test_config(),
+            config,
+            startup_config,
             route_table: Arc::new(ManagedRouteTable::new()),
             tls_store: None,
             client_ca_store: None,
@@ -1354,35 +1572,38 @@ mod tests {
     }
 
     fn make_authed_test_state(admin_token: &str, admin_users: Vec<AdminUser>) -> AdminState {
-        AdminState {
-            config: Arc::new(RwLock::new(Config {
-                server: ServerConfig {
-                    listen: ":9999".to_string(),
-                    admin_listen: "127.0.0.1:9998".to_string(),
-                    admin_token: admin_token.to_string(),
-                    admin_users,
-                    workers: 0,
+        let config = crate::config::shared_config(Config {
+            server: ServerConfig {
+                listen: ":9999".to_string(),
+                admin_listen: "127.0.0.1:9998".to_string(),
+                admin_token: admin_token.to_string(),
+                admin_users,
+                workers: 0,
                 drain_timeout: "30s".to_string(),
-                },
-                consul: ConsulConfig {
-                    address: "127.0.0.1:8500".to_string(),
-                    scheme: "http".to_string(),
-                    token: String::new(),
-                    kv_prefix: "/sentirum-lb/routes".to_string(),
-                    tag_prefix: "urlprefix-".to_string(),
-                    poll_interval: "0s".to_string(),
-                    service_discovery: false,
-                    kv_watching: false,
-                    service_whitelist: Vec::new(),
-                    service_blacklist: Vec::new(),
-                    graceful_shutdown: true,
-                    include_warning: false,
-                },
-                proxy: ProxyConfig::default(),
-                logging: LoggingConfig::default(),
-                tls: TlsConfig::default(),
-                tcp: TcpConfig::default(),
-            })),
+            },
+            consul: ConsulConfig {
+                address: "127.0.0.1:8500".to_string(),
+                scheme: "http".to_string(),
+                token: String::new(),
+                kv_prefix: "/sentirum-lb/routes".to_string(),
+                tag_prefix: "urlprefix-".to_string(),
+                poll_interval: "0s".to_string(),
+                service_discovery: false,
+                kv_watching: false,
+                service_whitelist: Vec::new(),
+                service_blacklist: Vec::new(),
+                graceful_shutdown: true,
+                include_warning: false,
+            },
+            proxy: ProxyConfig::default(),
+            logging: LoggingConfig::default(),
+            tls: TlsConfig::default(),
+            tcp: TcpConfig::default(),
+        });
+        let startup_config = Arc::clone(&config.load());
+        AdminState {
+            config,
+            startup_config,
             route_table: Arc::new(ManagedRouteTable::new()),
             tls_store: None,
             client_ca_store: None,
@@ -1422,6 +1643,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_admin_routes_include_matcher() {
+        let state = make_test_state();
+        let defs = crate::route::parser::parse_route_commands(
+            "route add svc /api http://example.com/ opts \"ssrfskipverify=true\"",
+        );
+        state.route_table.load_static(&defs);
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/routes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["routes"][0]["matcher"], "prefix");
     }
 
     #[tokio::test]
@@ -1492,6 +1737,174 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_admin_config_update_updates_shared_runtime_config() {
+        let state = make_test_state();
+        let app = build_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/config")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "proxy": {
+                                "strategy": "least-connections",
+                                "matcher": "iprefix",
+                                "connect_timeout": "7s"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+
+        let config = state.config.load();
+        assert_eq!(config.proxy.strategy, "least-connections");
+        assert_eq!(config.proxy.matcher, "iprefix");
+        assert_eq!(config.proxy.connect_timeout, "7s");
+    }
+
+    #[tokio::test]
+    async fn test_admin_config_update_rejects_non_runtime_fields() {
+        let state = make_test_state();
+        let app = build_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/config")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "proxy": {
+                                "enable_h2c": true,
+                                "pool_size": 256
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], false);
+        assert!(json["error"].as_str().unwrap().contains("proxy.enable_h2c"));
+        assert!(json["error"].as_str().unwrap().contains("proxy.pool_size"));
+
+        let config = state.config.load();
+        assert!(!config.proxy.enable_h2c);
+        assert_eq!(config.proxy.pool_size, 128);
+    }
+
+    #[tokio::test]
+    async fn test_admin_config_reset_restores_startup_snapshot() {
+        let state = make_test_state();
+        let app = build_router(state.clone());
+
+        let update_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/config")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "proxy": {
+                                "strategy": "least-connections",
+                                "connect_timeout": "7s",
+                                "dns_cache_ttl": 99
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_response.status(), 200);
+
+        let reset_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/config/reset")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reset_response.status(), 200);
+
+        let config = state.config.load();
+        assert_eq!(config.proxy.strategy, "round-robin");
+        assert_eq!(config.proxy.connect_timeout, "5s");
+        assert_eq!(config.proxy.dns_cache_ttl, 30);
+    }
+
+    #[tokio::test]
+    async fn test_admin_config_handler_includes_startup_meta() {
+        let state = make_test_state();
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["meta"]["reset_mode"], "startup_snapshot");
+        assert_eq!(json["meta"]["startup"]["proxy"]["strategy"], "round-robin");
+        assert_eq!(json["meta"]["runtime"]["strategy"], true);
+    }
+
+    #[tokio::test]
+    async fn test_targets_metrics_help_headers_emitted_once() {
+        let state = make_test_state();
+        let defs = crate::route::parser::parse_route_commands(
+            "route add svc / http://example.com/ opts \"ssrfskipverify=true\"",
+        );
+        state.route_table.load_static(&defs);
+        let snapshot = state.route_table.get();
+        let route = snapshot.lookup_route("", "/", "prefix").unwrap();
+        route.targets[0].stats.record_request(123, 456, false);
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/targets-metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(
+            text.matches("# HELP sentirum_lb_target_requests_total").count(),
+            1
+        );
+        assert_eq!(
+            text.matches("# TYPE sentirum_lb_target_requests_total").count(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn test_admin_dashboard() {
         let state = make_test_state();
         let app = build_router(state);
@@ -1508,6 +1921,44 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("sentirum"));
+        assert!(html.contains("status-matcher"));
+        assert!(html.contains("overview-title"));
+        assert!(html.contains("overview-health"));
+        assert!(html.contains("overview-trends"));
+        assert!(html.contains("overview-hot-routes"));
+        assert!(html.contains("overview-attention"));
+        assert!(html.contains("overview-recent-changes"));
+        assert!(html.contains("overview-guide"));
+        assert!(html.contains("stream-pause-btn"));
+        assert!(html.contains("target-search"));
+        assert!(html.contains("route-search"));
+        assert!(html.contains("route-sort"));
+        assert!(html.contains("route-protocol"));
+        assert!(html.contains("route-hosts"));
+        assert!(html.contains("route-inspector"));
+        assert!(html.contains("config-search"));
+        assert!(html.contains("config-summary"));
+        assert!(html.contains("config-editor"));
+        assert!(html.contains("config-apply-btn"));
+        assert!(html.contains("config-diff-drawer"));
+        assert!(html.contains("copyToClipboard"));
+        assert!(html.contains("config-collapse-btn"));
+        assert!(html.contains("toast-root"));
+        assert!(html.contains("beforeunload"));
+        assert!(html.contains("focusConfigField"));
+        assert!(html.contains("resetRuntimeConfigToStartup"));
+        assert!(html.contains("dns-search"));
+        assert!(html.contains("cert-search"));
+        assert!(html.contains("cert-risk"));
+        assert!(html.contains("cert-client-ca-btn"));
+        assert!(html.contains("selectCert"));
+        assert!(html.contains("certs-inspector"));
+        assert!(html.contains("exportCerts"));
+        assert!(html.contains("log-preset-app"));
+        assert!(html.contains("exportFilteredLogs"));
+        assert!(html.contains("topology-hosts"));
+        assert!(html.contains("topo-mode-issues"));
+        assert!(html.contains("topology-meta"));
     }
 
     #[tokio::test]
@@ -1576,8 +2027,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_admin_requires_token_when_configured() {
-        let mut state = make_test_state();
-        state.config.try_write().expect("config lock").server.admin_token = "secret".to_string();
+        let state = make_test_state();
+        let mut config = (*state.config.load_full()).clone();
+        config.server.admin_token = "secret".to_string();
+        state.config.store(Arc::new(config));
         let app = build_router(state);
         let response = app
             .oneshot(
@@ -1593,8 +2046,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_admin_accepts_bearer_token() {
-        let mut state = make_test_state();
-        state.config.try_write().expect("config lock").server.admin_token = "secret".to_string();
+        let state = make_test_state();
+        let mut config = (*state.config.load_full()).clone();
+        config.server.admin_token = "secret".to_string();
+        state.config.store(Arc::new(config));
         let app = build_router(state);
         let response = app
             .oneshot(

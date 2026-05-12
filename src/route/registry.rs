@@ -137,6 +137,37 @@ impl ManagedRouteTable {
         }
     }
 
+    /// Reconfigure per-target circuit breaker settings and rebuild the table.
+    ///
+    /// **Note:** This rebuilds the entire route table. Existing circuit-breaker
+    /// state (open / half-open windows, failure history) is **not** preserved —
+    /// all breakers reset to Closed. Open breakers will immediately start
+    /// accepting traffic again.
+    pub fn reconfigure_circuit_breaker(
+        &self,
+        cb_config: Option<crate::route::target::CircuitBreakerConfig>,
+    ) {
+        let _guard = self.update_lock.lock().unwrap_or_else(|e| {
+            tracing::warn!("Route update lock was poisoned; recovering");
+            e.into_inner()
+        });
+        tracing::warn!(
+            enabled = cb_config.is_some(),
+            "Circuit breaker configuration changed — all breaker states will reset to Closed. \
+             Active open/half-open breakers will allow traffic again."
+        );
+        self.inner.stats_registry().clear_health_trackers();
+        self.inner.set_cb_config(cb_config.clone());
+        let registry = self.registry.load();
+        let table = Table::from_definitions_with_stats(
+            &registry.get_all(),
+            self.inner.stats_registry(),
+            cb_config,
+        );
+        self.inner.swap(table);
+        tracing::info!(enabled = self.inner.cb_config().is_some(), "Circuit breaker configuration updated");
+    }
+
     /// Get current snapshot of the routing table (for hot path)
     /// This returns Arc<Table> which is what RouteTable::get() returns
     pub fn get(&self) -> Arc<Table> {

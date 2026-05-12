@@ -1,5 +1,12 @@
 use serde::Deserialize;
+use std::sync::Arc;
 use std::time::Duration;
+
+pub type SharedConfig = Arc<arc_swap::ArcSwap<Config>>;
+
+pub fn shared_config(config: Config) -> SharedConfig {
+    Arc::new(arc_swap::ArcSwap::from_pointee(config))
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
@@ -466,6 +473,11 @@ impl Config {
                 .parse::<u64>()
                 .ok()
                 .map(|m| Duration::from_secs(m * 60))
+        } else if s.ends_with('h') {
+            s.trim_end_matches('h')
+                .parse::<u64>()
+                .ok()
+                .map(|h| Duration::from_secs(h * 60 * 60))
         } else {
             None
         };
@@ -493,6 +505,24 @@ impl Config {
     /// Returns None if valid, Some(String) with error description if invalid.
     pub fn validate(&self) -> Option<String> {
         let mut errors = Vec::new();
+
+        validate_duration_field(&mut errors, "server.drain_timeout", &self.server.drain_timeout, false);
+        validate_duration_field(&mut errors, "consul.poll_interval", &self.consul.poll_interval, true);
+        validate_duration_field(&mut errors, "proxy.connect_timeout", &self.proxy.connect_timeout, true);
+        validate_duration_field(&mut errors, "proxy.read_timeout", &self.proxy.read_timeout, true);
+        validate_duration_field(&mut errors, "proxy.write_timeout", &self.proxy.write_timeout, true);
+        validate_duration_field(&mut errors, "proxy.idle_timeout", &self.proxy.idle_timeout, true);
+        if !self.proxy.upstream_h2_ping_interval.trim().is_empty() {
+            validate_duration_field(
+                &mut errors,
+                "proxy.upstream_h2_ping_interval",
+                &self.proxy.upstream_h2_ping_interval,
+                true,
+            );
+        }
+        validate_duration_field(&mut errors, "proxy.health_check_interval", &self.proxy.health_check_interval, true);
+        validate_duration_field(&mut errors, "proxy.health_check_timeout", &self.proxy.health_check_timeout, true);
+        validate_duration_field(&mut errors, "tcp.refresh", &self.tcp.refresh, true);
 
         // Validate circuit breaker threshold (0-100)
         if self.proxy.circuit_breaker_error_threshold > 100 {
@@ -594,6 +624,22 @@ impl Config {
     }
 }
 
+fn validate_duration_field(errors: &mut Vec<String>, name: &str, value: &str, allow_zero: bool) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        errors.push(format!("{name} must not be empty"));
+        return;
+    }
+
+    match Config::parse_optional_duration(trimmed) {
+        Some(duration) if allow_zero || !duration.is_zero() => {}
+        Some(_) => errors.push(format!("{name} must be > 0, got {trimmed}")),
+        None => errors.push(format!(
+            "{name} has invalid duration '{trimmed}' (expected e.g. 150ms, 5s, 2m)"
+        )),
+    }
+}
+
 fn validate_cidr(cidr: &str) -> Result<(), String> {
     let cidr = cidr.trim();
     if cidr.is_empty() {
@@ -649,6 +695,46 @@ mod tests {
             Config::parse_optional_duration("2m"),
             Some(Duration::from_secs(120))
         );
+        assert_eq!(
+            Config::parse_optional_duration("1h"),
+            Some(Duration::from_secs(3600))
+        );
+    }
+
+    #[test]
+    fn validate_rejects_invalid_timeout_strings() {
+        let mut config = Config {
+            server: ServerConfig {
+                listen: ":9999".to_string(),
+                admin_listen: "127.0.0.1:9998".to_string(),
+                admin_users: Vec::new(),
+                admin_token: String::new(),
+                workers: 0,
+                drain_timeout: "30s".to_string(),
+            },
+            consul: ConsulConfig {
+                address: "127.0.0.1:8500".to_string(),
+                scheme: "http".to_string(),
+                token: String::new(),
+                kv_prefix: "/sentirum-lb/routes".to_string(),
+                tag_prefix: "urlprefix-".to_string(),
+                poll_interval: "0s".to_string(),
+                service_discovery: true,
+                kv_watching: true,
+                service_whitelist: Vec::new(),
+                service_blacklist: Vec::new(),
+                graceful_shutdown: true,
+                include_warning: false,
+            },
+            proxy: ProxyConfig::default(),
+            logging: LoggingConfig::default(),
+            tls: TlsConfig::default(),
+            tcp: TcpConfig::default(),
+        };
+        config.proxy.connect_timeout = "abc".to_string();
+
+        let error = config.validate().expect("invalid timeout should fail validation");
+        assert!(error.contains("proxy.connect_timeout"));
     }
 
     #[test]

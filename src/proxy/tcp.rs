@@ -1,5 +1,5 @@
-use crate::config::Config;
-use crate::route::picker::create_picker;
+use crate::config::{Config, SharedConfig};
+use crate::route::picker::pick_target_by_strategy;
 use crate::route::registry::ManagedRouteTable;
 use crate::route::table::Table;
 use crate::route::target::Target;
@@ -56,7 +56,7 @@ pub fn resolve_tcp_mode(config: &Config) -> Result<TcpMode, String> {
 
 pub struct TcpBackgroundService {
     pub route_table: Arc<ManagedRouteTable>,
-    pub config: Arc<Config>,
+    pub config: SharedConfig,
     pub mode: TcpMode,
     pub https_fallback_addr: Option<String>,
 }
@@ -116,9 +116,10 @@ impl BackgroundService for TcpBackgroundService {
                         return;
                     }
                 };
+                let config = self.config.load();
                 let public_listen = crate::proxy::tls::tls_listen_addr(
-                    &self.config.server.listen,
-                    &self.config.tls.listen,
+                    &config.server.listen,
+                    &config.tls.listen,
                 );
                 let port = match parse_listener_port(&public_listen) {
                     Some(port) => port,
@@ -158,7 +159,7 @@ impl BackgroundService for TcpBackgroundService {
 async fn run_dynamic_tcp_manager(
     refresh: Duration,
     route_table: Arc<ManagedRouteTable>,
-    config: Arc<Config>,
+    config: SharedConfig,
     shutdown: &mut pingora::server::ShutdownWatch,
 ) {
     let mut listeners: HashMap<u16, DynamicListenerHandle> = HashMap::new();
@@ -204,7 +205,7 @@ struct DynamicListenerHandle {
 async fn reconcile_dynamic_listeners(
     listeners: &mut HashMap<u16, DynamicListenerHandle>,
     route_table: Arc<ManagedRouteTable>,
-    config: Arc<Config>,
+    config: SharedConfig,
 ) {
     let ports = route_table.get().tcp_listener_ports();
 
@@ -266,7 +267,7 @@ async fn run_tcp_listener(
     listen_port: u16,
     mode: TcpListenerMode,
     route_table: Arc<ManagedRouteTable>,
-    config: Arc<Config>,
+    config: SharedConfig,
     shutdown: &mut pingora::server::ShutdownWatch,
 ) {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -297,7 +298,7 @@ async fn run_tcp_listener_with_watch(
     listen_port: u16,
     mode: TcpListenerMode,
     route_table: Arc<ManagedRouteTable>,
-    config: Arc<Config>,
+    config: SharedConfig,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let listener = match TcpListener::bind(&listen).await {
@@ -359,11 +360,12 @@ async fn run_tcp_listener_with_watch(
 async fn handle_tcp_connection(
     downstream: TcpStream,
     route_table: Arc<ManagedRouteTable>,
-    config: Arc<Config>,
+    config: SharedConfig,
 ) -> Result<(), std::io::Error> {
     let local_addr = downstream.local_addr()?;
     let local_addr_str = local_addr.to_string();
-    let target = match lookup_target(&route_table, &config.proxy.strategy, &local_addr_str) {
+    let config_snapshot = config.load();
+    let target = match lookup_target(&route_table, &config_snapshot.proxy.strategy, &local_addr_str) {
         Some(target) => target,
         None => {
             tracing::warn!(local_addr = %local_addr_str, "No TCP route found for local listener");
@@ -371,15 +373,19 @@ async fn handle_tcp_connection(
         }
     };
 
+    drop(config_snapshot);
     proxy_tcp_streams(downstream, Vec::new(), target, &config, None).await
 }
 
 async fn handle_tcp_sni_connection(
     mut downstream: TcpStream,
     route_table: Arc<ManagedRouteTable>,
-    config: Arc<Config>,
+    config: SharedConfig,
 ) -> Result<(), std::io::Error> {
-    let client_hello = read_client_hello(&mut downstream).await?;
+    let config_snapshot = config.load();
+    let read_timeout = crate::config::Config::parse_duration(&config_snapshot.proxy.read_timeout);
+    let strategy = config_snapshot.proxy.strategy.clone();
+    let client_hello = read_client_hello(&mut downstream, read_timeout).await?;
     let server_name = read_server_name(&client_hello[5..])
         .ok_or_else(|| std::io::Error::other("unable to parse TLS client hello server_name"))?;
     if server_name.is_empty() {
@@ -387,7 +393,7 @@ async fn handle_tcp_sni_connection(
         return Ok(());
     }
 
-    let target = match lookup_sni_target(&route_table, &config.proxy.strategy, &server_name) {
+    let target = match lookup_sni_target(&route_table, &strategy, &server_name) {
         Some(target) => target,
         None => {
             tracing::warn!(server_name = %server_name, "No TCP SNI route found");
@@ -395,6 +401,7 @@ async fn handle_tcp_sni_connection(
         }
     };
 
+    drop(config_snapshot);
     proxy_tcp_streams(
         downstream,
         client_hello,
@@ -408,24 +415,28 @@ async fn handle_tcp_sni_connection(
 async fn handle_https_tcp_sni_connection(
     mut downstream: TcpStream,
     route_table: Arc<ManagedRouteTable>,
-    config: Arc<Config>,
+    config: SharedConfig,
     https_fallback_addr: &str,
 ) -> Result<(), std::io::Error> {
+    let config_snapshot = config.load();
+    let read_timeout = crate::config::Config::parse_duration(&config_snapshot.proxy.read_timeout);
+    let strategy = config_snapshot.proxy.strategy.clone();
+
     let mut headers = [0_u8; 9];
-    downstream.read_exact(&mut headers).await?;
+    read_exact_with_timeout(&mut downstream, &mut headers, read_timeout).await?;
 
     let client_hello = match client_hello_buffer_size(&headers) {
         Ok(buffer_size) => {
             let mut data = vec![0_u8; buffer_size];
             data[..9].copy_from_slice(&headers);
-            downstream.read_exact(&mut data[9..]).await?;
+            read_exact_with_timeout(&mut downstream, &mut data[9..], read_timeout).await?;
             data
         }
         Err(_) => {
             return proxy_to_https_fallback(
                 downstream,
                 headers.to_vec(),
-                config.as_ref(),
+                config_snapshot.as_ref(),
                 https_fallback_addr,
             )
             .await;
@@ -435,11 +446,11 @@ async fn handle_https_tcp_sni_connection(
     let target = read_server_name(&client_hello[5..])
         .filter(|server_name| !server_name.is_empty())
         .and_then(|server_name| {
-            lookup_sni_target(&route_table, &config.proxy.strategy, &server_name)
-                .map(|target| (server_name, target))
+            lookup_sni_target(&route_table, &strategy, &server_name).map(|target| (server_name, target))
         });
 
     if let Some((server_name, target)) = target {
+        drop(config_snapshot);
         return proxy_tcp_streams(
             downstream,
             client_hello,
@@ -453,7 +464,7 @@ async fn handle_https_tcp_sni_connection(
     proxy_to_https_fallback(
         downstream,
         client_hello,
-        config.as_ref(),
+        config_snapshot.as_ref(),
         https_fallback_addr,
     )
     .await
@@ -467,7 +478,7 @@ fn lookup_target(
     let table = route_table.get();
     let table: &Table = &table;
     let route = table.lookup_tcp_route_for_local_addr(local_addr)?;
-    create_picker(strategy).pick(&route.targets, &route.w_targets, &route.rr_counter)
+    pick_target_by_strategy(strategy, &route.targets, &route.w_targets, &route.rr_counter)
 }
 
 fn lookup_sni_target(
@@ -478,23 +489,24 @@ fn lookup_sni_target(
     let table = route_table.get();
     let table: &Table = &table;
     let route = table.lookup_tcp_sni_route(server_name)?;
-    create_picker(strategy).pick(&route.targets, &route.w_targets, &route.rr_counter)
+    pick_target_by_strategy(strategy, &route.targets, &route.w_targets, &route.rr_counter)
 }
 
 async fn proxy_tcp_streams(
     mut downstream: TcpStream,
     initial_bytes: Vec<u8>,
     target: Arc<Target>,
-    config: &Arc<Config>,
+    config: &SharedConfig,
     server_name: Option<&str>,
 ) -> Result<(), std::io::Error> {
-    if !target.try_acquire_connection_slot(config.proxy.max_connections as u64) {
+    let config_snapshot = config.load();
+    if !target.try_acquire_connection_slot(config_snapshot.proxy.max_connections as u64) {
         match server_name {
             Some(server_name) => {
-                tracing::warn!(server_name = %server_name, target_url = %target.url, max_connections = config.proxy.max_connections, "TCP SNI upstream concurrency limit reached")
+                tracing::warn!(server_name = %server_name, target_url = %target.url, max_connections = config_snapshot.proxy.max_connections, "TCP SNI upstream concurrency limit reached")
             }
             None => {
-                tracing::warn!(target_url = %target.url, max_connections = config.proxy.max_connections, "TCP upstream concurrency limit reached")
+                tracing::warn!(target_url = %target.url, max_connections = config_snapshot.proxy.max_connections, "TCP upstream concurrency limit reached")
             }
         }
         return Ok(());
@@ -530,7 +542,7 @@ async fn proxy_tcp_streams(
     }
 
 
-    let mut upstream = match connect_upstream(&target, config.as_ref()).await {
+    let mut upstream = match connect_upstream(&target, config_snapshot.as_ref()).await {
         Ok(upstream) => upstream,
         Err(error) => {
             match server_name {
@@ -611,14 +623,30 @@ async fn write_proxy_header(
     Ok(())
 }
 
-async fn read_client_hello(stream: &mut TcpStream) -> Result<Vec<u8>, std::io::Error> {
+async fn read_exact_with_timeout(
+    stream: &mut TcpStream,
+    buf: &mut [u8],
+    timeout: Duration,
+) -> Result<(), std::io::Error> {
+    if timeout.is_zero() {
+        stream.read_exact(buf).await?;
+        return Ok(());
+    }
+
+    tokio::time::timeout(timeout, stream.read_exact(buf))
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "TCP read timed out"))??;
+    Ok(())
+}
+
+async fn read_client_hello(stream: &mut TcpStream, timeout: Duration) -> Result<Vec<u8>, std::io::Error> {
     let mut headers = [0_u8; 9];
-    stream.read_exact(&mut headers).await?;
+    read_exact_with_timeout(stream, &mut headers, timeout).await?;
     let buffer_size = client_hello_buffer_size(&headers)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let mut data = vec![0_u8; buffer_size];
     data[..9].copy_from_slice(&headers);
-    stream.read_exact(&mut data[9..]).await?;
+    read_exact_with_timeout(stream, &mut data[9..], timeout).await?;
     Ok(data)
 }
 
@@ -760,8 +788,8 @@ mod tests {
 
     const CLIENT_HELLO_WITH_SNI_HEX: &str = "0100014803032657cacce41598fa82e5b75061050bc31c5affdba106b8e743185224af0fa1aa000098cc14cc13cc15c030c02cc028c024c014c00a00a3009f006b006a00390038ff8500c400c3008800870081c032c02ec02ac026c00fc005009d003d003500c00084c02fc02bc027c023c013c00900a2009e006700400033003200be00bd00450044c031c02dc029c025c00ec004009c003c002f00ba0041c011c007c00cc00200050004c012c00800160013c00dc003000a00150012000900ff010000870000000f000d00000a676f6f676c652e636f6d000b000403000102000a003a0038000e000d0019001c000b000c001b00180009000a001a00160017000800060007001400150004000500120013000100020003000f0010001100230000000d00260024060106020603efef050105020503040104020403eeeeeded030103020303020102020203";
 
-    fn config() -> Arc<Config> {
-        Arc::new(Config {
+    fn config() -> SharedConfig {
+        crate::config::shared_config(Config {
             server: ServerConfig {
                 listen: ":9999".to_string(),
                 admin_listen: "127.0.0.1:9998".to_string(),
@@ -822,12 +850,13 @@ mod tests {
 
     #[test]
     fn resolve_tcp_mode_defaults_to_disabled() {
-        assert_eq!(resolve_tcp_mode(&config()).unwrap(), TcpMode::Disabled);
+        let config = config();
+        assert_eq!(resolve_tcp_mode(config.load().as_ref()).unwrap(), TcpMode::Disabled);
     }
 
     #[test]
     fn resolve_tcp_mode_supports_fixed_sni_and_dynamic_modes() {
-        let mut fixed = (*config()).clone();
+        let mut fixed = (*config().load_full()).clone();
         fixed.tcp.mode = "tcp".to_string();
         fixed.tcp.listen = ":4222".to_string();
         assert_eq!(
@@ -837,7 +866,7 @@ mod tests {
             }
         );
 
-        let mut sni = (*config()).clone();
+        let mut sni = (*config().load_full()).clone();
         sni.tcp.mode = "tcp+sni".to_string();
         sni.tcp.listen = ":443".to_string();
         assert_eq!(
@@ -847,11 +876,11 @@ mod tests {
             }
         );
 
-        let mut https_sni = (*config()).clone();
+        let mut https_sni = (*config().load_full()).clone();
         https_sni.tcp.mode = "https+tcp+sni".to_string();
         assert_eq!(resolve_tcp_mode(&https_sni).unwrap(), TcpMode::HttpsTcpSni);
 
-        let mut dynamic = (*config()).clone();
+        let mut dynamic = (*config().load_full()).clone();
         dynamic.tcp.mode = "tcp-dynamic".to_string();
         dynamic.tcp.refresh = "7s".to_string();
         assert_eq!(
@@ -951,6 +980,7 @@ mod tests {
         let header = String::from_utf8_lossy(&buf[..n]).to_string();
         assert!(header.starts_with("PROXY TCP4 127.0.0.1 127.0.0.1 "));
         assert!(header.ends_with("\r\n"));
+    }
 
     #[test]
     fn tcp_target_blocks_loopback_by_default() {
@@ -991,7 +1021,7 @@ mod tests {
                 source: RouteSource::Static,
             }
         };
-        table.update_services(vec![def]);
+        table.load_static(&[def]);
 
         let target = lookup_target(&table, "round-robin", "127.0.0.1:4222");
         assert!(target.is_some(), "Route lookup succeeds");
@@ -1035,7 +1065,7 @@ mod tests {
                 source: RouteSource::Static,
             }
         };
-        table.update_services(vec![def]);
+        table.load_static(&[def]);
 
         let target = lookup_target(&table, "round-robin", "127.0.0.1:4222");
         assert!(target.is_some(), "Route should be found");
@@ -1049,7 +1079,5 @@ mod tests {
             !t.is_host_safe() && t.ssrf_skip_verify(),
             "Loopback blocked by SSRF but ssrfskipverify=true should bypass proxy check"
         );
-    }
-
     }
 }

@@ -294,7 +294,7 @@ impl Table {
     }
 
     fn apply_add(&mut self, def: &RouteDef) {
-        let host = def.src_host().to_string();
+        let host = def.src_host().to_ascii_lowercase();
         let path = if def.src_path().is_empty() {
             "/".to_string()
         } else {
@@ -314,10 +314,8 @@ impl Table {
             parsed_tls: false,
             parsed_protocol: crate::route::target::UpstreamProtocol::Http,
             active_connections: self.active_connections_for(&def.dst),
-            health_tracker: self.cb_config.as_ref()
-                .map(|cb| crate::route::target::TargetHealthTracker::with_config(cb.clone()))
-                .unwrap_or_default(),
-            stats: Arc::new(crate::route::target::TargetStats::default()),
+            health_tracker: self.health_tracker_for(&def.dst),
+            stats: self.stats_for(&def.dst),
         };
         target.pre_parse();
 
@@ -356,7 +354,7 @@ impl Table {
         };
 
         if !def.tags.is_empty() {
-            let host = def.src_host().to_string();
+            let host = def.src_host().to_ascii_lowercase();
             let path = if def.src_path().is_empty() {
                 None
             } else {
@@ -393,7 +391,7 @@ impl Table {
             return;
         }
 
-        let host = def.src_host().to_string();
+        let host = def.src_host().to_ascii_lowercase();
         if let Some(host_routes) = self.routes.get_mut(&host) {
             let path = if def.src_path().is_empty() {
                 None
@@ -419,7 +417,7 @@ impl Table {
     }
 
     fn apply_weight(&mut self, def: &RouteDef) {
-        let host = def.src_host().to_string();
+        let host = def.src_host().to_ascii_lowercase();
 
         if let Some(host_routes) = self.routes.get_mut(&host) {
             let path = if def.src_path().is_empty() {
@@ -497,6 +495,27 @@ impl Table {
             .as_ref()
             .map(|registry| registry.active_connections_for(key))
             .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicU64::new(0)))
+    }
+
+    fn stats_for(&self, key: &str) -> Arc<crate::route::target::TargetStats> {
+        self.stats_registry
+            .as_ref()
+            .map(|registry| registry.stats_for(key))
+            .unwrap_or_else(|| Arc::new(crate::route::target::TargetStats::default()))
+    }
+
+    fn health_tracker_for(&self, key: &str) -> Arc<crate::route::target::TargetHealthTracker> {
+        self.stats_registry
+            .as_ref()
+            .map(|registry| registry.health_tracker_for(key, self.cb_config.as_ref()))
+            .unwrap_or_else(|| {
+                Arc::new(
+                    self.cb_config
+                        .clone()
+                        .map(crate::route::target::TargetHealthTracker::with_config)
+                        .unwrap_or_default(),
+                )
+            })
     }
 
     /// Get the number of routes in the table.
@@ -596,7 +615,7 @@ impl Table {
 pub struct RouteTable {
     inner: ArcSwap<Table>,
     stats_registry: Arc<TargetStatsRegistry>,
-    cb_config: Option<crate::route::target::CircuitBreakerConfig>,
+    cb_config: std::sync::RwLock<Option<crate::route::target::CircuitBreakerConfig>>,
 }
 
 impl RouteTable {
@@ -605,12 +624,12 @@ impl RouteTable {
         Self {
             inner: ArcSwap::from(Arc::new(Table::with_stats_registry(stats_registry.clone()))),
             stats_registry,
-            cb_config: None,
+            cb_config: std::sync::RwLock::new(None),
         }
     }
 
-    pub fn with_cb_config(mut self, cb_config: crate::route::target::CircuitBreakerConfig) -> Self {
-        self.cb_config = Some(cb_config);
+    pub fn with_cb_config(self, cb_config: crate::route::target::CircuitBreakerConfig) -> Self {
+        *self.cb_config.write().unwrap_or_else(|e| e.into_inner()) = Some(cb_config);
         self
     }
 
@@ -640,7 +659,7 @@ impl RouteTable {
         let table = Table::from_definitions_with_stats(
             defs,
             self.stats_registry.clone(),
-            self.cb_config.clone(),
+            self.cb_config(),
         );
         self.swap(table);
     }
@@ -650,7 +669,14 @@ impl RouteTable {
     }
 
     pub fn cb_config(&self) -> Option<crate::route::target::CircuitBreakerConfig> {
-        self.cb_config.clone()
+        self.cb_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn set_cb_config(&self, cb_config: Option<crate::route::target::CircuitBreakerConfig>) {
+        *self.cb_config.write().unwrap_or_else(|e| e.into_inner()) = cb_config;
     }
 }
 
@@ -750,6 +776,69 @@ mod tests {
             table
                 .lookup_route("example.com", "/API/users", "iprefix")
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn test_static_route_host_is_normalized_to_lowercase() {
+        let defs = vec![RouteDef {
+            cmd: RouteCmd::Add,
+            service: "svc".to_string(),
+            src: "Example.COM/".to_string(),
+            dst: "http://127.0.0.1:8080/".to_string(),
+            weight: 0.0,
+            tags: vec![],
+            opts: HashMap::new(),
+            source: crate::route::definition::RouteSource::Static,
+        }];
+
+        let table = Table::from_definitions(&defs);
+        assert!(table.lookup_route("example.com", "/", "prefix").is_some());
+        assert!(table.lookup_route("EXAMPLE.COM", "/", "prefix").is_some());
+    }
+
+    #[test]
+    fn test_target_stats_and_health_are_preserved_across_rebuilds() {
+        let registry = Arc::new(TargetStatsRegistry::new());
+        let defs = vec![RouteDef {
+            cmd: RouteCmd::Add,
+            service: "svc".to_string(),
+            src: "example.com/".to_string(),
+            dst: "http://127.0.0.1:8080/".to_string(),
+            weight: 0.0,
+            tags: vec![],
+            opts: HashMap::new(),
+            source: crate::route::definition::RouteSource::Static,
+        }];
+        let cb_config = crate::route::target::CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 2,
+            recovery_timeout_secs: 30,
+            half_open_max_requests: 1,
+        };
+
+        let first = Table::from_definitions_with_stats(&defs, registry.clone(), Some(cb_config.clone()));
+        let first_target = first.lookup_route("example.com", "/", "prefix").unwrap().targets[0].clone();
+        first_target.stats.record_request(100, 10, true);
+        first_target.health_tracker.circuit_breaker().record_error();
+        first_target.health_tracker.circuit_breaker().record_error();
+        assert_eq!(
+            first_target.health_tracker.circuit_breaker().current_state(),
+            crate::route::target::CircuitState::Open
+        );
+
+        let second = Table::from_definitions_with_stats(&defs, registry, Some(cb_config));
+        let second_target = second.lookup_route("example.com", "/", "prefix").unwrap().targets[0].clone();
+        assert_eq!(
+            second_target
+                .stats
+                .requests_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            second_target.health_tracker.circuit_breaker().current_state(),
+            crate::route::target::CircuitState::Open
         );
     }
 

@@ -3,6 +3,7 @@
 
 use crate::consul::client::{ConsulClient, ConsulConfig, HEALTH_STATUS_PASSING, HealthCheck};
 use crate::route::definition::{RouteCmd, RouteDef};
+use futures::stream::{self, StreamExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -125,24 +126,24 @@ impl ServiceMonitor {
             return Ok(Vec::new());
         }
 
-        // Concurrent catalog queries (like Fabio's goroutine approach)
+        // Concurrent catalog queries, bounded to avoid fan-out spikes on large Consul clusters.
+        const MAX_CATALOG_LOOKUP_CONCURRENCY: usize = 32;
         let service_names: Vec<String> = passing_services.keys().cloned().collect();
-        let fetch_tasks: Vec<_> = service_names
-            .iter()
-            .map(|name| {
-                let client = self.client.clone();
-                let name_clone = name.clone();
-                async move { client.get_catalog_service(&name_clone).await }
-            })
-            .collect();
-
-        let catalog_results = futures::future::join_all(fetch_tasks).await;
+        let catalog_results: Vec<_> = stream::iter(service_names.iter().cloned().map(|service_name| {
+            let client = self.client.clone();
+            async move {
+                let result = client.get_catalog_service(&service_name).await;
+                (service_name, result)
+            }
+        }))
+        .buffer_unordered(MAX_CATALOG_LOOKUP_CONCURRENCY)
+        .collect()
+        .await;
 
         let mut config = Vec::new();
         let mut failures = Vec::new();
-        for (idx, result) in catalog_results.into_iter().enumerate() {
-            let service_name = &service_names[idx];
-            let service_ids = passing_services.get(service_name).unwrap();
+        for (service_name, result) in catalog_results {
+            let service_ids = passing_services.get(&service_name).unwrap();
 
             match result {
                 Ok(instances) => {
@@ -164,7 +165,7 @@ impl ServiceMonitor {
                                     tag,
                                     address,
                                     instance.service_port,
-                                    service_name,
+                                    &service_name,
                                 )
                             {
                                 config.push(route_def);

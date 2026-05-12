@@ -291,7 +291,7 @@ impl BackgroundService for ConsulClientCaBackgroundService {
 }
 
 struct AdminBackgroundService {
-    config: Arc<Config>,
+    config: sentirum_lb::config::SharedConfig,
     route_table: Arc<ManagedRouteTable>,
     tls_store: Option<Arc<DynamicCertStore>>,
     client_ca_store: Option<Arc<DynamicClientCaStore>>,
@@ -480,7 +480,8 @@ fn main() {
         .expect("Failed to create initialisation runtime");
 
     // Create proxy service
-    let proxy_handler = SentirumProxy::new(managed_table.clone(), Arc::new(config.clone()));
+    let runtime_config = sentirum_lb::config::shared_config(config.clone());
+    let proxy_handler = SentirumProxy::new(managed_table.clone(), runtime_config.clone());
     let mut lb_service = pingora::proxy::http_proxy_service(&server.configuration, proxy_handler);
     if config.server.workers > 0 {
         lb_service.threads = Some(config.server.workers);
@@ -727,14 +728,15 @@ fn main() {
 
     server.add_service(lb_service);
 
-    let shared_config = Arc::new(config.clone());
+    let service_config = Arc::new(config.clone());
+    let shared_config = runtime_config;
 
     if config.consul.service_discovery || config.consul.kv_watching {
         let mut consul_service = background_service(
             "consul watcher",
             ConsulBackgroundService {
                 route_table: managed_table.clone(),
-                config: shared_config.clone(),
+                config: service_config.clone(),
             },
         );
         consul_service.threads = Some(1);

@@ -112,7 +112,10 @@ impl LogBuffer {
                 }
             }
             if let Some(s) = search {
-                if !entry.message.to_lowercase().contains(&s.to_lowercase()) {
+                let query = s.to_lowercase();
+                let haystack = format!("{} {} {}", entry.level, entry.target, entry.message)
+                    .to_lowercase();
+                if !haystack.contains(&query) {
                     continue;
                 }
             }
@@ -340,6 +343,28 @@ mod tests {
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].level, "WARN");
         assert_eq!(recent[1].level, "ERROR");
+    }
+
+    #[test]
+    fn ring_buffer_search_matches_target_and_level() {
+        let buffer = LogBuffer::new();
+
+        buffer.push(LogEntry {
+            ts: 1,
+            level: "INFO".to_string(),
+            message: "access request".to_string(),
+            target: "sentirum_lb::proxy::handler".to_string(),
+        });
+        buffer.push(LogEntry {
+            ts: 2,
+            level: "WARN".to_string(),
+            message: "watcher backoff".to_string(),
+            target: "sentirum_lb::consul::watcher".to_string(),
+        });
+
+        assert_eq!(buffer.recent(10, None, Some("proxy::handler")).len(), 1);
+        assert_eq!(buffer.recent(10, None, Some("warn")).len(), 1);
+        assert_eq!(buffer.recent(10, None, Some("backoff"))[0].level, "WARN");
     }
 
     #[test]
