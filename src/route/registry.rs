@@ -27,6 +27,21 @@ impl RouteRegistry {
         self.static_routes = routes;
     }
 
+    /// Get current static routes
+    pub fn static_routes(&self) -> &[RouteDef] {
+        &self.static_routes
+    }
+
+    /// Get current KV routes
+    pub fn kv_routes(&self) -> &[RouteDef] {
+        &self.kv_routes
+    }
+
+    /// Get current service routes
+    pub fn service_routes(&self) -> &[RouteDef] {
+        &self.service_routes
+    }
+
     /// Update KV routes
     pub fn update_kv(&mut self, routes: Vec<RouteDef>) {
         self.kv_routes = routes;
@@ -80,6 +95,20 @@ impl ManagedRouteTable {
         });
         let mut registry = (**self.registry.load()).clone();
         registry.set_static(mark_sources(defs.to_vec(), RouteSource::Static));
+        self.rebuild_and_swap(&registry, "static");
+    }
+
+    /// Append additional static routes to the existing set.
+    /// Preserves existing KV and service-discovery routes.
+    pub fn append_static(&self, new_defs: Vec<RouteDef>) {
+        let _guard = self.update_lock.lock().unwrap_or_else(|e| {
+            tracing::warn!("Route update lock was poisoned; recovering");
+            e.into_inner()
+        });
+        let mut registry = (**self.registry.load()).clone();
+        let mut existing = registry.static_routes.clone();
+        existing.extend(mark_sources(new_defs, RouteSource::Static));
+        registry.set_static(existing);
         self.rebuild_and_swap(&registry, "static");
     }
 
@@ -165,7 +194,10 @@ impl ManagedRouteTable {
             cb_config,
         );
         self.inner.swap(table);
-        tracing::info!(enabled = self.inner.cb_config().is_some(), "Circuit breaker configuration updated");
+        tracing::info!(
+            enabled = self.inner.cb_config().is_some(),
+            "Circuit breaker configuration updated"
+        );
     }
 
     /// Get current snapshot of the routing table (for hot path)
@@ -224,12 +256,12 @@ mod tests {
         let snapshot = table.get();
         assert!(
             snapshot
-                .lookup_route("example.com", "/", "prefix")
+                .lookup_route("example.com", "/", crate::route::table::MatcherKind::Prefix)
                 .is_some()
         );
         assert!(
             snapshot
-                .lookup_route("kv.example.com", "/", "prefix")
+                .lookup_route("kv.example.com", "/", crate::route::table::MatcherKind::Prefix)
                 .is_some()
         );
     }
@@ -243,10 +275,10 @@ mod tests {
         let snapshot = table.get();
         assert!(
             snapshot
-                .lookup_route("kv.example.com", "/", "prefix")
+                .lookup_route("kv.example.com", "/", crate::route::table::MatcherKind::Prefix)
                 .is_some()
         );
-        assert!(snapshot.lookup_route("", "/api/users", "prefix").is_some());
+        assert!(snapshot.lookup_route("", "/api/users", crate::route::table::MatcherKind::Prefix).is_some());
     }
 
     #[test]
@@ -255,7 +287,7 @@ mod tests {
         table.update_services(vec![def("svc-a", "/", "http://10.0.0.1:8080/")]);
 
         let first_snapshot = table.get();
-        let first_route = first_snapshot.lookup_route("", "/", "prefix").unwrap();
+        let first_route = first_snapshot.lookup_route("", "/", crate::route::table::MatcherKind::Prefix).unwrap();
         let first_target = first_route.targets[0].clone();
         first_target
             .active_connections
@@ -264,7 +296,7 @@ mod tests {
         table.update_services(vec![def("svc-a", "/", "http://10.0.0.1:8080/")]);
 
         let second_snapshot = table.get();
-        let second_route = second_snapshot.lookup_route("", "/", "prefix").unwrap();
+        let second_route = second_snapshot.lookup_route("", "/", crate::route::table::MatcherKind::Prefix).unwrap();
         let second_target = second_route.targets[0].clone();
 
         assert_eq!(
@@ -284,7 +316,7 @@ mod tests {
         ]);
 
         let first_snapshot = table.get();
-        let first_route = first_snapshot.lookup_route("", "/", "prefix").unwrap();
+        let first_route = first_snapshot.lookup_route("", "/", crate::route::table::MatcherKind::Prefix).unwrap();
         first_route.targets[0]
             .active_connections
             .store(10, std::sync::atomic::Ordering::Relaxed);
@@ -298,7 +330,7 @@ mod tests {
         ]);
 
         let second_snapshot = table.get();
-        let second_route = second_snapshot.lookup_route("", "/", "prefix").unwrap();
+        let second_route = second_snapshot.lookup_route("", "/", crate::route::table::MatcherKind::Prefix).unwrap();
         let picker = LeastConnectionsPicker;
         let picked = picker
             .pick(

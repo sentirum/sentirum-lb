@@ -1,5 +1,5 @@
 use crate::proxy::tls::{
-    DynamicClientCaCertificateStatus, LoadedCertificate, TlsError, MAX_CONSUL_CERT_ENTRY_BYTES,
+    DynamicClientCaCertificateStatus, LoadedCertificate, MAX_CONSUL_CERT_ENTRY_BYTES, TlsError,
 };
 use pingora::tls::{
     nid::Nid,
@@ -112,14 +112,15 @@ pub(super) fn normalize_dns_name(name: &str) -> String {
     name.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
-pub(super) fn parse_certificate_chain(input: &[u8]) -> Result<Vec<X509>, TlsError> {
+pub(crate) fn parse_certificate_chain(input: &[u8]) -> Result<Vec<X509>, TlsError> {
     let text = std::str::from_utf8(input)
         .map_err(|e| TlsError::ConfigError(format!("certificate PEM is not valid UTF-8: {e}")))?;
     let mut certs = Vec::new();
     for block in pem_blocks(text) {
         if block.kind == "CERTIFICATE" {
-            let cert = X509::from_pem(block.pem.as_bytes())
-                .map_err(|e| TlsError::ConfigError(format!("invalid CERTIFICATE PEM block: {e}")))?;
+            let cert = X509::from_pem(block.pem.as_bytes()).map_err(|e| {
+                TlsError::ConfigError(format!("invalid CERTIFICATE PEM block: {e}"))
+            })?;
             certs.push(cert);
         }
     }
@@ -168,7 +169,9 @@ pub(super) fn parse_client_ca_certificates(
     Ok(certs)
 }
 
-pub(super) fn load_pem_entries_from_path(path: &str) -> Result<BTreeMap<String, Vec<u8>>, TlsError> {
+pub(super) fn load_pem_entries_from_path(
+    path: &str,
+) -> Result<BTreeMap<String, Vec<u8>>, TlsError> {
     let metadata = std::fs::metadata(path)
         .map_err(|e| TlsError::ConfigError(format!("failed to stat PEM path '{path}': {e}")))?;
 
@@ -342,7 +345,7 @@ fn pem_blocks(input: &str) -> Vec<PemBlock<'_>> {
     blocks
 }
 
-pub(super) fn asn1_time_to_unix_seconds(time: &impl std::fmt::Display) -> Option<u64> {
+pub(crate) fn asn1_time_to_unix_seconds(time: &impl std::fmt::Display) -> Option<u64> {
     let value = time.to_string();
     let mut parts = value.split_whitespace();
     let month = parse_month(parts.next()?)?;
@@ -379,7 +382,7 @@ fn parse_month(value: &str) -> Option<Month> {
     }
 }
 
-pub(super) fn now_unix() -> u64 {
+pub(crate) fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

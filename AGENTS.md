@@ -11,10 +11,12 @@ This file gives coding agents and contributors a fast map of the repository and 
 - `src/main.rs`
   - loads optional config and CLI overrides
   - wires Pingora server settings
-  - starts proxy listener, optional TLS listener, admin API, and Consul watchers
+  - starts proxy listener, optional TLS listeners (primary + additional), admin API, and Consul watchers
+  - each file-based TLS listener gets its own `FileCertWatcherService` background service for hot-reload
 
 - `src/proxy/handler.rs`
   - hot-path request handling
+  - reads runtime config via `arc_swap::ArcSwap` on every request (strategy, matcher, timeouts, CB, rate-limit all live-switchable)
   - route lookup
   - upstream peer construction
   - SSRF checks
@@ -27,8 +29,15 @@ This file gives coding agents and contributors a fast map of the repository and 
   - `definition.rs`: route command model
   - `target.rs`: upstream target model, SSRF helpers, circuit breaker, and DNS cache
   - `table.rs`: immutable route table snapshots and matchers
-  - `registry.rs`: merge static, KV, and service-discovery routes safely
-  - `picker.rs`: balancing strategies
+  - `registry.rs`: merge static, KV, and service-discovery routes safely; `append_static()` for live route addition
+  - `picker.rs`: balancing strategies (round-robin, random, least-connections)
+
+- `src/proxy/tls/`
+  - `config.rs`: TLS mode resolution, client auth config
+  - `selector.rs`: SNI-based cert selection; `ServerCertificateSource::Static` wraps `Arc<ArcSwap<LoadedCertificate>>` for hot-reload
+  - `watcher.rs`: `FileCertWatcherService` polls cert+key file mtime every 30s, reloads on change
+  - `helpers.rs`: PEM parsing, certificate name extraction, ASN1 time conversion
+  - `ocsp.rs`: OCSP stapling infrastructure
 
 - `src/consul/`
   - `client.rs`: Consul HTTP client and blocking query URLs
@@ -36,6 +45,10 @@ This file gives coding agents and contributors a fast map of the repository and 
 
 - `src/admin/api.rs`
   - operational inspection endpoints
+  - `PUT /admin/config` — runtime hot-reload of proxy settings (strategy, matcher, timeouts, CB, health check, rate limit, logging)
+  - `POST /admin/routes` — live route addition via Fabio-style commands
+  - `DELETE /admin/routes/static` — clear static routes
+  - `POST /admin/config/reset` — reset to startup config
   - `/admin` redirect to `/admin/` (trailing slash)
   - SSE URL percent-decode for session token auth
 - `src/metrics/prometheus.rs`
@@ -88,11 +101,25 @@ These config values are live and should stay wired unless intentionally redesign
 - `tls.cert_path`
 - `tls.key_path`
 - `tls.listen`
+- `tls_listeners` — array of additional TLS listener configs; each supports its own cert, listen address, client auth (mTLS), and cert hot-reload
+- `proxy.health_check_interval`
+- `proxy.health_check_timeout`
+- `proxy.health_check_fall`
+- `proxy.health_check_rise`
+- `proxy.health_check_path`
+- `proxy.health_check_tls_skip_verify`
+- `proxy.rate_limit_per_target`
+- `proxy.rate_limit_burst`
 - `consul.graceful_shutdown`
 
 If you introduce a new config field, wire it into runtime behavior and cover it with tests when practical.
 
-## Route and proxy semantics
+## Circuit breaker behavior details
+
+- **Minimum sample threshold**: Circuit opens when `error_rate >= error_threshold%` AND `window_len >= min_samples`. `min_samples = max(window_size / 4, 5)`. This ensures the circuit can open even before the window is full if error rate is high enough (e.g., 100% failure on first 25 requests with threshold=50 and window=100)
+- **Half-open probe timeout**: If a half-open probe's callback is lost (DNS failure, connection drop without logging), the `half_open_in_flight` flag is auto-reset after `recovery_timeout` seconds. This prevents permanent HalfOpen stuck state
+- **Check ordering**: Rate limit → Circuit breaker check → Connection slot acquire. CB is checked before acquiring connection slots to avoid unnecessary acquire/release cycles
+- **Matcher hot path**: `MatcherKind` enum (not string) is used on the hot path for branch-prediction-friendly dispatch
 
 - No-match responses use `proxy.no_route_status`
 - Circuit breaker: when `proxy.circuit_breaker_enabled` is true, failing upstream targets are temporarily bypassed with 503; when a picked target has an open circuit breaker, the proxy attempts to find a healthy fallback on the same route before returning 503
@@ -157,9 +184,33 @@ If you change user-facing behavior, also update:
 ## Known non-goals / placeholders
 
 - Raw TCP proxy mode supports plain TCP, TCP+SNI routing, dynamic listeners, and PROXY protocol v1; production-tested with NATS protocol (INFO, PING/PONG, CONNECT/SUB/PUB/UNSUB, queue groups, 50KB payloads, 20 concurrent connections)
-- Active health checking (probing) is not implemented — passive health checking via circuit breaker only
-- Per-route rate limiting is not implemented — `max_connections` provides basic per-target enforcement
-- OCSP stapling is not explicitly configured (may be handled by rustls defaults)
+
+## Implemented features (recently added)
+
+- **Active health checking**: HTTP/TCP probes via `src/proxy/health.rs`; config: `proxy.health_check_interval`, `proxy.health_check_timeout`, `proxy.health_check_rise`, `proxy.health_check_fall`, `proxy.health_check_path`; `is_probe_healthy()` integrated into proxy hot path via `lookup_target()`; probe health status works alongside circuit breaker; all HC params are runtime-switchable via `PUT /admin/config`
+- **Token Bucket rate limiting (per-target)**: `parking_lot::Mutex<BucketState>` based via `src/proxy/ratelimit.rs`; config: `proxy.rate_limit_per_target` (0=disabled), `proxy.rate_limit_burst`; per-target override via opts `ratelimit=X burst=Y`; returns 429 when exceeded; runtime-switchable via `PUT /admin/config`
+- **Multi-TLS listener**: `[[tls_listeners]]` in config for additional TLS endpoints (e.g., mTLS on a separate port); each listener has independent cert, client auth, and hot-reload; primary `[tls]` section is always listener 0
+- **File-based TLS cert hot-reload**: `FileCertWatcherService` in `src/proxy/tls/watcher.rs` polls cert+key file mtime every 30s and atomically swaps via `ArcSwap<LoadedCertificate>`; new TLS handshakes immediately use refreshed cert; manual reload via `POST /admin/certs/reload`
+- **Dynamic route management**: `POST /admin/routes` for live Fabio-style route addition; `DELETE /admin/routes/static` to clear static routes; routes appear in dashboard immediately
+- **OCSP stapling infrastructure**: `src/proxy/ocsp.rs`; fetcher, cache, and config wiring implemented; actual TLS handshake stapling depends on Pingora exposing `SSL_set_ocsp_resp` callback
+
+## Runtime hot-reloadable settings (via `PUT /admin/config`)
+
+These settings can be changed at runtime without restart:
+- `proxy.strategy` (round-robin, random, least-connections)
+- `proxy.matcher` (prefix, iprefix, glob, exact)
+- `proxy.request_id_header`
+- `proxy.no_route_status`
+- `proxy.*_timeout` (connect, read, write, idle)
+- `proxy.max_connections`
+- `proxy.dns_cache_ttl`, `proxy.dns_negative_cache_ttl`
+- `proxy.circuit_breaker_*` (enabled, error_threshold, window_size, recovery_timeout, half_open_max)
+- `proxy.upstream_h2_max_streams`, `proxy.upstream_h2_ping_interval`
+- `proxy.health_check_*` (interval, timeout, fall, rise, path, tls_skip_verify)
+- `proxy.rate_limit_per_target`, `proxy.rate_limit_burst`
+- `logging.level`, `logging.format`
+
+Not hot-reloadable (require restart): `pool_size`, `enable_h2c`, `trusted_proxies`
 
 ## Commit hygiene
 

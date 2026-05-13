@@ -8,16 +8,16 @@ pub(super) fn configure_peer_options(
     target: &crate::route::target::Target,
     config: &Config,
 ) {
-    peer.options.connection_timeout = Some(Config::parse_duration(&config.proxy.connect_timeout));
-    peer.options.read_timeout = Some(Config::parse_duration(&config.proxy.read_timeout));
-    peer.options.write_timeout = Some(Config::parse_duration(&config.proxy.write_timeout));
-    peer.options.idle_timeout = Some(Config::parse_duration(&config.proxy.idle_timeout));
+    let timeouts = config.parsed_timeouts();
+    peer.options.connection_timeout = Some(timeouts.connect);
+    peer.options.read_timeout = Some(timeouts.read);
+    peer.options.write_timeout = Some(timeouts.write);
+    peer.options.idle_timeout = Some(timeouts.idle);
     peer.options.alpn = target.preferred_alpn();
 
     if target.requires_http2() {
         peer.options.max_h2_streams = config.proxy.upstream_h2_max_streams.max(1);
-        peer.options.h2_ping_interval =
-            Config::parse_optional_duration(&config.proxy.upstream_h2_ping_interval);
+        peer.options.h2_ping_interval = timeouts.h2_ping_interval;
     }
 
     if target.upstream_tls() {

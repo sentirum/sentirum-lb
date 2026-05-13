@@ -8,6 +8,28 @@ pub fn shared_config(config: Config) -> SharedConfig {
     Arc::new(arc_swap::ArcSwap::from_pointee(config))
 }
 
+/// Pre-parsed timeout durations so the proxy hot path doesn't re-parse strings per request.
+#[derive(Debug, Clone)]
+pub struct ParsedProxyTimeouts {
+    pub connect: Duration,
+    pub read: Duration,
+    pub write: Duration,
+    pub idle: Duration,
+    pub h2_ping_interval: Option<Duration>,
+}
+
+impl ParsedProxyTimeouts {
+    pub fn from_proxy_config(cfg: &ProxyConfig) -> Self {
+        Self {
+            connect: Config::parse_duration(&cfg.connect_timeout),
+            read: Config::parse_duration(&cfg.read_timeout),
+            write: Config::parse_duration(&cfg.write_timeout),
+            idle: Config::parse_duration(&cfg.idle_timeout),
+            h2_ping_interval: Config::parse_optional_duration(&cfg.upstream_h2_ping_interval),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub server: ServerConfig,
@@ -18,8 +40,19 @@ pub struct Config {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub tls: TlsConfig,
+    /// Additional TLS listeners. Each entry defines an independent TLS endpoint
+    /// with its own certificate, listen address, and optional client auth.
+    ///
+    /// The legacy `[tls]` section is always listener 0 for backward compatibility.
+    /// `[[tls_listeners]]` entries become listeners 1..N.
+    #[serde(default)]
+    pub tls_listeners: Vec<TlsConfig>,
     #[serde(default)]
     pub tcp: TcpConfig,
+    /// Pre-parsed proxy timeouts (lazily computed on first access).
+    /// Avoids re-parsing duration strings on every request.
+    #[serde(skip)]
+    pub parsed_timeouts: std::sync::OnceLock<ParsedProxyTimeouts>,
 }
 
 /// Admin user for dashboard authentication
@@ -109,8 +142,6 @@ pub struct ConsulConfig {
     /// When true, services with "warning" checks are also considered healthy.
     #[serde(default)]
     pub include_warning: bool,
-
-
 }
 
 fn default_consul_address() -> String {
@@ -209,7 +240,7 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
     /// Enable circuit breaker for upstream failure protection.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub circuit_breaker_enabled: bool,
     /// Error threshold percentage for circuit breaker (0-100).
     /// When this percentage of requests in the window fail, circuit opens.
@@ -242,6 +273,14 @@ pub struct ProxyConfig {
     /// Rate limit burst allowance.
     #[serde(default = "default_rate_limit_burst")]
     pub rate_limit_burst: usize,
+    /// HTTP path for active health checks (default: "/").
+    #[serde(default = "default_health_check_path")]
+    pub health_check_path: String,
+    /// Skip TLS certificate verification for HTTPS health check probes.
+    /// **Warning:** Enabling this is insecure and should only be used for
+    /// internal health checks where TLS verification is not possible.
+    #[serde(default)]
+    pub health_check_tls_skip_verify: bool,
 }
 
 impl Default for ProxyConfig {
@@ -274,6 +313,8 @@ impl Default for ProxyConfig {
             health_check_rise: default_health_check_rise(),
             rate_limit_per_target: 0,
             rate_limit_burst: default_rate_limit_burst(),
+            health_check_path: default_health_check_path(),
+            health_check_tls_skip_verify: false,
         }
     }
 }
@@ -330,6 +371,10 @@ fn default_health_check_rise() -> usize {
 
 fn default_rate_limit_burst() -> usize {
     100
+}
+
+fn default_health_check_path() -> String {
+    "/".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -426,6 +471,11 @@ pub struct TlsConfig {
     /// Fabio-compatible CA upgrade CN for self-signed/non-CA client auth certs.
     #[serde(default)]
     pub client_ca_upgrade_cn: String,
+    /// Enable OCSP stapling (default: false).
+    /// When enabled, the stapler fetches and caches OCSP responses.
+    /// Note: actual TLS stapling depends on Pingora exposing the SSL callback.
+    #[serde(default)]
+    pub ocsp_stapling_enabled: bool,
 }
 
 fn default_tls_consul_cert_prefix() -> String {
@@ -447,11 +497,21 @@ impl Default for TlsConfig {
             client_ca_path: String::new(),
             client_ca_consul_prefix: String::new(),
             client_ca_upgrade_cn: String::new(),
+            ocsp_stapling_enabled: false,
         }
     }
 }
 
 impl Config {
+    /// Return the pre-parsed timeouts (no per-request string parsing).
+    /// Lazily computes on first call; cached for the lifetime of this Config.
+    /// When config is swapped (ArcSwap), a new Config is created with an empty
+    /// OnceLock, so it re-computes automatically with the new values.
+    #[inline]
+    pub fn parsed_timeouts(&self) -> &ParsedProxyTimeouts {
+        self.parsed_timeouts.get_or_init(|| ParsedProxyTimeouts::from_proxy_config(&self.proxy))
+    }
+
     pub fn parse_optional_duration(s: &str) -> Option<Duration> {
         let s = s.trim();
         if s.is_empty() {
@@ -472,12 +532,14 @@ impl Config {
             s.trim_end_matches('m')
                 .parse::<u64>()
                 .ok()
-                .map(|m| Duration::from_secs(m * 60))
+                .and_then(|m| m.checked_mul(60))
+                .map(Duration::from_secs)
         } else if s.ends_with('h') {
             s.trim_end_matches('h')
                 .parse::<u64>()
                 .ok()
-                .map(|h| Duration::from_secs(h * 60 * 60))
+                .and_then(|h| h.checked_mul(3600))
+                .map(Duration::from_secs)
         } else {
             None
         };
@@ -506,12 +568,42 @@ impl Config {
     pub fn validate(&self) -> Option<String> {
         let mut errors = Vec::new();
 
-        validate_duration_field(&mut errors, "server.drain_timeout", &self.server.drain_timeout, false);
-        validate_duration_field(&mut errors, "consul.poll_interval", &self.consul.poll_interval, true);
-        validate_duration_field(&mut errors, "proxy.connect_timeout", &self.proxy.connect_timeout, true);
-        validate_duration_field(&mut errors, "proxy.read_timeout", &self.proxy.read_timeout, true);
-        validate_duration_field(&mut errors, "proxy.write_timeout", &self.proxy.write_timeout, true);
-        validate_duration_field(&mut errors, "proxy.idle_timeout", &self.proxy.idle_timeout, true);
+        validate_duration_field(
+            &mut errors,
+            "server.drain_timeout",
+            &self.server.drain_timeout,
+            false,
+        );
+        validate_duration_field(
+            &mut errors,
+            "consul.poll_interval",
+            &self.consul.poll_interval,
+            true,
+        );
+        validate_duration_field(
+            &mut errors,
+            "proxy.connect_timeout",
+            &self.proxy.connect_timeout,
+            true,
+        );
+        validate_duration_field(
+            &mut errors,
+            "proxy.read_timeout",
+            &self.proxy.read_timeout,
+            true,
+        );
+        validate_duration_field(
+            &mut errors,
+            "proxy.write_timeout",
+            &self.proxy.write_timeout,
+            true,
+        );
+        validate_duration_field(
+            &mut errors,
+            "proxy.idle_timeout",
+            &self.proxy.idle_timeout,
+            true,
+        );
         if !self.proxy.upstream_h2_ping_interval.trim().is_empty() {
             validate_duration_field(
                 &mut errors,
@@ -520,8 +612,18 @@ impl Config {
                 true,
             );
         }
-        validate_duration_field(&mut errors, "proxy.health_check_interval", &self.proxy.health_check_interval, true);
-        validate_duration_field(&mut errors, "proxy.health_check_timeout", &self.proxy.health_check_timeout, true);
+        validate_duration_field(
+            &mut errors,
+            "proxy.health_check_interval",
+            &self.proxy.health_check_interval,
+            true,
+        );
+        validate_duration_field(
+            &mut errors,
+            "proxy.health_check_timeout",
+            &self.proxy.health_check_timeout,
+            true,
+        );
         validate_duration_field(&mut errors, "tcp.refresh", &self.tcp.refresh, true);
 
         // Validate circuit breaker threshold (0-100)
@@ -570,8 +672,22 @@ impl Config {
             }
         }
 
+        // Validate health_check_path starts with '/' and doesn't contain traversal
+        if !self.proxy.health_check_path.starts_with('/') {
+            errors.push(format!(
+                "health_check_path must start with '/', got '{}'",
+                self.proxy.health_check_path
+            ));
+        }
+        if self.proxy.health_check_path.contains("..") {
+            errors.push(format!(
+                "health_check_path must not contain '..' (path traversal), got '{}'",
+                self.proxy.health_check_path
+            ));
+        }
+
         // Validate admin token length (security warning)
-        if self.server.admin_token.len() > 0 && self.server.admin_token.len() < 16 {
+        if !self.server.admin_token.is_empty() && self.server.admin_token.len() < 16 {
             tracing::warn!(
                 "admin_token is {} characters, recommend >= 16 for security",
                 self.server.admin_token.len()
@@ -589,15 +705,67 @@ impl Config {
         }
 
         // Validate consul_cert_prefix format
-        if !self.tls.consul_cert_prefix.is_empty() && !self.tls.consul_cert_prefix.starts_with('/') {
+        if !self.tls.consul_cert_prefix.is_empty() && !self.tls.consul_cert_prefix.starts_with('/')
+        {
             errors.push("tls.consul_cert_prefix must start with '/'".to_string());
         }
 
         // Validate client_auth values
         if !self.tls.client_auth.is_empty()
             && self.tls.client_auth != "optional"
-            && self.tls.client_auth != "required" {
+            && self.tls.client_auth != "required"
+        {
             errors.push("tls.client_auth must be 'optional', 'required', or empty".to_string());
+        }
+
+        // Validate additional TLS listeners
+        for (i, listener) in self.tls_listeners.iter().enumerate() {
+            let tag = format!("tls_listeners[{}]", i);
+
+            // Must have a listen address
+            if listener.listen.trim().is_empty() {
+                errors.push(format!("{tag}.listen is required for additional TLS listeners"));
+            }
+
+            // Validate source
+            if listener.source == "file" {
+                if listener.cert_path.is_empty() {
+                    errors.push(format!("{tag}.cert_path required when {tag}.source='file'"));
+                }
+                if listener.key_path.is_empty() {
+                    errors.push(format!("{tag}.key_path required when {tag}.source='file'"));
+                }
+            }
+
+            // Validate client_auth values
+            if !listener.client_auth.is_empty()
+                && listener.client_auth != "optional"
+                && listener.client_auth != "required"
+            {
+                errors.push(format!(
+                    "{tag}.client_auth must be 'optional', 'required', or empty"
+                ));
+            }
+
+            // Validate consul_cert_prefix
+            if !listener.consul_cert_prefix.is_empty()
+                && !listener.consul_cert_prefix.starts_with('/')
+            {
+                errors.push(format!("{tag}.consul_cert_prefix must start with '/'"));
+            }
+
+            // Check for duplicate listen addresses
+            if listener.listen == self.tls.listen {
+                errors.push(format!("{tag}.listen '{}' conflicts with primary [tls].listen", listener.listen));
+            }
+            for (j, prev) in self.tls_listeners[..i].iter().enumerate() {
+                if listener.listen == prev.listen {
+                    errors.push(format!(
+                        "{tag}.listen '{}' conflicts with tls_listeners[{j}].listen",
+                        listener.listen
+                    ));
+                }
+            }
         }
 
         // Validate workers
@@ -646,7 +814,8 @@ fn validate_cidr(cidr: &str) -> Result<(), String> {
         return Err("empty CIDR".to_string());
     }
 
-    let (ip, prefix_str) = cidr.split_once('/')
+    let (ip, prefix_str) = cidr
+        .split_once('/')
         .ok_or_else(|| format!("CIDR '{}' missing '/' separator", cidr))?;
 
     // Validate IP part
@@ -654,7 +823,8 @@ fn validate_cidr(cidr: &str) -> Result<(), String> {
         .map_err(|e| format!("invalid IP '{}': {}", ip, e))?;
 
     // Validate prefix
-    let prefix: u8 = prefix_str.parse()
+    let prefix: u8 = prefix_str
+        .parse()
         .map_err(|_| format!("prefix '{}' not a number", prefix_str))?;
 
     // Check prefix range for the IP family
@@ -664,7 +834,9 @@ fn validate_cidr(cidr: &str) -> Result<(), String> {
     if prefix > max_prefix {
         return Err(format!(
             "prefix {} > {} for {}",
-            prefix, max_prefix, if ip_is_v4 { "IPv4" } else { "IPv6" }
+            prefix,
+            max_prefix,
+            if ip_is_v4 { "IPv4" } else { "IPv6" }
         ));
     }
 
@@ -729,11 +901,15 @@ mod tests {
             proxy: ProxyConfig::default(),
             logging: LoggingConfig::default(),
             tls: TlsConfig::default(),
+            tls_listeners: Vec::new(),
+                parsed_timeouts: Default::default(),
             tcp: TcpConfig::default(),
         };
         config.proxy.connect_timeout = "abc".to_string();
 
-        let error = config.validate().expect("invalid timeout should fail validation");
+        let error = config
+            .validate()
+            .expect("invalid timeout should fail validation");
         assert!(error.contains("proxy.connect_timeout"));
     }
 
@@ -770,6 +946,8 @@ mod tests {
         assert_eq!(proxy.health_check_timeout, "5s");
         assert_eq!(proxy.health_check_fall, 3);
         assert_eq!(proxy.health_check_rise, 2);
+        assert_eq!(proxy.health_check_path, "/");
+        assert!(!proxy.health_check_tls_skip_verify);
     }
 
     #[test]
@@ -835,11 +1013,11 @@ tags = []
         .to_string();
 
         let mut config: Config = toml::from_str(&toml_str).unwrap();
-        config.proxy.circuit_breaker_error_threshold = 150;  // > 100
+        config.proxy.circuit_breaker_error_threshold = 150; // > 100
         assert!(config.validate().is_some());
 
         let mut config: Config = toml::from_str(&toml_str).unwrap();
-        config.proxy.circuit_breaker_window_size = 0;  // must be > 0
+        config.proxy.circuit_breaker_window_size = 0; // must be > 0
         assert!(config.validate().is_some());
 
         let mut config: Config = toml::from_str(&toml_str).unwrap();
@@ -873,5 +1051,143 @@ tags = []
 
         let config: Config = toml::from_str(&toml_str).unwrap();
         assert!(config.validate().is_none());
+    }
+
+    #[test]
+    fn config_validate_rejects_invalid_health_check_path() {
+        let mut config = Config {
+            server: ServerConfig {
+                listen: ":9999".to_string(),
+                admin_listen: "127.0.0.1:9998".to_string(),
+                admin_token: String::new(),
+                admin_users: vec![],
+                workers: 0,
+                drain_timeout: "30s".to_string(),
+            },
+            consul: ConsulConfig {
+                address: "127.0.0.1:8500".to_string(),
+                scheme: "http".to_string(),
+                token: String::new(),
+                kv_prefix: "/sentirum-lb/routes".to_string(),
+                tag_prefix: "urlprefix-".to_string(),
+                poll_interval: "0s".to_string(),
+                service_discovery: true,
+                kv_watching: true,
+                service_whitelist: Vec::new(),
+                service_blacklist: Vec::new(),
+                graceful_shutdown: true,
+                include_warning: false,
+            },
+            proxy: ProxyConfig::default(),
+            logging: LoggingConfig::default(),
+            tls: TlsConfig::default(),
+                parsed_timeouts: Default::default(),
+            tls_listeners: Vec::new(),
+            tcp: TcpConfig::default(),
+        };
+        config.proxy.health_check_path = "../../etc/passwd".to_string();
+        let error = config.validate().expect("should have validation error");
+        assert!(error.contains("health_check_path"));
+    }
+
+    #[test]
+    fn config_validate_rejects_tls_listeners_with_empty_listen() {
+        let toml_str = r#"
+[server]
+listen = ":9999"
+admin_listen = "127.0.0.1:9998"
+admin_token = "test-token-12345678"
+admin_users = []
+workers = 0
+drain_timeout = "30s"
+
+[consul]
+address = "127.0.0.1:8500"
+services = []
+tags = []
+
+[[tls_listeners]]
+cert_path = "/some/cert.pem"
+key_path = "/some/key.pem"
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let error = config.validate().expect("should have validation error");
+        assert!(
+            error.contains("tls_listeners[0].listen is required"),
+            "expected tls_listeners[0].listen error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn config_validate_rejects_duplicate_tls_listener_addresses() {
+        let toml_str = r#"
+[server]
+listen = ":9999"
+admin_listen = "127.0.0.1:9998"
+admin_token = "test-token-12345678"
+admin_users = []
+workers = 0
+drain_timeout = "30s"
+
+[consul]
+address = "127.0.0.1:8500"
+services = []
+tags = []
+
+[tls]
+cert_path = "/some/cert.pem"
+key_path = "/some/key.pem"
+listen = ":9443"
+
+[[tls_listeners]]
+cert_path = "/other/cert.pem"
+key_path = "/other/key.pem"
+listen = ":9443"
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let error = config.validate().expect("should have validation error");
+        assert!(
+            error.contains("conflicts with primary [tls].listen"),
+            "expected duplicate listen error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn config_validate_accepts_valid_tls_listeners() {
+        let toml_str = r#"
+[server]
+listen = ":9999"
+admin_listen = "127.0.0.1:9998"
+admin_token = "test-token-12345678"
+admin_users = []
+workers = 0
+drain_timeout = "30s"
+
+[consul]
+address = "127.0.0.1:8500"
+services = []
+tags = []
+
+[tls]
+cert_path = "/some/cert.pem"
+key_path = "/some/key.pem"
+listen = ":9443"
+
+[[tls_listeners]]
+cert_path = "/other/cert.pem"
+key_path = "/other/key.pem"
+listen = ":9444"
+client_auth = "required"
+client_ca_source = "file"
+client_ca_path = "/some/ca.pem"
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.validate().is_none(), "config should be valid");
+        assert_eq!(config.tls_listeners.len(), 1);
+        assert_eq!(config.tls_listeners[0].listen, ":9444");
+        assert_eq!(config.tls_listeners[0].client_auth, "required");
     }
 }
