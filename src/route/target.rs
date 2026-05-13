@@ -1,11 +1,12 @@
 use crate::route::definition::RouteSource;
+use parking_lot::Mutex as ParkingMutex;
 use pingora::protocols::tls::ALPN;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use parking_lot::Mutex as ParkingMutex;
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum UpstreamProtocol {
@@ -83,9 +84,10 @@ pub enum CircuitState {
 pub struct CircuitTransition {
     pub from: CircuitState,
     pub to: CircuitState,
-    pub timestamp_ms: u64,
+    /// Monotonic milliseconds since process start (not unix epoch).
+    /// Use this only for relative ordering; convert to wall-clock in the admin API.
+    pub elapsed_ms: u64,
 }
-
 
 /// Immutable circuit breaker configuration
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -139,12 +141,17 @@ pub struct CircuitBreaker {
     half_open_max_requests: usize,
     /// Sliding window: Arc shared so clones preserve history across route rebuilds
     window: Arc<ParkingMutex<VecDeque<bool>>>,
+    /// Number of `true` (error) entries currently in `window`.
+    /// Maintained atomically alongside push/pop so `record_error` can check
+    /// the threshold in O(1) instead of scanning the whole window.
+    error_count: AtomicU64,
     /// Time when circuit last transitioned to Open (milliseconds)
     opened_at_ms: AtomicU64,
     /// Whether a half-open probe is currently in flight.
     half_open_in_flight: AtomicBool,
-    /// Lock for window modifications only (fine-grained, not on hot path)
-    window_lock: std::sync::Mutex<()>,
+    /// Timestamp (ms) when the half-open probe was dispatched.
+    /// Used to detect stuck probes and auto-reset them after a timeout.
+    half_open_probe_sent_at_ms: AtomicU64,
     /// History of recent state transitions (ring buffer, max 20)
     history: Arc<ParkingMutex<Vec<CircuitTransition>>>,
 }
@@ -153,7 +160,6 @@ const STATE_MASK: u8 = 0x03;
 const STATE_CLOSED: u8 = 0;
 const STATE_OPEN: u8 = 1;
 const STATE_HALF_OPEN: u8 = 2;
-
 
 impl CircuitBreaker {
     /// Create a new circuit breaker with default config
@@ -169,12 +175,15 @@ impl CircuitBreaker {
             state_atomic: AtomicU8::new(STATE_CLOSED),
             recovery_timeout_secs: AtomicU64::new(config.recovery_timeout_secs),
             error_threshold: config.error_threshold,
-            window_size: config.window_size,
-            half_open_max_requests: config.half_open_max_requests.min(63),
-            window: Arc::new(ParkingMutex::new(VecDeque::with_capacity(config.window_size))),
+            window_size: config.window_size.max(1),
+            half_open_max_requests: config.half_open_max_requests.clamp(1, 63),
+            window: Arc::new(ParkingMutex::new(VecDeque::with_capacity(
+                config.window_size.max(1),
+            ))),
+            error_count: AtomicU64::new(0),
             opened_at_ms: AtomicU64::new(0),
             half_open_in_flight: AtomicBool::new(false),
-            window_lock: std::sync::Mutex::new(()),
+            half_open_probe_sent_at_ms: AtomicU64::new(0),
             history: Arc::new(ParkingMutex::new(Vec::with_capacity(20))),
         }
     }
@@ -217,10 +226,31 @@ impl CircuitBreaker {
                     if probe_count >= self.half_open_max_requests {
                         return false;
                     }
-                    return self
+                    // Auto-reset stuck probe: if half_open_in_flight has been true
+                    // for longer than recovery_timeout, the upstream callback was
+                    // likely lost (DNS failure, connection drop without logging).
+                    // Reset the flag so a new probe can be dispatched.
+                    if self.half_open_in_flight.load(Ordering::Acquire) {
+                        let probe_sent = self.half_open_probe_sent_at_ms.load(Ordering::Relaxed);
+                        let recovery_ms = self.recovery_timeout_secs.load(Ordering::Relaxed) * 1000;
+                        if probe_sent > 0 && monotonic_elapsed_ms().saturating_sub(probe_sent) > recovery_ms {
+                            tracing::warn!(
+                                probe_sent_ago_ms = monotonic_elapsed_ms().saturating_sub(probe_sent),
+                                recovery_ms,
+                                "Half-open probe appears stuck; auto-resetting"
+                            );
+                            self.half_open_in_flight.store(false, Ordering::Release);
+                        }
+                    }
+                    if self
                         .half_open_in_flight
                         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-                        .is_ok();
+                        .is_ok()
+                    {
+                        self.half_open_probe_sent_at_ms.store(monotonic_elapsed_ms(), Ordering::Relaxed);
+                        return true;
+                    }
+                    return false;
                 }
                 _ => return false,
             }
@@ -231,7 +261,7 @@ impl CircuitBreaker {
     fn recovery_elapsed(&self) -> bool {
         let recovery_timeout = self.recovery_timeout_secs.load(Ordering::Relaxed);
         let opened_at = self.opened_at_ms.load(Ordering::Relaxed);
-        let elapsed = now_ms().saturating_sub(opened_at);
+        let elapsed = monotonic_elapsed_ms().saturating_sub(opened_at);
         elapsed >= recovery_timeout * 1000
     }
 
@@ -248,10 +278,12 @@ impl CircuitBreaker {
             return true;
         }
 
-        match self
-            .state_atomic
-            .compare_exchange(current, STATE_HALF_OPEN, Ordering::AcqRel, Ordering::Relaxed)
-        {
+        match self.state_atomic.compare_exchange(
+            current,
+            STATE_HALF_OPEN,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
             Ok(_) => {
                 self.half_open_in_flight.store(false, Ordering::Release);
                 self.record_transition(CircuitState::Open, CircuitState::HalfOpen);
@@ -270,9 +302,12 @@ impl CircuitBreaker {
         let state = self.state_atomic.load(Ordering::Acquire);
         match state & STATE_MASK {
             STATE_CLOSED => {
-                let _guard = self.window_lock.lock();
                 let mut window = self.window.lock();
-                if window.len() >= self.window_size { window.pop_front(); }
+                if window.len() >= self.window_size
+                    && let Some(was_error) = window.pop_front()
+                        && was_error {
+                            self.error_count.fetch_sub(1, Ordering::Relaxed);
+                        }
                 window.push_back(false);
             }
             STATE_HALF_OPEN => {
@@ -299,20 +334,40 @@ impl CircuitBreaker {
         let state = self.state_atomic.load(Ordering::Acquire);
         match state & STATE_MASK {
             STATE_CLOSED => {
-                {
+                self.error_count.fetch_add(1, Ordering::Relaxed);
+                let window_len = {
                     let mut window = self.window.lock();
-                    if window.len() >= self.window_size { window.pop_front(); }
+                    if window.len() >= self.window_size
+                        && let Some(was_error) = window.pop_front()
+                            && was_error {
+                                self.error_count.fetch_sub(1, Ordering::Relaxed);
+                            }
                     window.push_back(true);
-                }
-                let window = self.window.lock();
-                let error_count = window.iter().filter(|&&e| e).count();
+                    window.len()
+                };
+                // O(1) threshold check using the maintained error counter.
+                // Open the circuit when BOTH conditions are met:
+                //   1. Error rate >= error_threshold%
+                //   2. At least min_samples requests observed
+                // min_samples = max(window_size / 4, 5) to avoid triggering on
+                // tiny samples while still protecting against 100% failure rates.
+                //
+                // Re-read error_count after releasing the window lock to avoid
+                // using a stale value — another thread may have popped an error
+                // entry and decremented the counter between our fetch_add and here.
+                let errors = self.error_count.load(Ordering::Relaxed);
                 let threshold = self.window_size * self.error_threshold as usize / 100;
-                if error_count >= threshold && window.len() >= self.window_size {
-                    drop(window);
+                let min_samples = (self.window_size / 4).max(5).min(self.window_size);
+                if errors >= threshold as u64 && window_len >= min_samples {
                     self.transition_to_open();
                     tracing::warn!(
-                        error_rate = format!("{:.1}%", 100.0 * error_count as f64 / self.window_size as f64),
-                        error_count, window_size = self.window_size, threshold = threshold,
+                        error_rate = format!(
+                            "{:.1}%",
+                            100.0 * errors as f64 / self.window_size as f64
+                        ),
+                        error_count = errors,
+                        window_size = self.window_size,
+                        threshold = threshold,
                         "Circuit breaker OPENED"
                     );
                 }
@@ -323,7 +378,7 @@ impl CircuitBreaker {
                 tracing::warn!("Circuit breaker REOPENED — probe failed");
             }
             STATE_OPEN => {
-                self.opened_at_ms.store(now_ms(), Ordering::Relaxed);
+                self.opened_at_ms.store(monotonic_elapsed_ms(), Ordering::Relaxed);
             }
             _ => {}
         }
@@ -331,7 +386,7 @@ impl CircuitBreaker {
 
     #[inline(always)]
     fn transition_to_open(&self) {
-        self.opened_at_ms.store(now_ms(), Ordering::Relaxed);
+        self.opened_at_ms.store(monotonic_elapsed_ms(), Ordering::Relaxed);
         self.half_open_in_flight.store(false, Ordering::Release);
         let mut attempts = 0u32;
         loop {
@@ -342,10 +397,12 @@ impl CircuitBreaker {
                 STATE_OPEN => CircuitState::Open,
                 _ => CircuitState::Closed,
             };
-            match self
-                .state_atomic
-                .compare_exchange(current, STATE_OPEN, Ordering::AcqRel, Ordering::Relaxed)
-            {
+            match self.state_atomic.compare_exchange(
+                current,
+                STATE_OPEN,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => {
                     self.record_open_transition(from);
                     break;
@@ -383,6 +440,7 @@ impl CircuitBreaker {
         }
         let mut window = self.window.lock();
         window.clear();
+        self.error_count.store(0, Ordering::Relaxed);
     }
 
     #[inline]
@@ -420,8 +478,14 @@ impl CircuitBreaker {
     #[inline]
     fn record_transition(&self, from: CircuitState, to: CircuitState) {
         let mut history = self.history.lock();
-        if history.len() >= 20 { history.remove(0); }
-        history.push(CircuitTransition { from, to, timestamp_ms: now_ms() });
+        if history.len() >= 20 {
+            history.remove(0);
+        }
+        history.push(CircuitTransition {
+            from,
+            to,
+            elapsed_ms: monotonic_elapsed_ms(),
+        });
     }
 
     pub fn transition_history(&self) -> Vec<CircuitTransition> {
@@ -429,12 +493,28 @@ impl CircuitBreaker {
     }
 }
 
+/// Monotonic millisecond timestamp based on `Instant::now()`.
+/// Shared monotonic epoch — all monotonic timestamps derive from this single
+/// `Instant` so that relative comparisons between ms/s/ns are always consistent.
+static MONO_EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
 #[inline]
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+pub(crate) fn mono_start() -> &'static Instant {
+    MONO_EPOCH.get_or_init(Instant::now)
+}
+
+/// Monotonic millisecond timestamp based on `Instant::now()`.
+/// Uses a process-start epoch so that NTP clock adjustments never
+/// affect circuit-breaker or DNS-cache timing.
+#[inline]
+pub fn monotonic_elapsed_ms() -> u64 {
+    mono_start().elapsed().as_millis() as u64
+}
+
+/// Monotonic second timestamp (for last_access tracking).
+#[inline]
+fn monotonic_secs() -> u64 {
+    mono_start().elapsed().as_secs()
 }
 
 /// Clone preserves the shared state via Arc so that route-table rebuilds
@@ -443,49 +523,110 @@ impl Clone for CircuitBreaker {
     fn clone(&self) -> Self {
         Self {
             state_atomic: AtomicU8::new(self.state_atomic.load(Ordering::Relaxed)),
-            recovery_timeout_secs: AtomicU64::new(self.recovery_timeout_secs.load(Ordering::Relaxed)),
+            recovery_timeout_secs: AtomicU64::new(
+                self.recovery_timeout_secs.load(Ordering::Relaxed),
+            ),
             error_threshold: self.error_threshold,
             window_size: self.window_size,
             half_open_max_requests: self.half_open_max_requests,
             window: Arc::clone(&self.window),
+            error_count: AtomicU64::new(self.error_count.load(Ordering::Relaxed)),
             opened_at_ms: AtomicU64::new(self.opened_at_ms.load(Ordering::Relaxed)),
-            half_open_in_flight: AtomicBool::new(
-                self.half_open_in_flight.load(Ordering::Relaxed),
-            ),
-            window_lock: std::sync::Mutex::new(()),
+            half_open_in_flight: AtomicBool::new(self.half_open_in_flight.load(Ordering::Relaxed)),
+            half_open_probe_sent_at_ms: AtomicU64::new(self.half_open_probe_sent_at_ms.load(Ordering::Relaxed)),
             history: Arc::clone(&self.history),
         }
     }
 }
 
-
 impl Default for CircuitBreaker {
-     fn default() -> Self {
-         Self::new()
-     }
- }
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-/// Per-target health tracker (circuit breaker wrapper)
+/// Per-target health tracker (circuit breaker + active health check wrapper)
 #[derive(Debug, Clone)]
 pub struct TargetHealthTracker {
     circuit_breaker: CircuitBreaker,
+    /// Whether the target is considered healthy by active health checking.
+    /// Starts `true` (healthy by default) to avoid breaking existing traffic.
+    is_healthy: Arc<AtomicBool>,
+    /// Consecutive probe failures (for fall threshold)
+    consecutive_failures: Arc<AtomicU64>,
+    /// Consecutive probe successes (for rise threshold)
+    consecutive_successes: Arc<AtomicU64>,
 }
 
 impl TargetHealthTracker {
     pub fn new() -> Self {
         Self {
             circuit_breaker: CircuitBreaker::new(),
+            is_healthy: Arc::new(AtomicBool::new(true)),
+            consecutive_failures: Arc::new(AtomicU64::new(0)),
+            consecutive_successes: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub fn with_config(config: CircuitBreakerConfig) -> Self {
         Self {
             circuit_breaker: CircuitBreaker::with_config(config),
+            is_healthy: Arc::new(AtomicBool::new(true)),
+            consecutive_failures: Arc::new(AtomicU64::new(0)),
+            consecutive_successes: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub fn circuit_breaker(&self) -> &CircuitBreaker {
         &self.circuit_breaker
+    }
+
+    /// Record a successful health check probe.
+    /// After `rise` consecutive successes, the target is marked healthy.
+    /// No-op if already healthy (avoids unnecessary atomic writes).
+    pub fn record_health_check_success(&self, rise: usize) {
+        // Skip if already healthy — avoids unbounded counter growth
+        if self.is_healthy.load(Ordering::Acquire) {
+            // Reset failure counter just in case
+            self.consecutive_failures.store(0, Ordering::Relaxed);
+            return;
+        }
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+        let successes = self.consecutive_successes.fetch_add(1, Ordering::Relaxed) + 1;
+        if successes >= rise as u64 {
+            self.is_healthy.store(true, Ordering::Release);
+            tracing::info!(
+                consecutive_successes = successes,
+                "Target marked healthy by active health check"
+            );
+        }
+    }
+
+    /// Record a failed health check probe.
+    /// After `fall` consecutive failures, the target is marked unhealthy.
+    /// No-op if already unhealthy (avoids unnecessary atomic writes).
+    pub fn record_health_check_failure(&self, fall: usize) {
+        // Skip if already unhealthy — avoids unbounded counter growth
+        if !self.is_healthy.load(Ordering::Acquire) {
+            // Reset success counter just in case
+            self.consecutive_successes.store(0, Ordering::Relaxed);
+            return;
+        }
+        self.consecutive_successes.store(0, Ordering::Relaxed);
+        let failures = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        if failures >= fall as u64 {
+            self.is_healthy.store(false, Ordering::Release);
+            tracing::warn!(
+                consecutive_failures = failures,
+                "Target marked unhealthy by active health check"
+            );
+        }
+    }
+
+    /// Returns `true` if the target is considered healthy by active probing.
+    /// Targets start healthy by default.
+    pub fn is_probe_healthy(&self) -> bool {
+        self.is_healthy.load(Ordering::Acquire)
     }
 }
 
@@ -510,8 +651,8 @@ pub fn global_dns_cache() -> &'static DnsCache {
 /// DNS cache entry with TTL and expiration
 #[derive(Debug, Clone)]
 struct DnsCacheEntry {
-    /// Resolved IP addresses
-    addrs: Vec<SocketAddr>,
+    /// Resolved IP addresses (Arc for cheap cloning on cache hits)
+    addrs: Arc<[SocketAddr]>,
     /// Expiration timestamp (milliseconds since epoch)
     expires_at_ms: u64,
     /// Whether this was a negative lookup (NXDOMAIN)
@@ -565,48 +706,56 @@ impl DnsCache {
     /// Set the TTL values (thread-safe, can be called after OnceLock init)
     pub fn set_ttl(&self, default_secs: u64, negative_secs: u64) {
         let previous_default = self.default_ttl_secs.swap(default_secs, Ordering::Relaxed);
-        let previous_negative = self.negative_ttl_secs.swap(negative_secs, Ordering::Relaxed);
+        let previous_negative = self
+            .negative_ttl_secs
+            .swap(negative_secs, Ordering::Relaxed);
         if previous_default != default_secs || previous_negative != negative_secs {
             self.clear();
         }
     }
 
     /// Lookup a cached DNS entry
-    pub fn lookup(&self, host: &str) -> Option<Vec<SocketAddr>> {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+    pub fn lookup(&self, host: &str) -> Option<Arc<[SocketAddr]>> {
+        let now_ms = monotonic_elapsed_ms();
 
-        // Check expiry in a separate scope so the read guard is dropped before
-        // the mutable remove() call — holding both on the same DashMap shard deadlocks.
-        let expired = self
+        // Atomically remove only if still expired — avoids TOCTOU race where
+        // another thread stores a fresh entry between our check and remove.
+        if self
             .inner
-            .get(host)
-            .is_some_and(|e| now_ms >= e.expires_at_ms);
-        if expired {
-            self.inner.remove(host);
-            self.misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.prom.dns_cache_misses_total.fetch_add(1, Ordering::Relaxed);
+            .remove_if(host, |_, entry| now_ms >= entry.expires_at_ms)
+            .is_some()
+        {
+            self.misses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.prom
+                .dns_cache_misses_total
+                .fetch_add(1, Ordering::Relaxed);
             return None;
         }
 
         let Some(entry) = self.inner.get(host) else {
-            self.misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.prom.dns_cache_misses_total.fetch_add(1, Ordering::Relaxed);
+            self.misses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.prom
+                .dns_cache_misses_total
+                .fetch_add(1, Ordering::Relaxed);
             return None;
         };
 
         if entry.negative {
-            self.negatives.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.prom.dns_cache_negatives_total.fetch_add(1, Ordering::Relaxed);
+            self.negatives
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.prom
+                .dns_cache_negatives_total
+                .fetch_add(1, Ordering::Relaxed);
             return None;
         }
 
         self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.prom.dns_cache_hits_total.fetch_add(1, Ordering::Relaxed);
-        Some(entry.addrs.clone())
-    }
+        self.prom
+            .dns_cache_hits_total
+            .fetch_add(1, Ordering::Relaxed);
+        Some(Arc::clone(&entry.addrs))    }
 
     /// Store a positive DNS lookup result
     pub fn store(&self, host: String, addrs: Vec<SocketAddr>) {
@@ -615,13 +764,10 @@ impl DnsCache {
             return;
         }
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now_ms = monotonic_elapsed_ms();
 
         let entry = DnsCacheEntry {
-            addrs,
+            addrs: addrs.into(),
             expires_at_ms: now_ms + (ttl_secs * 1000),
             negative: false,
         };
@@ -637,13 +783,10 @@ impl DnsCache {
             return;
         }
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now_ms = monotonic_elapsed_ms();
 
         let entry = DnsCacheEntry {
-            addrs: Vec::new(),
+            addrs: Vec::<SocketAddr>::new().into(),
             expires_at_ms: now_ms + (ttl_secs * 1000),
             negative: true,
         };
@@ -675,15 +818,19 @@ impl DnsCache {
             return;
         }
 
-        // Phase 2: Remove oldest entries by expires_at_ms until under capacity
+        // Phase 2: Remove oldest entries by expires_at_ms until under capacity.
+        // Use partial sort (select_nth_unstable_by_key) instead of full O(n log n) sort.
         let mut entries: Vec<(String, u64)> = self
             .inner
             .iter()
             .map(|e| (e.key().clone(), e.expires_at_ms))
             .collect();
-        entries.sort_by_key(|(_, exp)| *exp);
 
         let to_remove = self.inner.len() - DNS_CACHE_MAX_ENTRIES;
+        if to_remove < entries.len() {
+            entries.select_nth_unstable_by_key(to_remove, |(_, exp)| *exp);
+        }
+
         for (key, _) in entries.into_iter().take(to_remove) {
             self.inner.remove(&key);
         }
@@ -704,15 +851,12 @@ impl DnsCache {
         }
     }
 
-
     /// Get all cached entries with expiration info (for admin API).
     pub fn entries(&self) -> Vec<DnsCacheEntryView> {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        
-        self.inner.iter()
+        let now_ms = monotonic_elapsed_ms();
+
+        self.inner
+            .iter()
             .map(|entry| {
                 let ttl_remaining_ms = entry.expires_at_ms.saturating_sub(now_ms);
                 DnsCacheEntryView {
@@ -759,13 +903,19 @@ impl std::fmt::Display for DnsCacheStats {
     }
 }
 
-
 #[derive(Debug, Default)]
 pub struct TargetStatsRegistry {
     active_connections: Mutex<HashMap<String, Weak<AtomicU64>>>,
     stats: Mutex<HashMap<String, Weak<TargetStats>>>,
     health_trackers: Mutex<HashMap<String, Weak<TargetHealthTracker>>>,
 }
+
+/// Prune dead Weak entries from a HashMap when it exceeds a threshold.
+fn prune_dead<T>(map: &mut HashMap<String, Weak<T>>) {
+    map.retain(|_, weak| weak.strong_count() > 0);
+}
+
+const REGISTRY_PRUNE_THRESHOLD: usize = 512;
 
 impl TargetStatsRegistry {
     pub fn new() -> Self {
@@ -782,6 +932,10 @@ impl TargetStatsRegistry {
             return counter;
         }
 
+        if entries.len() > REGISTRY_PRUNE_THRESHOLD {
+            prune_dead(&mut entries);
+        }
+
         let counter = Arc::new(AtomicU64::new(0));
         entries.insert(key.to_string(), Arc::downgrade(&counter));
         counter
@@ -795,6 +949,10 @@ impl TargetStatsRegistry {
 
         if let Some(stats) = entries.get(key).and_then(Weak::upgrade) {
             return stats;
+        }
+
+        if entries.len() > REGISTRY_PRUNE_THRESHOLD {
+            prune_dead(&mut entries);
         }
 
         let stats = Arc::new(TargetStats::default());
@@ -814,6 +972,10 @@ impl TargetStatsRegistry {
 
         if let Some(tracker) = entries.get(key).and_then(Weak::upgrade) {
             return tracker;
+        }
+
+        if entries.len() > REGISTRY_PRUNE_THRESHOLD {
+            prune_dead(&mut entries);
         }
 
         let tracker = Arc::new(
@@ -879,6 +1041,9 @@ pub struct Target {
     pub health_tracker: Arc<TargetHealthTracker>,
     #[serde(skip)]
     pub stats: Arc<TargetStats>,
+    /// Per-target token bucket rate limiter
+    #[serde(skip)]
+    pub rate_limiter: Arc<crate::proxy::ratelimit::TokenBucket>,
 }
 
 impl Clone for Target {
@@ -898,6 +1063,7 @@ impl Clone for Target {
             active_connections: Arc::clone(&self.active_connections),
             health_tracker: Arc::clone(&self.health_tracker),
             stats: Arc::clone(&self.stats),
+            rate_limiter: Arc::clone(&self.rate_limiter),
         }
     }
 }
@@ -919,6 +1085,7 @@ impl Default for Target {
             active_connections: Arc::new(AtomicU64::new(0)),
             health_tracker: Arc::new(TargetHealthTracker::new()),
             stats: Arc::new(TargetStats::default()),
+            rate_limiter: Arc::new(crate::proxy::ratelimit::TokenBucket::new()),
         }
     }
 }
@@ -967,6 +1134,17 @@ impl Target {
                 .or_else(|| parsed.port_or_known_default());
             self.parsed_tls = self.parsed_protocol.uses_tls();
         }
+
+        // Configure per-target rate limiter from route opts
+        if let Some(rate_str) = self.opts.get("ratelimit")
+            && let Ok(rate) = rate_str.parse::<u64>() {
+                let burst = self
+                    .opts
+                    .get("burst")
+                    .and_then(|b| b.parse::<u64>().ok())
+                    .unwrap_or(rate);
+                self.rate_limiter.configure(rate, burst);
+            }
     }
 
     /// Check if the upstream host is safe for proxying.
@@ -1039,6 +1217,32 @@ impl Target {
         self.active_connections.fetch_sub(1, Ordering::Relaxed);
     }
 
+    /// Try to acquire a rate limit token. Returns `true` if allowed.
+    /// Uses per-target override if configured via `ratelimit` opt,
+    /// otherwise falls back to global config defaults.
+    ///
+    /// The global configuration is applied once via a CAS-like pattern to
+    /// avoid repeated `configure()` calls on the hot path.
+    pub fn try_acquire_rate_limit(&self, global_rate: usize, global_burst: usize) -> bool {
+        // If per-target bucket is already configured (from opts or a prior
+        // global-config application), use it directly — zero overhead.
+        if self.rate_limiter.is_configured() {
+            return self.rate_limiter.try_acquire();
+        }
+
+        // No rate limiting active at all
+        if global_rate == 0 {
+            return true;
+        }
+
+        // Lazily apply the global config exactly once. The Mutex inside
+        // TokenBucket::configure serialises concurrent callers so only the
+        // first one actually writes; the others see is_configured() = true
+        // on the next loop iteration.
+        self.rate_limiter.configure(global_rate as u64, global_burst as u64);
+        self.rate_limiter.try_acquire()
+    }
+
     pub async fn resolve_upstream_addr(&self) -> Result<SocketAddr, std::io::Error> {
         if !self.is_host_safe() && !self.ssrf_skip_verify() {
             return Err(std::io::Error::new(
@@ -1082,9 +1286,14 @@ impl Target {
         let mut addrs = match tokio::net::lookup_host(&addr_str).await {
             Ok(addrs) => addrs,
             Err(e) => {
-                // Store negative result
-                cache.store_negative(cache_key.clone());
-                tracing::warn!(host, port, error = %e, "DNS lookup failed, storing negative result");
+                // Only cache definite "not found" failures; transient resolver
+                // errors (timeouts, network issues) should not be cached.
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    cache.store_negative(cache_key.clone());
+                    tracing::warn!(host, port, error = %e, "DNS lookup failed (NXDOMAIN), storing negative result");
+                } else {
+                    tracing::warn!(host, port, error = %e, "DNS lookup failed (not cached)");
+                }
                 return Err(e);
             }
         };
@@ -1109,7 +1318,6 @@ impl Target {
                 ),
             ));
         }
-
 
         // Cache ALL addresses, filtering out any that fail SSRF checks.
         // This prevents a blocked IP from hiding in the multi-A-record tail
@@ -1188,6 +1396,43 @@ impl Target {
             .unwrap_or(false)
     }
 
+    /// Parse header match constraints from opts.
+    /// Format: `header=x-version:v2` or `header=x-version:v2,x-env:prod`
+    /// Multiple `header=` opts are merged. Each constraint is `header_name:expected_value`.
+    /// Returns a vec of (header_name, expected_value) pairs.
+    pub fn header_matches(&self) -> Vec<(&str, &str)> {
+        self.opts
+            .iter()
+            .filter(|(k, _)| *k == "header")
+            .flat_map(|(_, v)| {
+                v.split(',')
+                    .filter_map(|pair| {
+                        let trimmed = pair.trim();
+                        trimmed.split_once(':').map(|(k, v)| (k, v))
+                    })
+            })
+            .collect()
+    }
+
+    /// Check if this target's header constraints are satisfied by the given request headers.
+    /// Returns `true` if:
+    ///   - Target has no header constraints (no `header=` opts), OR
+    ///   - ALL required headers are present and match the expected values.
+    /// Header name comparison is case-insensitive (HTTP spec).
+    /// Value comparison is exact match (case-sensitive).
+    pub fn matches_headers(&self, headers: &http::HeaderMap) -> bool {
+        let constraints = self.header_matches();
+        if constraints.is_empty() {
+            return true;
+        }
+        constraints.iter().all(|(name, expected)| {
+            headers
+                .get(*name)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v == *expected)
+        })
+    }
+
     /// Whether this is a TCP proxy target.
     pub fn is_tcp(&self) -> bool {
         self.parsed_protocol == UpstreamProtocol::Tcp
@@ -1247,7 +1492,12 @@ pub fn is_ip_rfc1918(ip: &std::net::IpAddr) -> bool {
 pub fn is_ip_always_blocked(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
-            if v4.is_loopback() || v4.is_link_local() || v4.is_broadcast() || v4.is_unspecified() || v4.is_multicast() {
+            if v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+            {
                 return true;
             }
             let octets = v4.octets();
@@ -1261,7 +1511,10 @@ pub fn is_ip_always_blocked(ip: &std::net::IpAddr) -> bool {
             is_cgnat || is_documentation
         }
         std::net::IpAddr::V6(v6) => {
-            v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local() || v6.is_multicast()
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unicast_link_local()
+                || v6.is_multicast()
         }
     }
 }
@@ -1480,13 +1733,25 @@ mod tests {
 
         // First two successes: circuit stays half-open
         cb.record_success();
-        assert_eq!(cb.current_state(), CircuitState::HalfOpen, "Should stay half-open after 1 success");
+        assert_eq!(
+            cb.current_state(),
+            CircuitState::HalfOpen,
+            "Should stay half-open after 1 success"
+        );
         cb.record_success();
-        assert_eq!(cb.current_state(), CircuitState::HalfOpen, "Should stay half-open after 2 successes");
+        assert_eq!(
+            cb.current_state(),
+            CircuitState::HalfOpen,
+            "Should stay half-open after 2 successes"
+        );
 
         // Third success: circuit closes
         cb.record_success();
-        assert_eq!(cb.current_state(), CircuitState::Closed, "Should close after 3 successes");
+        assert_eq!(
+            cb.current_state(),
+            CircuitState::Closed,
+            "Should close after 3 successes"
+        );
     }
 
     #[test]
@@ -1562,7 +1827,10 @@ mod tests {
             cb.record_error();
         }
 
-        assert!(cb.allow_request(), "first half-open probe should be allowed");
+        assert!(
+            cb.allow_request(),
+            "first half-open probe should be allowed"
+        );
         assert!(
             !cb.allow_request(),
             "second half-open probe should be rejected until the first completes"
@@ -1723,6 +1991,81 @@ mod tests {
         let probe_count = ((state_byte >> 2) & 0x3F) as usize;
         assert_eq!(probe_count, 1);
     }
+
+    // ── Header-based routing tests ──────────────────────────────────
+
+    #[test]
+    fn test_header_matches_no_constraints() {
+        // Target without header opts should always match
+        let mut t = Target::default();
+        t.opts = HashMap::new();
+        let headers = http::HeaderMap::new();
+        assert!(t.matches_headers(&headers));
+    }
+
+    #[test]
+    fn test_header_matches_single_constraint() {
+        let mut t = Target::default();
+        t.opts = HashMap::from([("header".to_string(), "x-version:v2".to_string())]);
+
+        let mut headers = http::HeaderMap::new();
+        assert!(!t.matches_headers(&headers), "missing header should not match");
+
+        headers.insert("x-version", http::HeaderValue::from_static("v1"));
+        assert!(!t.matches_headers(&headers), "wrong value should not match");
+
+        headers.insert("x-version", http::HeaderValue::from_static("v2"));
+        assert!(t.matches_headers(&headers), "correct value should match");
+    }
+
+    #[test]
+    fn test_header_matches_multiple_constraints() {
+        let mut t = Target::default();
+        t.opts = HashMap::from([("header".to_string(), "x-version:v2,x-env:prod".to_string())]);
+
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-version", http::HeaderValue::from_static("v2"));
+        assert!(!t.matches_headers(&headers), "one missing = no match");
+
+        headers.insert("x-env", http::HeaderValue::from_static("prod"));
+        assert!(t.matches_headers(&headers), "both present = match");
+
+        headers.insert("x-env", http::HeaderValue::from_static("staging"));
+        assert!(!t.matches_headers(&headers), "wrong value = no match");
+    }
+
+    #[test]
+    fn test_header_matches_case_insensitive_name() {
+        let mut t = Target::default();
+        t.opts = HashMap::from([("header".to_string(), "X-Version:v2".to_string())]);
+
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-version", http::HeaderValue::from_static("v2"));
+        assert!(t.matches_headers(&headers), "case-insensitive name");
+    }
+
+    #[test]
+    fn test_header_matches_separate_opts() {
+        // Multiple header= opts (separate entries in hashmap)
+        let mut t = Target::default();
+        t.opts = HashMap::new();
+        t.opts.insert("header".to_string(), "x-version:v2,x-env:prod".to_string());
+
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-version", http::HeaderValue::from_static("v2"));
+        headers.insert("x-env", http::HeaderValue::from_static("prod"));
+        assert!(t.matches_headers(&headers));
+    }
+
+    #[test]
+    fn test_header_matches_empty_value() {
+        let mut t = Target::default();
+        t.opts = HashMap::from([("header".to_string(), "x-debug:".to_string())]);
+
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-debug", http::HeaderValue::from_bytes(b"").unwrap());
+        assert!(t.matches_headers(&headers), "empty value should match");
+    }
 }
 
 // Per-target statistics for admin dashboard and Prometheus labels.
@@ -1732,7 +2075,7 @@ pub struct TargetStats {
     pub errors_total: AtomicU64,
     pub latency_sum_us: AtomicU64,
     pub bytes_total: AtomicU64,
-    pub last_access: AtomicU64, // Unix timestamp
+    pub last_access: AtomicU64, // Monotonic seconds since process start
 }
 
 impl TargetStats {
@@ -1744,24 +2087,25 @@ impl TargetStats {
         self.latency_sum_us.fetch_add(latency_us, Ordering::Relaxed);
         self.bytes_total.fetch_add(bytes as u64, Ordering::Relaxed);
         self.last_access.store(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            Ordering::Relaxed
+            monotonic_secs(),
+            Ordering::Relaxed,
         );
     }
-    
+
     pub fn error_rate(&self) -> f64 {
         let total = self.requests_total.load(Ordering::Relaxed);
-        if total == 0 { return 0.0; }
+        if total == 0 {
+            return 0.0;
+        }
         let errors = self.errors_total.load(Ordering::Relaxed);
         (errors as f64 / total as f64) * 100.0
     }
-    
+
     pub fn avg_latency_us(&self) -> u64 {
         let total = self.requests_total.load(Ordering::Relaxed);
-        if total == 0 { return 0; }
+        if total == 0 {
+            return 0;
+        }
         let sum = self.latency_sum_us.load(Ordering::Relaxed);
         sum / total
     }

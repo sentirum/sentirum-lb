@@ -10,8 +10,8 @@ use sentirum_lb::proxy::handler::SentirumProxy;
 use sentirum_lb::proxy::tcp::{TcpBackgroundService, TcpMode};
 use sentirum_lb::proxy::tls::{
     ClientAuthConfig, ClientAuthMode, ClientCaSource, DynamicCertStore, DynamicClientCaStore,
-    TlsMode, build_static_tls_settings, build_tls_settings, load_static_certificate,
-    tls_listen_addr,
+    TlsMode, build_static_tls_settings, build_tls_settings, load_shareable_cert,
+    FileCertWatcherService, tls_listen_addr,
 };
 use sentirum_lb::route::parser::parse_route_commands;
 use sentirum_lb::route::registry::ManagedRouteTable;
@@ -46,9 +46,9 @@ struct Args {
 }
 
 fn init_logging(config: &Config) {
-    use tracing_subscriber::{EnvFilter, Registry, fmt};
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{EnvFilter, Registry, fmt};
 
     let level = config.logging.level.clone();
     let format = config.logging.format.clone();
@@ -296,6 +296,12 @@ struct AdminBackgroundService {
     tls_store: Option<Arc<DynamicCertStore>>,
     client_ca_store: Option<Arc<DynamicClientCaStore>>,
     log_buffer: Option<Arc<sentirum_lb::admin::logs::LogBuffer>>,
+    file_certs: Vec<(String, sentirum_lb::proxy::tls::SharedFileCert, sentirum_lb::proxy::tls::TlsCertConfig)>,
+}
+
+struct HealthCheckBackgroundService {
+    route_table: Arc<ManagedRouteTable>,
+    config: sentirum_lb::config::SharedConfig,
 }
 
 #[async_trait]
@@ -308,9 +314,25 @@ impl BackgroundService for AdminBackgroundService {
                 self.tls_store.clone(),
                 self.client_ca_store.clone(),
                 self.log_buffer.clone(),
+                self.file_certs.clone(),
             ) => {}
             _ = shutdown.changed() => {
                 tracing::info!("Admin background service shutting down");
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl BackgroundService for HealthCheckBackgroundService {
+    async fn start(&self, mut shutdown: pingora::server::ShutdownWatch) {
+        tokio::select! {
+            _ = sentirum_lb::proxy::health::run_health_checks(
+                self.route_table.clone(),
+                self.config.clone(),
+            ) => {}
+            _ = shutdown.changed() => {
+                tracing::info!("Health check background service shutting down");
             }
         }
     }
@@ -363,7 +385,9 @@ fn main() {
             proxy: sentirum_lb::config::ProxyConfig::default(),
             logging: sentirum_lb::config::LoggingConfig::default(),
             tls: sentirum_lb::config::TlsConfig::default(),
+            tls_listeners: Vec::new(),
             tcp: sentirum_lb::config::TcpConfig::default(),
+            parsed_timeouts: Default::default(),
         }
     } else {
         match toml::from_str::<Config>(&config_content) {
@@ -392,7 +416,6 @@ fn main() {
         eprintln!("Config validation failed: {}", validation_error);
         std::process::exit(1);
     }
-
 
     // Initialize logging
     init_logging(&config);
@@ -456,7 +479,7 @@ fn main() {
         }
     }
 
-    // Build Pingora server
+    // ── Pingora Server Setup ────────────────────────────────────────────────
     let mut server =
         pingora::server::Server::new(Some(pingora::server::configuration::Opt::default()))
             .expect("Failed to create Pingora server");
@@ -466,6 +489,22 @@ fn main() {
             server_conf.threads = config.server.workers;
         }
         server_conf.upstream_keepalive_pool_size = config.proxy.pool_size;
+
+        // Wire graceful shutdown: drain_timeout gives in-flight requests time
+        // to complete before the server exits. Pingora uses two phases:
+        //   1. grace_period_seconds: stop accepting new connections, wait for active ones
+        //   2. graceful_shutdown_timeout_seconds: hard deadline for tokio runtimes to exit
+        let drain_secs = sentirum_lb::config::Config::parse_duration(&config.server.drain_timeout)
+            .as_secs();
+        if config.consul.graceful_shutdown && drain_secs > 0 {
+            server_conf.grace_period_seconds = Some(drain_secs);
+            server_conf.graceful_shutdown_timeout_seconds = Some(5);
+            tracing::info!(
+                drain_timeout_secs = drain_secs,
+                "Graceful shutdown enabled — in-flight requests will have {}s to complete",
+                drain_secs
+            );
+        }
     } else {
         tracing::warn!("Could not mutate Pingora server configuration before bootstrap");
     }
@@ -502,236 +541,321 @@ fn main() {
         "Proxy listening (HTTP)"
     );
 
-    // Add TLS listener if configured
-    let mut tls_background_service: Option<ConsulTlsBackgroundService> = None;
-    let mut client_ca_background_service: Option<ConsulClientCaBackgroundService> = None;
-    let mut tls_store_for_admin: Option<Arc<DynamicCertStore>> = None;
-    let mut client_ca_store_for_admin: Option<Arc<DynamicClientCaStore>> = None;
+    // ── TLS Listener Setup ──────────────────────────────────────────────────
+    // Collect TLS background services for all listeners
+    let mut tls_background_services: Vec<ConsulTlsBackgroundService> = Vec::new();
+    let mut client_ca_background_services: Vec<ConsulClientCaBackgroundService> = Vec::new();
+    let mut file_cert_watchers: Vec<FileCertWatcherService> = Vec::new();
+    let mut file_cert_handles: Vec<(String, sentirum_lb::proxy::tls::SharedFileCert, sentirum_lb::proxy::tls::TlsCertConfig)> = Vec::new();
+    let mut tls_stores_for_admin: Vec<Arc<DynamicCertStore>> = Vec::new();
+    let mut client_ca_stores_for_admin: Vec<Arc<DynamicClientCaStore>> = Vec::new();
     let mut https_fallback_ready = false;
 
-    let client_auth_config = match ClientAuthConfig::resolve(&config.tls) {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::error!(%error, "Invalid mTLS configuration; refusing to start");
-            std::process::exit(1);
-        }
-    };
+    // Build the list of all TLS configs to process.
+    // The legacy [tls] section is always the first (primary) listener.
+    // [[tls_listeners]] entries are additional listeners.
+    let all_tls_configs: Vec<(String, &sentirum_lb::config::TlsConfig)> = std::iter::once((
+        "primary".to_string(),
+        &config.tls,
+    ))
+    .chain(
+        config
+            .tls_listeners
+            .iter()
+            .enumerate()
+            .map(|(i, tls_cfg)| (format!("tls_listeners[{i}]"), tls_cfg)),
+    )
+    .collect();
 
-    let mut client_auth_state: Option<(ClientAuthMode, Arc<DynamicClientCaStore>)> = None;
-    if let Some(client_auth) = client_auth_config.clone() {
-        let client_ca_store =
-            Arc::new(DynamicClientCaStore::new(client_auth.ca_upgrade_cn.clone()));
-        match &client_auth.source {
-            ClientCaSource::File { path } => {
-                if let Err(error) = client_ca_store.load_from_path(path) {
-                    tracing::error!(path = %path, %error, "Failed to load initial client CA set; refusing to start");
+    let primary_tls_listen = public_tls_listen.clone();
+
+    for (label, tls_cfg) in &all_tls_configs {
+        let is_primary = label == "primary";
+
+        // Resolve listen address for this listener
+        let tls_listen = if is_primary {
+            tcp_https_fallback_addr
+                .clone()
+                .unwrap_or_else(|| primary_tls_listen.clone())
+        } else if tls_cfg.listen.trim().is_empty() {
+            tracing::error!(
+                listener = %label,
+                "additional TLS listener must have a non-empty listen address"
+            );
+            continue;
+        } else {
+            tls_listen_addr(&config.server.listen, &tls_cfg.listen)
+        };
+
+        // Resolve client auth for this listener
+        let client_auth_config = match ClientAuthConfig::resolve(tls_cfg) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(listener = %label, %error, "Invalid mTLS configuration; skipping listener");
+                if is_primary {
                     std::process::exit(1);
                 }
-                let status = client_ca_store.status();
-                tracing::info!(
-                    path = %path,
-                    mode = ?client_auth.mode,
-                    entries = ?status.loaded_entries,
-                    "Loaded initial client CA set from filesystem"
-                );
+                continue;
             }
-            ClientCaSource::ConsulKv { prefix } => {
+        };
+
+        let mut client_auth_state: Option<(ClientAuthMode, Arc<DynamicClientCaStore>)> = None;
+        if let Some(client_auth) = client_auth_config.clone() {
+            let client_ca_store =
+                Arc::new(DynamicClientCaStore::new(client_auth.ca_upgrade_cn.clone()));
+            match &client_auth.source {
+                ClientCaSource::File { path } => {
+                    if let Err(error) = client_ca_store.load_from_path(path) {
+                        tracing::error!(listener = %label, path = %path, %error, "Failed to load initial client CA set");
+                        if is_primary {
+                            std::process::exit(1);
+                        }
+                        continue;
+                    }
+                    let status = client_ca_store.status();
+                    tracing::info!(
+                        listener = %label,
+                        path = %path,
+                        mode = ?client_auth.mode,
+                        entries = ?status.loaded_entries,
+                        "Loaded initial client CA set from filesystem"
+                    );
+                }
+                ClientCaSource::ConsulKv { prefix } => {
+                    let consul_config = ConsulConfig::for_tls_cert_watch(&config.consul);
+                    let mut initial_index = 0;
+                    let mut initial_snapshot_ready = false;
+
+                    match ConsulClient::new(consul_config.clone()) {
+                        Ok(client) => match init_runtime
+                            .block_on(client_ca_store.refresh_from_consul(&client, prefix, 0))
+                        {
+                            Ok(index) => {
+                                initial_index = index;
+                                let status = client_ca_store.status();
+                                initial_snapshot_ready = !status.loaded_entries.is_empty();
+                                if initial_snapshot_ready {
+                                    tracing::info!(
+                                        listener = %label,
+                                        prefix = %prefix,
+                                        initial_index,
+                                        mode = ?client_auth.mode,
+                                        entries = ?status.loaded_entries,
+                                        "Loaded initial client CA snapshot from Consul"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        listener = %label,
+                                        prefix = %prefix,
+                                        initial_index,
+                                        last_error = ?status.last_error,
+                                        "Initial Consul client CA snapshot did not yield any active CA entries"
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(listener = %label, prefix = %prefix, error = %error, "Initial Consul client CA load failed");
+                            }
+                        },
+                        Err(error) => {
+                            tracing::warn!(listener = %label, error = %error, "Failed to create Consul client for initial client CA load");
+                        }
+                    }
+
+                    if !initial_snapshot_ready {
+                        tracing::error!(listener = %label, prefix = %prefix, mode = ?client_auth.mode, "Initial client CA snapshot is required but unavailable");
+                        if is_primary {
+                            std::process::exit(1);
+                        }
+                        continue;
+                    }
+
+                    client_ca_background_services.push(ConsulClientCaBackgroundService {
+                        client_ca_store: client_ca_store.clone(),
+                        consul_config,
+                        cert_prefix: prefix.clone(),
+                        initial_index,
+                    });
+                }
+            }
+
+            client_ca_stores_for_admin.push(client_ca_store.clone());
+            client_auth_state = Some((client_auth.mode, client_ca_store));
+        }
+
+        // Configure TLS certificate source and add listener
+        match TlsMode::resolve(tls_cfg) {
+            Ok(Some(TlsMode::File(tls))) => match tls.validate() {
+                Ok(()) => {
+                    let cert = match load_shareable_cert(&tls) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::error!(listener = %label, error = %e, "Failed to load file certificate");
+                            continue;
+                        }
+                    };
+                    match build_static_tls_settings(cert.clone(), client_auth_state.clone()) {
+                        Ok(mut settings) => {
+                            settings.enable_h2();
+                            lb_service.add_tls_with_settings(&tls_listen, None, settings);
+                            tracing::info!(
+                                listener = %label,
+                                addr = %tls_listen,
+                                source = "file",
+                                client_auth = client_auth_config.as_ref().map(|cfg| format!("{:?}", cfg.mode).to_lowercase()).unwrap_or_else(|| "off".to_string()),
+                                h2_enabled = true,
+                                "Proxy listening (HTTPS/TLS)"
+                            );
+                            if is_primary {
+                                https_fallback_ready = true;
+                            }
+                            // Register file cert watcher for hot-reload
+                            file_cert_watchers.push(FileCertWatcherService::new(
+                                label.clone(),
+                                tls.clone(),
+                                cert.clone(),
+                                std::time::Duration::from_secs(30),
+                            ));
+                            // Expose to admin API for manual reload
+                            file_cert_handles.push((
+                                label.clone(),
+                                cert,
+                                tls,
+                            ));
+                        }
+                        Err(e) => {
+                            tracing::error!(listener = %label, error = %e, "Failed to configure file-based TLS listener");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(listener = %label, error = %e, "TLS configuration invalid, skipping");
+                }
+            },
+            Ok(Some(TlsMode::ConsulKv(consul_tls))) => {
+                let tls_store = Arc::new(DynamicCertStore::new(consul_tls.strict_sni));
                 let consul_config = ConsulConfig::for_tls_cert_watch(&config.consul);
                 let mut initial_index = 0;
                 let mut initial_snapshot_ready = false;
 
                 match ConsulClient::new(consul_config.clone()) {
-                    Ok(client) => match init_runtime
-                        .block_on(client_ca_store.refresh_from_consul(&client, prefix, 0))
-                    {
-                        Ok(index) => {
-                            initial_index = index;
-                            let status = client_ca_store.status();
-                            initial_snapshot_ready = !status.loaded_entries.is_empty();
-                            if initial_snapshot_ready {
-                                tracing::info!(
-                                    prefix = %prefix,
-                                    initial_index,
-                                    mode = ?client_auth.mode,
-                                    entries = ?status.loaded_entries,
-                                    "Loaded initial client CA snapshot from Consul"
-                                );
-                            } else {
+                    Ok(client) => {
+                        match init_runtime.block_on(tls_store.refresh_from_consul(
+                            &client,
+                            &consul_tls.cert_prefix,
+                            0,
+                        )) {
+                            Ok(index) => {
+                                initial_index = index;
+                                let status = tls_store.status();
+                                initial_snapshot_ready = !status.loaded_certificates.is_empty();
+                                if initial_snapshot_ready {
+                                    tracing::info!(
+                                        listener = %label,
+                                        prefix = %consul_tls.cert_prefix,
+                                        initial_index,
+                                        strict_sni = consul_tls.strict_sni,
+                                        certificates = ?status.loaded_certificates,
+                                        "Loaded initial TLS certificate snapshot from Consul"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        listener = %label,
+                                        prefix = %consul_tls.cert_prefix,
+                                        initial_index,
+                                        strict_sni = consul_tls.strict_sni,
+                                        require_initial_snapshot = consul_tls.require_initial_snapshot,
+                                        last_error = ?status.last_error,
+                                        "Initial Consul TLS snapshot did not yield any active certificates"
+                                    );
+                                }
+                            }
+                            Err(e) => {
                                 tracing::warn!(
-                                    prefix = %prefix,
-                                    initial_index,
-                                    last_error = ?status.last_error,
-                                    "Initial Consul client CA snapshot did not yield any active CA entries"
+                                    listener = %label,
+                                    prefix = %consul_tls.cert_prefix,
+                                    require_initial_snapshot = consul_tls.require_initial_snapshot,
+                                    error = %e,
+                                    "Initial Consul TLS certificate load failed"
                                 );
                             }
                         }
-                        Err(error) => {
-                            tracing::warn!(prefix = %prefix, error = %error, "Initial Consul client CA load failed");
-                        }
-                    },
-                    Err(error) => {
-                        tracing::warn!(error = %error, "Failed to create Consul client for initial client CA load");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            listener = %label,
+                            error = %e,
+                            "Failed to create Consul client for initial TLS certificate load"
+                        );
                     }
                 }
 
-                if !initial_snapshot_ready {
-                    tracing::error!(prefix = %prefix, mode = ?client_auth.mode, "Initial client CA snapshot is required but unavailable; refusing to start");
-                    std::process::exit(1);
+                if consul_tls.require_initial_snapshot && !initial_snapshot_ready {
+                    tracing::error!(
+                        listener = %label,
+                        prefix = %consul_tls.cert_prefix,
+                        strict_sni = consul_tls.strict_sni,
+                        "Initial Consul TLS snapshot is required but unavailable"
+                    );
+                    if is_primary {
+                        std::process::exit(1);
+                    }
+                    continue;
                 }
 
-                client_ca_background_service = Some(ConsulClientCaBackgroundService {
-                    client_ca_store: client_ca_store.clone(),
-                    consul_config,
-                    cert_prefix: prefix.clone(),
-                    initial_index,
-                });
-            }
-        }
-
-        client_ca_store_for_admin = Some(client_ca_store.clone());
-        client_auth_state = Some((client_auth.mode, client_ca_store));
-    }
-
-    match TlsMode::resolve(&config.tls) {
-        Ok(Some(TlsMode::File(tls))) => match tls.validate() {
-            Ok(()) => {
-                let tls_listen = tcp_https_fallback_addr
-                    .clone()
-                    .unwrap_or_else(|| public_tls_listen.clone());
-                match load_static_certificate(&tls)
-                    .and_then(|cert| build_static_tls_settings(cert, client_auth_state.clone()))
-                {
+                match build_tls_settings(tls_store.clone(), client_auth_state.clone()) {
                     Ok(mut settings) => {
                         settings.enable_h2();
                         lb_service.add_tls_with_settings(&tls_listen, None, settings);
                         tracing::info!(
+                            listener = %label,
                             addr = %tls_listen,
-                            public_addr = %public_tls_listen,
-                            source = "file",
+                            source = "consul_kv",
+                            prefix = %consul_tls.cert_prefix,
+                            strict_sni = consul_tls.strict_sni,
                             client_auth = client_auth_config.as_ref().map(|cfg| format!("{:?}", cfg.mode).to_lowercase()).unwrap_or_else(|| "off".to_string()),
                             h2_enabled = true,
                             "Proxy listening (HTTPS/TLS)"
                         );
-                        https_fallback_ready = true;
+                        if is_primary {
+                            https_fallback_ready = true;
+                        }
+                        tls_stores_for_admin.push(tls_store.clone());
+                        tls_background_services.push(ConsulTlsBackgroundService {
+                            tls_store,
+                            consul_config,
+                            cert_prefix: consul_tls.cert_prefix,
+                            initial_index,
+                        });
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "Failed to configure file-based TLS listener");
+                        tracing::error!(
+                            listener = %label,
+                            error = %e,
+                            "Failed to configure Consul-backed TLS listener"
+                        );
                     }
                 }
+            }
+            Ok(None) => {
+                // No TLS configured for this listener — skip silently for primary
+                // (it may just not have TLS configured at all).
             }
             Err(e) => {
-                tracing::error!(error = %e, "TLS configuration invalid, skipping HTTPS listener");
+                tracing::error!(listener = %label, error = %e, "Invalid TLS source configuration; skipping");
             }
-        },
-        Ok(Some(TlsMode::ConsulKv(consul_tls))) => {
-            let tls_listen = tcp_https_fallback_addr
-                .clone()
-                .unwrap_or_else(|| public_tls_listen.clone());
-            let tls_store = Arc::new(DynamicCertStore::new(consul_tls.strict_sni));
-            let consul_config = ConsulConfig::for_tls_cert_watch(&config.consul);
-            let mut initial_index = 0;
-            let mut initial_snapshot_ready = false;
-
-            match ConsulClient::new(consul_config.clone()) {
-                Ok(client) => {
-                    match init_runtime.block_on(tls_store.refresh_from_consul(
-                        &client,
-                        &consul_tls.cert_prefix,
-                        0,
-                    )) {
-                        Ok(index) => {
-                            initial_index = index;
-                            let status = tls_store.status();
-                            initial_snapshot_ready = !status.loaded_certificates.is_empty();
-                            if initial_snapshot_ready {
-                                tracing::info!(
-                                    prefix = %consul_tls.cert_prefix,
-                                    initial_index,
-                                    strict_sni = consul_tls.strict_sni,
-                                    certificates = ?status.loaded_certificates,
-                                    "Loaded initial TLS certificate snapshot from Consul"
-                                );
-                            } else {
-                                tracing::warn!(
-                                    prefix = %consul_tls.cert_prefix,
-                                    initial_index,
-                                    strict_sni = consul_tls.strict_sni,
-                                    require_initial_snapshot = consul_tls.require_initial_snapshot,
-                                    last_error = ?status.last_error,
-                                    "Initial Consul TLS snapshot did not yield any active certificates"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                prefix = %consul_tls.cert_prefix,
-                                require_initial_snapshot = consul_tls.require_initial_snapshot,
-                                error = %e,
-                                "Initial Consul TLS certificate load failed"
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to create Consul client for initial TLS certificate load"
-                    );
-                }
-            }
-
-            if consul_tls.require_initial_snapshot && !initial_snapshot_ready {
-                tracing::error!(
-                    prefix = %consul_tls.cert_prefix,
-                    strict_sni = consul_tls.strict_sni,
-                    "Initial Consul TLS snapshot is required but unavailable; refusing to start"
-                );
-                std::process::exit(1);
-            }
-
-            match build_tls_settings(tls_store.clone(), client_auth_state.clone()) {
-                Ok(mut settings) => {
-                    settings.enable_h2();
-                    lb_service.add_tls_with_settings(&tls_listen, None, settings);
-                    tracing::info!(
-                        addr = %tls_listen,
-                        public_addr = %public_tls_listen,
-                        source = "consul_kv",
-                        prefix = %consul_tls.cert_prefix,
-                        strict_sni = consul_tls.strict_sni,
-                        client_auth = client_auth_config.as_ref().map(|cfg| format!("{:?}", cfg.mode).to_lowercase()).unwrap_or_else(|| "off".to_string()),
-                        h2_enabled = true,
-                        "Proxy listening (HTTPS/TLS)"
-                    );
-                    https_fallback_ready = true;
-                    tls_store_for_admin = Some(tls_store.clone());
-                    tls_background_service = Some(ConsulTlsBackgroundService {
-                        tls_store,
-                        consul_config,
-                        cert_prefix: consul_tls.cert_prefix,
-                        initial_index,
-                    });
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "Failed to configure Consul-backed TLS listener"
-                    );
-                }
-            }
-        }
-        Ok(None) => {}
-        Err(e) => {
-            tracing::error!(error = %e, "Invalid TLS source configuration; skipping HTTPS listener");
         }
     }
 
     server.add_service(lb_service);
 
-    let service_config = Arc::new(config.clone());
-    let shared_config = runtime_config;
+    // ── Background Services ─────────────────────────────────────────────────
 
-    if config.consul.service_discovery || config.consul.kv_watching {
+    let service_config = Arc::new(config.clone());
+    let shared_config = runtime_config.clone();
+    let consul_enabled = service_config.consul.service_discovery || service_config.consul.kv_watching;
+
+    if consul_enabled {
         let mut consul_service = background_service(
             "consul watcher",
             ConsulBackgroundService {
@@ -743,16 +867,22 @@ fn main() {
         server.add_service(consul_service);
     }
 
-    if let Some(tls_service_cfg) = tls_background_service {
+    for tls_service_cfg in tls_background_services {
         let mut tls_service = background_service("tls cert watcher", tls_service_cfg);
         tls_service.threads = Some(1);
         server.add_service(tls_service);
     }
 
-    if let Some(client_ca_service_cfg) = client_ca_background_service {
+    for client_ca_service_cfg in client_ca_background_services {
         let mut client_ca_service = background_service("client ca watcher", client_ca_service_cfg);
         client_ca_service.threads = Some(1);
         server.add_service(client_ca_service);
+    }
+
+    for file_cert_watcher in file_cert_watchers {
+        let mut cert_service = background_service("file cert watcher", file_cert_watcher);
+        cert_service.threads = Some(1);
+        server.add_service(cert_service);
     }
 
     if tcp_mode == TcpMode::HttpsTcpSni && !https_fallback_ready {
@@ -781,13 +911,32 @@ fn main() {
         AdminBackgroundService {
             config: shared_config,
             route_table: managed_table.clone(),
-            tls_store: tls_store_for_admin,
-            client_ca_store: client_ca_store_for_admin,
+            tls_store: tls_stores_for_admin.first().cloned(),
+            client_ca_store: client_ca_stores_for_admin.first().cloned(),
             log_buffer: Some(sentirum_lb::admin::logs::global_log_buffer()),
+            file_certs: file_cert_handles.clone(),
         },
     );
     admin_service.threads = Some(1);
     server.add_service(admin_service);
+
+    // Health check background service
+    {
+        let interval = sentirum_lb::config::Config::parse_duration(
+            &service_config.proxy.health_check_interval,
+        );
+        if !interval.is_zero() {
+            let mut health_service = background_service(
+                "health checker",
+                HealthCheckBackgroundService {
+                    route_table: managed_table.clone(),
+                    config: runtime_config.clone(),
+                },
+            );
+            health_service.threads = Some(1);
+            server.add_service(health_service);
+        }
+    }
 
     tracing::info!("Sentirum LB is ready");
     server.run_forever();

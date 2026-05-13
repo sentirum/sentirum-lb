@@ -47,17 +47,25 @@ pub(super) fn is_websocket_upgrade(header: &pingora_http::RequestHeader) -> bool
         .unwrap_or(false)
 }
 
-fn is_grpc_content_type(content_type: &str) -> bool {
+/// Check if content_type matches the given media type prefix, but only if
+/// followed by a parameter delimiter (`;`, space, tab), media type suffix (`+`),
+/// or end-of-string.
+/// This prevents false positives like "application/grpcfoo" matching "application/grpc".
+fn content_type_matches(content_type: &str, prefix: &str) -> bool {
     let content_type = content_type.trim();
-    content_type.len() >= "application/grpc".len()
-        && content_type[.."application/grpc".len()].eq_ignore_ascii_case("application/grpc")
+    let n = prefix.len();
+    content_type.len() >= n
+        && content_type[..n].eq_ignore_ascii_case(prefix)
+        && (content_type.len() == n
+            || matches!(content_type.as_bytes()[n], b';' | b' ' | b'\t' | b'+'))
+}
+
+fn is_grpc_content_type(content_type: &str) -> bool {
+    content_type_matches(content_type, "application/grpc")
 }
 
 fn is_grpc_web_content_type(content_type: &str) -> bool {
-    let content_type = content_type.trim();
-    content_type.len() >= "application/grpc-web".len()
-        && content_type[.."application/grpc-web".len()]
-            .eq_ignore_ascii_case("application/grpc-web")
+    content_type_matches(content_type, "application/grpc-web")
 }
 
 pub(super) fn is_grpc_request(header: &pingora_http::RequestHeader) -> bool {
@@ -94,19 +102,30 @@ pub(super) async fn write_grpc_error_response(
 }
 
 pub(super) fn sni_hostname(authority: &str) -> &str {
+    // Strip protocol prefixes first
+    let authority = authority
+        .strip_prefix("http://")
+        .or_else(|| authority.strip_prefix("https://"))
+        .unwrap_or(authority);
+
+    // Bracketed IPv6: [::1]:port or [::1]
     if authority.starts_with('[') {
         if let Some(end) = authority.find(']') {
-            &authority[1..end]
-        } else {
-            authority
+            return &authority[1..end];
         }
-    } else if let Some(host) = authority.strip_prefix("http://") {
-        host.split(':').next().unwrap_or(host)
-    } else if let Some(host) = authority.strip_prefix("https://") {
-        host.split(':').next().unwrap_or(host)
-    } else {
-        authority.split(':').next().unwrap_or(authority)
+        return authority;
     }
+
+    // Bare IPv6 literal (contains multiple colons, no brackets, no port)
+    if authority.matches(':').count() > 1 {
+        return authority;
+    }
+
+    // host:port — strip the port if it parses as u16
+    authority
+        .rsplit_once(':')
+        .and_then(|(host, port)| port.parse::<u16>().ok().map(|_| host))
+        .unwrap_or(authority)
 }
 
 pub(super) fn grpc_status_for_http_status(status: u16) -> &'static str {

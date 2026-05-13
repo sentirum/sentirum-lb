@@ -12,7 +12,10 @@ pub struct TlsCertConfig {
 
 impl TlsCertConfig {
     pub fn new(cert_path: String, key_path: String) -> Self {
-        Self { cert_path, key_path }
+        Self {
+            cert_path,
+            key_path,
+        }
     }
 
     pub fn validate(&self) -> Result<(), TlsError> {

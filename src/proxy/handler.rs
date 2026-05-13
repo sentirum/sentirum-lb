@@ -2,6 +2,7 @@
 use crate::config::Config;
 use crate::config::SharedConfig;
 use crate::route::picker::pick_target_by_strategy;
+use crate::route::table::MatcherKind;
 use crate::route::registry::ManagedRouteTable;
 use crate::route::table::Table;
 use async_trait::async_trait;
@@ -153,9 +154,10 @@ impl SentirumProxy {
         &self,
         host: &str,
         path: &str,
-        matcher: &str,
+        matcher: MatcherKind,
         strategy: &str,
         cb_enabled: bool,
+        headers: &http::HeaderMap,
     ) -> Option<std::sync::Arc<crate::route::target::Target>> {
         let table = self.route_table.get();
         let table: &Table = &table;
@@ -164,24 +166,78 @@ impl SentirumProxy {
         if let Some(route) = table.lookup_route(host, path, matcher)
             && !route.w_targets.is_empty()
         {
+            // Header-based target filtering:
+            // Fast path: if no target has header constraints, skip filtering entirely.
+            let any_header_constraint = route.targets.iter().any(|t| {
+                t.opts.contains_key("header")
+            });
+
+            let (header_matching_targets, header_matching_w) = if any_header_constraint {
+                let matching: Vec<Arc<crate::route::target::Target>> = route
+                    .targets
+                    .iter()
+                    .filter(|t| t.matches_headers(headers))
+                    .cloned()
+                    .collect();
+
+                if matching.is_empty() {
+                    tracing::debug!(host, path, "No targets matched header constraints");
+                    return None;
+                }
+
+                let matching_w: Vec<Arc<crate::route::target::Target>> = route
+                    .w_targets
+                    .iter()
+                    .filter(|t| t.matches_headers(headers))
+                    .cloned()
+                    .collect();
+                (matching, matching_w)
+            } else {
+                // Fast path: no header constraints, use all targets directly
+                (route.targets.clone(), route.w_targets.clone())
+            };
+
+            let w_list = if header_matching_w.is_empty() {
+                &header_matching_targets
+            } else {
+                &header_matching_w
+            };
+
             if let Some(target) = pick_target_by_strategy(
                 strategy,
-                &route.targets,
-                &route.w_targets,
+                &header_matching_targets,
+                w_list,
                 &route.rr_counter,
             ) {
-                if !cb_enabled || target.health_tracker.circuit_breaker().can_accept_request() {
+                // Active health check: skip targets marked unhealthy by probing
+                if !target.health_tracker.is_probe_healthy() {
+                    tracing::debug!(
+                        host,
+                        path,
+                        target_url = %target.url,
+                        "Skipping unhealthy target (active health check)"
+                    );
+                    // Fall through to try fallback targets below
+                } else if !cb_enabled || target.health_tracker.circuit_breaker().can_accept_request() {
                     return Some(target);
                 }
 
-                let best_fallback = route
-                    .targets
-                    .iter()
-                    .find(|t| {
-                        t.url != target.url
-                            && t.health_tracker.circuit_breaker().can_accept_request()
-                    })
-                    .cloned();
+                let best_fallback = {
+                    let healthy_fallbacks: Vec<Arc<crate::route::target::Target>> = header_matching_targets
+                        .iter()
+                        .filter(|t| {
+                            t.url != target.url
+                                && t.health_tracker.is_probe_healthy()
+                                && t.health_tracker.circuit_breaker().can_accept_request()
+                        })
+                        .cloned()
+                        .collect();
+                    if !healthy_fallbacks.is_empty() {
+                        pick_target_by_strategy(strategy, &healthy_fallbacks, &healthy_fallbacks, &route.rr_counter)
+                    } else {
+                        None
+                    }
+                };
                 if let Some(fallback) = &best_fallback {
                     tracing::debug!(
                         host,
@@ -288,6 +344,7 @@ impl ProxyHttp for SentirumProxy {
         ctx: &mut Self::CTX,
     ) -> pingora::Result<Box<HttpPeer>> {
         let (host, path) = extract_host_path(session);
+        let headers = session.req_header().headers.clone();
 
         tracing::debug!(host, path, "Looking up route");
 
@@ -296,9 +353,10 @@ impl ProxyHttp for SentirumProxy {
             .lookup_target(
                 host,
                 path,
-                &config.proxy.matcher,
+                MatcherKind::from_config(&config.proxy.matcher),
                 &config.proxy.strategy,
                 config.proxy.circuit_breaker_enabled,
+                &headers,
             )
             .ok_or_else(|| {
                 tracing::warn!(host, path, "No route found");
@@ -307,7 +365,27 @@ impl ProxyHttp for SentirumProxy {
 
         tracing::debug!(host, path, target_url = %target.url, "Route found");
 
+        // Rate limit check — return 429 if over limit
+        if !target.try_acquire_rate_limit(
+            config.proxy.rate_limit_per_target,
+            config.proxy.rate_limit_burst,
+        ) {
+            tracing::warn!(
+                host,
+                path,
+                target_url = %target.url,
+                rate_limit = config.proxy.rate_limit_per_target,
+                burst = config.proxy.rate_limit_burst,
+                "Rate limit exceeded"
+            );
+            crate::metrics::prometheus::global()
+                .rate_limit_rejected_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Err(Error::new(ErrorType::HTTPStatus(429)));
+        }
+
         // Circuit breaker check — fail fast if circuit is open
+        // Checked BEFORE acquiring connection slot to avoid unnecessary acquire/release cycles
         if config.proxy.circuit_breaker_enabled
             && !target.health_tracker.circuit_breaker().allow_request()
         {
@@ -334,11 +412,6 @@ impl ProxyHttp for SentirumProxy {
                 max_connections = config.proxy.max_connections,
                 "Upstream concurrency limit reached"
             );
-            // Resolve the consumed circuit breaker probe slot so the breaker
-            // doesn't get stuck in half-open when the connection limit is hit.
-            if config.proxy.circuit_breaker_enabled {
-                target.health_tracker.circuit_breaker().record_error();
-            }
             return Err(Error::new(ErrorType::HTTPStatus(503)));
         }
 
@@ -419,11 +492,7 @@ impl ProxyHttp for SentirumProxy {
             .map(|s| s.elapsed().as_micros() as u64)
             .unwrap_or(0);
         let metrics = crate::metrics::prometheus::global();
-        metrics.record_protocol_request(
-            ctx.is_grpc,
-            ctx.is_grpc_web,
-            ctx.is_websocket,
-        );
+        metrics.record_protocol_request(ctx.is_grpc, ctx.is_grpc_web, ctx.is_websocket);
         metrics.record_request(status, latency_us);
         metrics.record_bytes(ctx.upstream_response_bytes);
         metrics.disconnect();
@@ -543,11 +612,11 @@ impl ProxyHttp for SentirumProxy {
         body: &mut Option<bytes::Bytes>,
         _end_of_stream: bool,
         ctx: &mut Self::CTX,
-    ) -> pingora::Result<()> {
+    ) -> pingora::Result<Option<std::time::Duration>> {
         if let Some(data) = body {
             ctx.upstream_response_bytes += data.len();
         }
-        Ok(())
+        Ok(None)
     }
 
     fn upstream_response_trailer_filter(
@@ -674,7 +743,6 @@ impl ProxyHttp for SentirumProxy {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1016,7 +1084,8 @@ mod tests {
                 admin_token: String::new(),
                 admin_users: vec![],
                 workers: 0,
-            drain_timeout: String::new(),},
+                drain_timeout: String::new(),
+            },
             consul: crate::config::ConsulConfig {
                 address: "127.0.0.1:8500".into(),
                 scheme: "http".into(),
@@ -1038,7 +1107,9 @@ mod tests {
             },
             logging: crate::config::LoggingConfig::default(),
             tls: crate::config::TlsConfig::default(),
+            tls_listeners: Vec::new(),
             tcp: crate::config::TcpConfig::default(),
+                parsed_timeouts: Default::default(),
         });
         let target =
             crate::route::target::Target::new("svc".into(), "grpcs://example.com/service".into());
@@ -1064,7 +1135,8 @@ mod tests {
                 admin_token: String::new(),
                 admin_users: vec![],
                 workers: 0,
-            drain_timeout: String::new(),},
+                drain_timeout: String::new(),
+            },
             consul: crate::config::ConsulConfig {
                 address: "127.0.0.1:8500".into(),
                 scheme: "http".into(),
@@ -1082,6 +1154,8 @@ mod tests {
             proxy: crate::config::ProxyConfig::default(),
             logging: crate::config::LoggingConfig::default(),
             tls: crate::config::TlsConfig::default(),
+            tls_listeners: Vec::new(),
+                parsed_timeouts: Default::default(),
             tcp: crate::config::TcpConfig::default(),
         });
         let mut target =
@@ -1107,7 +1181,8 @@ mod tests {
                 admin_token: String::new(),
                 admin_users: vec![],
                 workers: 0,
-            drain_timeout: String::new(),},
+                drain_timeout: String::new(),
+            },
             consul: crate::config::ConsulConfig {
                 address: "127.0.0.1:8500".into(),
                 scheme: "http".into(),
@@ -1125,6 +1200,8 @@ mod tests {
             proxy: crate::config::ProxyConfig::default(),
             logging: crate::config::LoggingConfig::default(),
             tls: crate::config::TlsConfig::default(),
+                parsed_timeouts: Default::default(),
+            tls_listeners: Vec::new(),
             tcp: crate::config::TcpConfig::default(),
         });
         let mut target =

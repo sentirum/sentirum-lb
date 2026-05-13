@@ -38,9 +38,10 @@ impl ClientCertIdentityCache {
     }
 
     pub(super) fn insert(&mut self, digest_hex: String, identity: ClientCertIdentity) {
+        if self.entries.contains_key(&digest_hex) {
+            return;
+        }
         self.entries.insert(digest_hex.clone(), identity);
-        // If this key already existed, remove it from its old position
-        self.order.retain(|entry| entry != &digest_hex);
         self.order.push_back(digest_hex);
         self.evict_if_needed();
     }
@@ -153,7 +154,9 @@ fn client_certificate_identity(session: &Session) -> Option<ClientCertIdentity> 
     // Cache entries are richer (have CN, OU, subject) and carry their own `verified`
     // from the X509 verify callback.  We OR the flags so that either source of
     // truth is sufficient.
+    let mut has_full_cache = false;
     if let Some(cached) = cached_client_certificate_identity(&digest.cert_digest) {
+        has_full_cache = cached.common_name.is_some() && cached.subject.is_some();
         identity.serial = cached.serial.or(identity.serial);
         identity.organization = cached.organization.or(identity.organization);
         identity.organizational_unit = cached.organizational_unit;
@@ -169,27 +172,31 @@ fn client_certificate_identity(session: &Session) -> Option<ClientCertIdentity> 
     // `ssl.verify_result()`.  If no peer certificate is present (e.g. the
     // handshake is in Optional mode and the client sent no cert), this
     // block is skipped entirely, preserving the merged result from phases 1+2.
-    if let Some(stream) = session.stream()
-        && let Some(ssl) = stream.get_ssl()
-        && let Some(cert) = ssl.peer_certificate()
-    {
-        remember_verified_client_certificate(&cert);
-        identity.common_name = crate::proxy::tls::first_subject_value(&cert, Nid::COMMONNAME);
-        identity.organization =
-            crate::proxy::tls::first_subject_value(&cert, Nid::ORGANIZATIONNAME)
-                .or(identity.organization);
-        identity.organizational_unit =
-            crate::proxy::tls::first_subject_value(&cert, Nid::ORGANIZATIONALUNITNAME);
-        identity.subject = Some(crate::proxy::tls::certificate_subject_string_ref(&cert));
-        identity.sha256 = cert
-            .digest(MessageDigest::sha256())
-            .ok()
-            .map(|bytes| hex_lower(bytes.as_ref()))
-            .or(identity.sha256);
-        // Authoritative: the OpenSSL verify result is the final word on
-        // whether the chain is valid, overriding heuristics from phases 1–2.
-        identity.verified = ssl.verify_result().as_raw() == pingora::tls::ssl_sys::X509_V_OK;
-    }
+    //
+    // Skip when cache already has full data to avoid expensive per-request
+    // X.509 parsing + SHA-256 on the hot path.
+    if !has_full_cache
+        && let Some(stream) = session.stream()
+            && let Some(ssl) = stream.get_ssl()
+            && let Some(cert) = ssl.peer_certificate()
+        {
+            remember_verified_client_certificate(&cert);
+            identity.common_name = crate::proxy::tls::first_subject_value(&cert, Nid::COMMONNAME);
+            identity.organization =
+                crate::proxy::tls::first_subject_value(&cert, Nid::ORGANIZATIONNAME)
+                    .or(identity.organization);
+            identity.organizational_unit =
+                crate::proxy::tls::first_subject_value(&cert, Nid::ORGANIZATIONALUNITNAME);
+            identity.subject = Some(crate::proxy::tls::certificate_subject_string_ref(&cert));
+            identity.sha256 = cert
+                .digest(MessageDigest::sha256())
+                .ok()
+                .map(|bytes| hex_lower(bytes.as_ref()))
+                .or(identity.sha256);
+            // Authoritative: the OpenSSL verify result is the final word on
+            // whether the chain is valid, overriding heuristics from phases 1–2.
+            identity.verified = ssl.verify_result().as_raw() == pingora::tls::ssl_sys::X509_V_OK;
+        }
 
     Some(identity)
 }

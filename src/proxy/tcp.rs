@@ -117,10 +117,8 @@ impl BackgroundService for TcpBackgroundService {
                     }
                 };
                 let config = self.config.load();
-                let public_listen = crate::proxy::tls::tls_listen_addr(
-                    &config.server.listen,
-                    &config.tls.listen,
-                );
+                let public_listen =
+                    crate::proxy::tls::tls_listen_addr(&config.server.listen, &config.tls.listen);
                 let port = match parse_listener_port(&public_listen) {
                     Some(port) => port,
                     None => {
@@ -185,13 +183,22 @@ async fn run_dynamic_tcp_manager(
         let task = handle.task;
         match tokio::time::timeout(Duration::from_secs(5), task).await {
             Ok(Ok(())) => {
-                tracing::info!(listen_port = port, "Dynamic TCP listener shut down gracefully");
+                tracing::info!(
+                    listen_port = port,
+                    "Dynamic TCP listener shut down gracefully"
+                );
             }
             Ok(Err(_)) => {
-                tracing::warn!(listen_port = port, "Dynamic TCP listener task failed during shutdown");
+                tracing::warn!(
+                    listen_port = port,
+                    "Dynamic TCP listener task failed during shutdown"
+                );
             }
             Err(_) => {
-                tracing::warn!(listen_port = port, "Dynamic TCP listener grace period elapsed, aborting");
+                tracing::warn!(
+                    listen_port = port,
+                    "Dynamic TCP listener grace period elapsed, aborting"
+                );
             }
         }
     }
@@ -365,7 +372,11 @@ async fn handle_tcp_connection(
     let local_addr = downstream.local_addr()?;
     let local_addr_str = local_addr.to_string();
     let config_snapshot = config.load();
-    let target = match lookup_target(&route_table, &config_snapshot.proxy.strategy, &local_addr_str) {
+    let target = match lookup_target(
+        &route_table,
+        &config_snapshot.proxy.strategy,
+        &local_addr_str,
+    ) {
         Some(target) => target,
         None => {
             tracing::warn!(local_addr = %local_addr_str, "No TCP route found for local listener");
@@ -446,7 +457,8 @@ async fn handle_https_tcp_sni_connection(
     let target = read_server_name(&client_hello[5..])
         .filter(|server_name| !server_name.is_empty())
         .and_then(|server_name| {
-            lookup_sni_target(&route_table, &strategy, &server_name).map(|target| (server_name, target))
+            lookup_sni_target(&route_table, &strategy, &server_name)
+                .map(|target| (server_name, target))
         });
 
     if let Some((server_name, target)) = target {
@@ -478,7 +490,12 @@ fn lookup_target(
     let table = route_table.get();
     let table: &Table = &table;
     let route = table.lookup_tcp_route_for_local_addr(local_addr)?;
-    pick_target_by_strategy(strategy, &route.targets, &route.w_targets, &route.rr_counter)
+    pick_target_by_strategy(
+        strategy,
+        &route.targets,
+        &route.w_targets,
+        &route.rr_counter,
+    )
 }
 
 fn lookup_sni_target(
@@ -489,7 +506,12 @@ fn lookup_sni_target(
     let table = route_table.get();
     let table: &Table = &table;
     let route = table.lookup_tcp_sni_route(server_name)?;
-    pick_target_by_strategy(strategy, &route.targets, &route.w_targets, &route.rr_counter)
+    pick_target_by_strategy(
+        strategy,
+        &route.targets,
+        &route.w_targets,
+        &route.rr_counter,
+    )
 }
 
 async fn proxy_tcp_streams(
@@ -540,7 +562,6 @@ async fn proxy_tcp_streams(
         }
         return Ok(());
     }
-
 
     let mut upstream = match connect_upstream(&target, config_snapshot.as_ref()).await {
         Ok(upstream) => upstream,
@@ -639,7 +660,10 @@ async fn read_exact_with_timeout(
     Ok(())
 }
 
-async fn read_client_hello(stream: &mut TcpStream, timeout: Duration) -> Result<Vec<u8>, std::io::Error> {
+async fn read_client_hello(
+    stream: &mut TcpStream,
+    timeout: Duration,
+) -> Result<Vec<u8>, std::io::Error> {
     let mut headers = [0_u8; 9];
     read_exact_with_timeout(stream, &mut headers, timeout).await?;
     let buffer_size = client_hello_buffer_size(&headers)
@@ -796,7 +820,8 @@ mod tests {
                 admin_token: String::new(),
                 admin_users: vec![],
                 workers: 0,
-            drain_timeout: String::new(),},
+                drain_timeout: String::new(),
+            },
             consul: ConsulConfig {
                 address: "127.0.0.1:8500".to_string(),
                 scheme: "http".to_string(),
@@ -814,7 +839,9 @@ mod tests {
             proxy: ProxyConfig::default(),
             logging: LoggingConfig::default(),
             tls: TlsConfig::default(),
+            tls_listeners: Vec::new(),
             tcp: TcpConfig::default(),
+                parsed_timeouts: Default::default(),
         })
     }
 
@@ -851,7 +878,10 @@ mod tests {
     #[test]
     fn resolve_tcp_mode_defaults_to_disabled() {
         let config = config();
-        assert_eq!(resolve_tcp_mode(config.load().as_ref()).unwrap(), TcpMode::Disabled);
+        assert_eq!(
+            resolve_tcp_mode(config.load().as_ref()).unwrap(),
+            TcpMode::Disabled
+        );
     }
 
     #[test]

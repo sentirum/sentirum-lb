@@ -36,7 +36,6 @@ pub struct ConsulConfig {
 
     /// Include services with "warning" health status in route discovery
     pub include_warning: bool,
-
 }
 
 impl std::fmt::Debug for ConsulConfig {
@@ -100,12 +99,9 @@ impl Default for ConsulConfig {
 }
 
 fn normalize_query_wait(value: &str) -> String {
-    let duration = crate::config::Config::parse_optional_duration(value)
-        .unwrap_or_else(|| Duration::from_secs(300));
-    if duration.is_zero() {
-        "5m".to_string()
-    } else {
-        value.trim().to_string()
+    match crate::config::Config::parse_optional_duration(value) {
+        Some(duration) if !duration.is_zero() => value.trim().to_string(),
+        _ => "5m".to_string(),
     }
 }
 
@@ -288,9 +284,11 @@ impl ConsulClient {
             Value: Option<String>,
         }
 
-        let kv_pairs: Vec<KVPair> = serde_json::from_str(&body).map_err(|e| ConsulError::ParseError(
-            format!("failed to parse response from KV watch for path '{path}': {e}")
-        ))?;
+        let kv_pairs: Vec<KVPair> = serde_json::from_str(&body).map_err(|e| {
+            ConsulError::ParseError(format!(
+                "failed to parse response from KV watch for path '{path}': {e}"
+            ))
+        })?;
         let mut decoded_pairs = Vec::with_capacity(kv_pairs.len());
 
         for kv in kv_pairs {
@@ -398,9 +396,9 @@ impl ConsulClient {
             .unwrap_or(0);
 
         let body = read_success_body(response, "health checks").await?;
-        let checks: Vec<HealthCheck> = serde_json::from_str(&body).map_err(|e| ConsulError::ParseError(
-            format!("failed to parse response from health checks: {e}")
-        ))?;
+        let checks: Vec<HealthCheck> = serde_json::from_str(&body).map_err(|e| {
+            ConsulError::ParseError(format!("failed to parse response from health checks: {e}"))
+        })?;
 
         Ok((checks, new_index))
     }
@@ -438,10 +436,13 @@ impl ConsulClient {
         }
 
         let response = request.send().await?;
-        let body = read_success_body(response, &format!("catalog service '{service_name}'")).await?;
-        let services: Vec<CatalogService> = serde_json::from_str(&body).map_err(|e| ConsulError::ParseError(
-            format!("failed to parse response from catalog service '{service_name}': {e}")
-        ))?;
+        let body =
+            read_success_body(response, &format!("catalog service '{service_name}'")).await?;
+        let services: Vec<CatalogService> = serde_json::from_str(&body).map_err(|e| {
+            ConsulError::ParseError(format!(
+                "failed to parse response from catalog service '{service_name}': {e}"
+            ))
+        })?;
 
         Ok(services)
     }
@@ -482,9 +483,11 @@ impl ConsulClient {
             return Ok(Vec::new());
         }
         let body = read_success_body(response, &format!("KV list for path '{path}'")).await?;
-        let keys: Vec<String> = serde_json::from_str(&body).map_err(|e| ConsulError::ParseError(
-            format!("failed to parse response from KV list for path '{path}': {e}")
-        ))?;
+        let keys: Vec<String> = serde_json::from_str(&body).map_err(|e| {
+            ConsulError::ParseError(format!(
+                "failed to parse response from KV list for path '{path}': {e}"
+            ))
+        })?;
 
         Ok(keys)
     }
