@@ -19,7 +19,6 @@ pub trait Picker: Send + Sync {
 /// Round-robin picker — cycles through targets in order
 pub struct RoundRobinPicker;
 
-
 impl Picker for RoundRobinPicker {
     fn pick(
         &self,
@@ -36,8 +35,8 @@ impl Picker for RoundRobinPicker {
         let counter_val = counter.fetch_add(1, Ordering::Relaxed);
         let idx = counter_val as usize % w_targets.len();
 
-        // DEBUG: Log the pick decision
-        tracing::debug!(
+        // TRACE-level log to avoid hot-path overhead in production.
+        tracing::trace!(
             targets_len = targets.len(),
             w_targets_len = w_targets.len(),
             counter_val = counter_val,
@@ -53,19 +52,17 @@ impl Picker for RoundRobinPicker {
 
 /// Random picker — selects a random target from weighted list
 /// Uses thread-local SmallRng for fast, high-quality randomness (thread-safe)
-pub struct RandomPicker {
-    // Thread-local RNG - each thread gets its own RNG automatically
-}
+pub struct RandomPicker;
 
 impl RandomPicker {
     pub fn new() -> Self {
-        Self {}
+        RandomPicker
     }
 }
 
 impl Default for RandomPicker {
     fn default() -> Self {
-        Self::new()
+        RandomPicker
     }
 }
 
@@ -86,9 +83,6 @@ impl Picker for RandomPicker {
     }
 }
 
-
-
-
 /// Least-connections picker — selects target with the lowest effective load,
 /// where effective load = active_connections / weight.
 ///
@@ -101,7 +95,6 @@ impl Picker for RandomPicker {
 /// Memory ordering: Acquire on load pairs with Release in
 /// `Target::try_acquire_connection_slot`, forming a proper inter-thread
 /// ordering boundary without requiring full SeqCst serialization.
-
 pub struct LeastConnectionsPicker;
 
 impl Picker for LeastConnectionsPicker {
@@ -115,29 +108,60 @@ impl Picker for LeastConnectionsPicker {
             return None;
         }
 
-        // Acquire ordering: pairs with Release in try_acquire_connection_slot.
-        let has_weight = targets.iter().any(|t| t.weight > 0.0);
+        // Single-pass algorithm: find min with or without weights
+        // Avoids filter + min_by_key double iteration
+        let mut best: Option<Arc<Target>> = None;
+        let mut best_score: Option<u64> = None;
 
-        if has_weight {
-            // Weight-aware: pick the target with the lowest connections/weight ratio.
-            // Use OrderedFloat for deterministic comparison of f64 in min_by_key.
-            targets
-                .iter()
-                .filter(|t| t.weight > 0.0)
-                .min_by_key(|t| {
-                    let conns = t.active_connections.load(Ordering::Acquire) as f64;
-                    // Scale by 1e6 to preserve sub-integer precision in integer comparison.
-                    // weight ranges [0.001, 1.0], conns ranges [0, u64::MAX].
-                    // conns / weight gives effective load — lower is preferred.
-                    (conns / t.weight * 1e6) as u64
-                })
-                .map(Arc::clone)
-        } else {
-            // No weights configured — simple min-connections (Fabio-compatible).
-            targets
-                .iter()
-                .min_by_key(|t| t.active_connections.load(Ordering::Acquire))
-                .map(Arc::clone)
+        // First pass: weighted targets
+        for target in targets {
+            // Skip weight==0 targets (no traffic)
+            if target.weight <= 0.0 {
+                continue;
+            }
+            let conns = target.active_connections.load(Ordering::Acquire) as f64;
+            let score = (conns / target.weight * 1e6) as u64;
+
+            if best_score.is_none_or(|b| score < b) {
+                best = Some(Arc::clone(target));
+                best_score = Some(score);
+            }
+        }
+
+        // If all weights are 0, fallback to simple min-connections
+        if best.is_none() {
+            for target in targets {
+                let conns = target.active_connections.load(Ordering::Acquire);
+                let score = conns;
+
+                if best_score.is_none_or(|b| score < b) {
+                    best = Some(Arc::clone(target));
+                    best_score = Some(score);
+                }
+            }
+        }
+
+        best
+    }
+}
+
+/// Pick a target directly from a strategy name without allocating a boxed picker.
+pub fn pick_target_by_strategy(
+    strategy: &str,
+    targets: &[Arc<Target>],
+    w_targets: &[Arc<Target>],
+    counter: &std::sync::atomic::AtomicU64,
+) -> Option<Arc<Target>> {
+    match strategy {
+        "round-robin" | "rr" | "" => RoundRobinPicker.pick(targets, w_targets, counter),
+        "random" | "rnd" => {
+            static PICKER: RandomPicker = RandomPicker;
+            PICKER.pick(targets, w_targets, counter)
+        }
+        "least-connections" | "lc" => LeastConnectionsPicker.pick(targets, w_targets, counter),
+        _ => {
+            tracing::warn!("Unknown picker '{}', defaulting to round-robin", strategy);
+            RoundRobinPicker.pick(targets, w_targets, counter)
         }
     }
 }
@@ -155,7 +179,6 @@ pub fn create_picker(strategy: &str) -> Box<dyn Picker> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,7 +186,12 @@ mod tests {
 
     fn make_targets(count: usize) -> Vec<Arc<Target>> {
         (0..count)
-            .map(|i| Arc::new(Target::new(format!("svc-{}", i), format!("http://10.0.0.{}:8080/", i+1))))
+            .map(|i| {
+                Arc::new(Target::new(
+                    format!("svc-{}", i),
+                    format!("http://10.0.0.{}:8080/", i + 1),
+                ))
+            })
             .collect()
     }
 
@@ -185,7 +213,11 @@ mod tests {
         let values: Vec<_> = counts.values().cloned().collect();
         assert_eq!(values.len(), 2, "Should use both targets");
         for v in &values {
-            assert!(*v >= 40 && *v <= 60, "Each target should get ~50% traffic, got {}", v);
+            assert!(
+                *v >= 40 && *v <= 60,
+                "Each target should get ~50% traffic, got {}",
+                v
+            );
         }
     }
 
@@ -208,13 +240,20 @@ mod tests {
         let mut counts = std::collections::HashMap::new();
         // Run through the full w_targets range to verify equal distribution
         for _ in 0..1000 {
-            let picked = picker.pick(&route.targets, &route.w_targets, &counter).unwrap();
+            let picked = picker
+                .pick(&route.targets, &route.w_targets, &counter)
+                .unwrap();
             *counts.entry(picked.url.clone()).or_insert(0) += 1;
         }
 
         // Both targets must receive traffic (50% each exactly, since w_targets is
         // grouped by target: first 500 slots = svc-a, next 500 = svc-b)
-        assert_eq!(counts.len(), 2, "Round-robin must distribute across both targets, got: {:?}", counts);
+        assert_eq!(
+            counts.len(),
+            2,
+            "Round-robin must distribute across both targets, got: {:?}",
+            counts
+        );
         let svc_a = counts.get("http://10.0.0.1:80/").unwrap();
         let svc_b = counts.get("http://10.0.0.2:80/").unwrap();
         assert_eq!(*svc_a, 500, "svc-a should get 500 picks");
@@ -240,12 +279,19 @@ mod tests {
         let mut counts = std::collections::HashMap::new();
         // Run through the full w_targets range
         for _ in 0..1000 {
-            let picked = picker.pick(&route.targets, &route.w_targets, &counter).unwrap();
+            let picked = picker
+                .pick(&route.targets, &route.w_targets, &counter)
+                .unwrap();
             *counts.entry(picked.url.clone()).or_insert(0) += 1;
         }
 
         // heavy: 900 slots, light: 100 slots → 90/10 split
-        assert_eq!(counts.len(), 2, "Both targets must get traffic: {:?}", counts);
+        assert_eq!(
+            counts.len(),
+            2,
+            "Both targets must get traffic: {:?}",
+            counts
+        );
         let heavy = counts.get("http://10.0.0.1:80/").unwrap();
         let light = counts.get("http://10.0.0.2:80/").unwrap();
         assert_eq!(*heavy, 900, "heavy target should get 900 picks");
@@ -266,7 +312,6 @@ mod tests {
         }
 
         assert_eq!(counts.len(), 3, "Should use all three targets");
-
     }
 
     #[test]
@@ -309,26 +354,49 @@ mod tests {
         route.compute_weights();
 
         // Simulate: heavy has 8 connections, light has 3
-        route.targets[0].active_connections.store(8, Ordering::Release);
-        route.targets[1].active_connections.store(3, Ordering::Release);
+        route.targets[0]
+            .active_connections
+            .store(8, Ordering::Release);
+        route.targets[1]
+            .active_connections
+            .store(3, Ordering::Release);
 
         let picker = LeastConnectionsPicker;
         let counter = AtomicU64::new(0);
-        let picked = picker.pick(&route.targets, &route.w_targets, &counter).unwrap();
+        let picked = picker
+            .pick(&route.targets, &route.w_targets, &counter)
+            .unwrap();
         // light has lower effective load (10.0 vs 11.4)
-        assert_eq!(picked.url, "http://10.0.0.2:80/", "Should pick light (lower effective load)");
+        assert_eq!(
+            picked.url, "http://10.0.0.2:80/",
+            "Should pick light (lower effective load)"
+        );
 
         // Now equalize: heavy 7, light 3
-        route.targets[0].active_connections.store(7, Ordering::Release);
-        let picked2 = picker.pick(&route.targets, &route.w_targets, &counter).unwrap();
+        route.targets[0]
+            .active_connections
+            .store(7, Ordering::Release);
+        let picked2 = picker
+            .pick(&route.targets, &route.w_targets, &counter)
+            .unwrap();
         // Both have effective load = 10.0, pick first (heavy)
-        assert_eq!(picked2.url, "http://10.0.0.1:80/", "Should pick heavy (equal load, first wins)");
+        assert_eq!(
+            picked2.url, "http://10.0.0.1:80/",
+            "Should pick heavy (equal load, first wins)"
+        );
 
         // Verify heavy can hold more: heavy 6, light 3
-        route.targets[0].active_connections.store(6, Ordering::Release);
-        let picked3 = picker.pick(&route.targets, &route.w_targets, &counter).unwrap();
+        route.targets[0]
+            .active_connections
+            .store(6, Ordering::Release);
+        let picked3 = picker
+            .pick(&route.targets, &route.w_targets, &counter)
+            .unwrap();
         // heavy: 6/0.7 ≈ 8.57, light: 3/0.3 = 10.0 → pick heavy
-        assert_eq!(picked3.url, "http://10.0.0.1:80/", "Heavy should still be preferred at proportional load");
+        assert_eq!(
+            picked3.url, "http://10.0.0.1:80/",
+            "Heavy should still be preferred at proportional load"
+        );
     }
 
     #[test]
@@ -353,8 +421,13 @@ mod tests {
         let counter = AtomicU64::new(0);
 
         for _ in 0..100 {
-            let picked = picker.pick(&route.targets, &route.w_targets, &counter).unwrap();
-            assert_ne!(picked.url, "http://10.0.0.1:80/", "Draining target should never be picked");
+            let picked = picker
+                .pick(&route.targets, &route.w_targets, &counter)
+                .unwrap();
+            assert_ne!(
+                picked.url, "http://10.0.0.1:80/",
+                "Draining target should never be picked"
+            );
         }
     }
 

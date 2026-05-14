@@ -1,14 +1,14 @@
 [package]
 name = "sentirum-lb"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2024"
 description = "High-performance Rust-based load balancer with Consul KV integration, inspired by Fabio"
 license = "MIT"
 
 [dependencies]
 # Proxy framework (pingora umbrella crate re-exports everything)
-pingora = { version = "0.5", features = ["proxy", "lb", "openssl"] }
-pingora-http = "0.5"
+pingora = { version = "0.8", features = ["proxy", "lb", "openssl"] }
+pingora-http = "0.8"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -70,7 +70,7 @@ parking_lot = "0.12"
 # Concurrent hash map (for DNS cache)
 dashmap = "5"
 
-axum = "0.8.8"
+axum = "0.8"
 tower = "0.5.3"
 http = "1"
 rustls = { version = "0.23", features = ["ring"] }

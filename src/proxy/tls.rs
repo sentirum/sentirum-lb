@@ -5,27 +5,29 @@
 
 use crate::consul::ConsulClient;
 use arc_swap::ArcSwap;
+#[cfg(test)]
+use pingora::tls::ssl_sys;
 use pingora::tls::{
     pkey::{PKey, Private},
     x509::{X509, store::X509Store},
 };
-#[cfg(test)]
-use pingora::tls::ssl_sys;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 mod config;
 mod helpers;
+mod ocsp;
 mod selector;
+mod watcher;
 
 pub use config::{
     ClientAuthConfig, ClientAuthMode, ClientCaSource, ConsulTlsConfig, TlsCertConfig, TlsMode,
     tls_listen_addr,
 };
-pub(crate) use helpers::{certificate_subject_string_ref, first_subject_value};
 use helpers::*;
+pub(crate) use helpers::{asn1_time_to_unix_seconds, certificate_subject_string_ref, first_subject_value, now_unix, parse_certificate_chain};
 pub use selector::{build_static_tls_settings, build_tls_settings, load_static_certificate};
-
+pub use watcher::{FileCertWatcherService, SharedFileCert, load_shareable_cert};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DynamicTlsCertificateStatus {
@@ -594,7 +596,6 @@ impl CertSnapshot {
         }
     }
 }
-
 
 /// TLS-related errors.
 #[derive(Debug, thiserror::Error)]

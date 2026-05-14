@@ -83,7 +83,12 @@ fn parse_route_add(tokens: &[String]) -> Option<RouteDef> {
             "weight" => {
                 i += 1;
                 if i < tokens.len() {
-                    weight = tokens[i].parse().unwrap_or(0.0);
+                    match tokens[i].parse::<f64>() {
+                        Ok(w) if w >= 0.0 => weight = w,
+                        _ => {
+                            tracing::warn!(weight = %tokens[i], "Invalid weight in route add; skipping");
+                        }
+                    }
                 }
             }
             "tags" => {
@@ -196,7 +201,12 @@ fn parse_route_weight(tokens: &[String]) -> Option<RouteDef> {
             "weight" => {
                 i += 1;
                 if i < tokens.len() {
-                    weight = tokens[i].parse().unwrap_or(0.0);
+                    match tokens[i].parse::<f64>() {
+                        Ok(w) if w >= 0.0 => weight = w,
+                        _ => {
+                            tracing::warn!(weight = %tokens[i], "Invalid weight in route weight; skipping");
+                        }
+                    }
                 }
             }
             "tags" => {
@@ -248,6 +258,11 @@ fn tokenize(line: &str) -> Option<Vec<String>> {
                 current.push(c);
             }
         }
+    }
+
+    if in_quotes {
+        tracing::warn!(%line, "Unterminated quoted string in route command");
+        return None;
     }
 
     if !current.is_empty() {
@@ -423,5 +438,25 @@ route add svc2 host2/ http://10.0.0.3:9090/
         let d = &defs[0];
         assert_eq!(d.src_host(), "myhost.com");
         assert_eq!(d.src_path(), "api/v2/");
+    }
+
+    #[test]
+    fn test_parse_route_add_with_header_opts() {
+        let input = r#"route add canary api.example.com/ http://10.0.0.2:8080/ opts "header=x-version:v2""#;
+        let defs = parse_route_commands(input);
+        assert_eq!(defs.len(), 1);
+        let d = &defs[0];
+        assert_eq!(d.opts.get("header"), Some(&"x-version:v2".to_string()));
+    }
+
+    #[test]
+    fn test_parse_route_add_with_multi_header_and_weight() {
+        let input = r#"route add svc api.example.com/ http://10.0.0.2:8080/ weight 50 opts "header=x-version:v2,x-env:canary strip=/api""#;
+        let defs = parse_route_commands(input);
+        assert_eq!(defs.len(), 1);
+        let d = &defs[0];
+        assert_eq!(d.weight, 50.0);
+        assert_eq!(d.opts.get("header"), Some(&"x-version:v2,x-env:canary".to_string()));
+        assert_eq!(d.opts.get("strip"), Some(&"/api".to_string()));
     }
 }

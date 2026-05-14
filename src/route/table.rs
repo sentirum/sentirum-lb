@@ -2,8 +2,30 @@ use crate::route::definition::{RouteCmd, RouteDef};
 use crate::route::target::{Target, TargetStatsRegistry};
 use arc_swap::ArcSwap;
 use glob::Pattern;
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
+
+/// Compiled matcher strategy — avoids string comparisons on the hot path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatcherKind {
+    Prefix,
+    CaseInsensitivePrefix,
+    Glob,
+}
+
+impl MatcherKind {
+    /// Parse from config string. Falls back to Prefix for unknown values.
+    #[inline]
+    pub fn from_config(s: &str) -> Self {
+        match s {
+            "prefix" | "" => MatcherKind::Prefix,
+            "iprefix" => MatcherKind::CaseInsensitivePrefix,
+            "glob" => MatcherKind::Glob,
+            _ => MatcherKind::Prefix,
+        }
+    }
+}
 
 /// A route maps a host + path prefix to one or more target backends.
 #[derive(Debug)]
@@ -109,7 +131,6 @@ impl Route {
                     }
                 })
                 .sum();
-
 
             let dynamic_count = self
                 .targets
@@ -237,14 +258,17 @@ impl Table {
     /// Lookup a route by host and path.
     /// Returns the matching route (with targets) for the given matcher strategy.
     /// Host is normalized to lowercase to match Fabio semantics (routes are stored lowercased).
-    pub fn lookup_route(&self, host: &str, path: &str, matcher: &str) -> Option<&Arc<Route>> {
+    pub fn lookup_route(&self, host: &str, path: &str, matcher: MatcherKind) -> Option<&Arc<Route>> {
         // Normalize host to lowercase for case-insensitive matching.
-        // HTTP Host headers may be mixed-case (e.g. "Example.com"), but
-        // routes from service discovery and KV are stored lowercased.
-        let host_lower = host.to_ascii_lowercase();
+        // Use Cow to avoid allocation when host is already lowercase.
+        let host_key: Cow<'_, str> = if host.bytes().any(|b| b.is_ascii_uppercase()) {
+            Cow::Owned(host.to_ascii_lowercase())
+        } else {
+            Cow::Borrowed(host)
+        };
 
         // Try exact host match first
-        if let Some(routes) = self.routes.get(&host_lower)
+        if let Some(routes) = self.routes.get(host_key.as_ref())
             && let Some(route) = Self::find_matching_route(routes, path, matcher)
         {
             return Some(route);
@@ -263,18 +287,17 @@ impl Table {
     fn find_matching_route<'a>(
         routes: &'a [Arc<Route>],
         path: &str,
-        matcher: &str,
+        matcher: MatcherKind,
     ) -> Option<&'a Arc<Route>> {
         for route in routes {
             let matches = match matcher {
-                "prefix" | "" => path.starts_with(&route.path) || route.path == "/",
-                "iprefix" => starts_with_ignore_ascii_case(path, &route.path) || route.path == "/",
-                "glob" => route
+                MatcherKind::Prefix => path.starts_with(&route.path) || route.path == "/",
+                MatcherKind::CaseInsensitivePrefix => starts_with_ignore_ascii_case(path, &route.path) || route.path == "/",
+                MatcherKind::Glob => route
                     .glob
                     .as_ref()
                     .map(|g| g.matches(path))
                     .unwrap_or(false),
-                _ => path.starts_with(&route.path),
             };
 
             if matches && !route.targets.is_empty() {
@@ -294,7 +317,7 @@ impl Table {
     }
 
     fn apply_add(&mut self, def: &RouteDef) {
-        let host = def.src_host().to_string();
+        let host = def.src_host().to_ascii_lowercase();
         let path = if def.src_path().is_empty() {
             "/".to_string()
         } else {
@@ -314,10 +337,9 @@ impl Table {
             parsed_tls: false,
             parsed_protocol: crate::route::target::UpstreamProtocol::Http,
             active_connections: self.active_connections_for(&def.dst),
-            health_tracker: self.cb_config.as_ref()
-                .map(|cb| crate::route::target::TargetHealthTracker::with_config(cb.clone()))
-                .unwrap_or_default(),
-            stats: Arc::new(crate::route::target::TargetStats::default()),
+            health_tracker: self.health_tracker_for(&def.dst),
+            stats: self.stats_for(&def.dst),
+            rate_limiter: Arc::new(crate::proxy::ratelimit::TokenBucket::new()),
         };
         target.pre_parse();
 
@@ -335,16 +357,6 @@ impl Table {
             route.add_target(target);
             route.compute_weights();
             host_routes.push(Arc::new(route));
-            // Sort by most specific (longest) path first, then lexicographic
-            // descending as a tiebreaker — mirrors Fabio's "longest prefix wins"
-            // semantics. Pure lexicographic order would wrongly rank `/z` above
-            // `/api/v2/users` because 'z' > 'a'.
-            host_routes.sort_by(|a, b| {
-                b.path
-                    .len()
-                    .cmp(&a.path.len())
-                    .then_with(|| b.path.cmp(&a.path))
-            });
         }
     }
 
@@ -356,7 +368,7 @@ impl Table {
         };
 
         if !def.tags.is_empty() {
-            let host = def.src_host().to_string();
+            let host = def.src_host().to_ascii_lowercase();
             let path = if def.src_path().is_empty() {
                 None
             } else {
@@ -393,7 +405,7 @@ impl Table {
             return;
         }
 
-        let host = def.src_host().to_string();
+        let host = def.src_host().to_ascii_lowercase();
         if let Some(host_routes) = self.routes.get_mut(&host) {
             let path = if def.src_path().is_empty() {
                 None
@@ -419,7 +431,7 @@ impl Table {
     }
 
     fn apply_weight(&mut self, def: &RouteDef) {
-        let host = def.src_host().to_string();
+        let host = def.src_host().to_ascii_lowercase();
 
         if let Some(host_routes) = self.routes.get_mut(&host) {
             let path = if def.src_path().is_empty() {
@@ -467,12 +479,27 @@ impl Table {
         }
     }
 
+    /// Sort all per-host route lists by specificity (longest path first).
+    /// Must be called after bulk insertions (e.g. from_definitions*) to maintain
+    /// Fabio's "longest prefix wins" semantics.
+    fn finalize(&mut self) {
+        for host_routes in self.routes.values_mut() {
+            host_routes.sort_by(|a, b| {
+                b.path
+                    .len()
+                    .cmp(&a.path.len())
+                    .then_with(|| b.path.cmp(&a.path))
+            });
+        }
+    }
+
     /// Build a new table from a list of route definitions.
     pub fn from_definitions(defs: &[RouteDef]) -> Self {
         let mut table = Table::new();
         for def in defs {
             table.apply(def);
         }
+        table.finalize();
         table
     }
 
@@ -489,6 +516,7 @@ impl Table {
         for def in defs {
             table.apply(def);
         }
+        table.finalize();
         table
     }
 
@@ -497,6 +525,27 @@ impl Table {
             .as_ref()
             .map(|registry| registry.active_connections_for(key))
             .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicU64::new(0)))
+    }
+
+    fn stats_for(&self, key: &str) -> Arc<crate::route::target::TargetStats> {
+        self.stats_registry
+            .as_ref()
+            .map(|registry| registry.stats_for(key))
+            .unwrap_or_else(|| Arc::new(crate::route::target::TargetStats::default()))
+    }
+
+    fn health_tracker_for(&self, key: &str) -> Arc<crate::route::target::TargetHealthTracker> {
+        self.stats_registry
+            .as_ref()
+            .map(|registry| registry.health_tracker_for(key, self.cb_config.as_ref()))
+            .unwrap_or_else(|| {
+                Arc::new(
+                    self.cb_config
+                        .clone()
+                        .map(crate::route::target::TargetHealthTracker::with_config)
+                        .unwrap_or_default(),
+                )
+            })
     }
 
     /// Get the number of routes in the table.
@@ -511,6 +560,21 @@ impl Table {
             .flat_map(|r| r.iter())
             .map(|r| r.target_count())
             .sum()
+    }
+
+    /// Get all unique targets across all routes (for health checking).
+    /// Deduplicates by target URL to avoid probing the same backend twice.
+    pub fn all_targets(&self) -> Vec<Arc<crate::route::target::Target>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut targets = Vec::new();
+        for route in self.routes.values().flat_map(|r| r.iter()) {
+            for target in &route.targets {
+                if seen.insert(target.url.clone()) {
+                    targets.push(Arc::clone(target));
+                }
+            }
+        }
+        targets
     }
 
     pub fn lookup_tcp_route(&self, listen_port: u16) -> Option<&Arc<Route>> {
@@ -581,6 +645,16 @@ impl Table {
         self.routes.keys().map(|s| s.as_str()).collect()
     }
 
+    /// Iterate all (host, route, target) triples in the table.
+    /// Used by admin API handlers to avoid duplicate iteration boilerplate.
+    pub fn iter_targets(&self) -> impl Iterator<Item = (&str, &Arc<Route>, &Arc<crate::route::target::Target>)> {
+        self.routes.iter().flat_map(|(host, routes)| {
+            routes.iter().flat_map(move |route| {
+                route.targets.iter().map(move |target| (host.as_str(), route, target))
+            })
+        })
+    }
+
     /// Get routes for a specific host.
     pub fn get_routes(&self, host: &str) -> Option<&Vec<Arc<Route>>> {
         self.routes.get(host)
@@ -596,7 +670,7 @@ impl Table {
 pub struct RouteTable {
     inner: ArcSwap<Table>,
     stats_registry: Arc<TargetStatsRegistry>,
-    cb_config: Option<crate::route::target::CircuitBreakerConfig>,
+    cb_config: std::sync::RwLock<Option<crate::route::target::CircuitBreakerConfig>>,
 }
 
 impl RouteTable {
@@ -605,12 +679,12 @@ impl RouteTable {
         Self {
             inner: ArcSwap::from(Arc::new(Table::with_stats_registry(stats_registry.clone()))),
             stats_registry,
-            cb_config: None,
+            cb_config: std::sync::RwLock::new(None),
         }
     }
 
-    pub fn with_cb_config(mut self, cb_config: crate::route::target::CircuitBreakerConfig) -> Self {
-        self.cb_config = Some(cb_config);
+    pub fn with_cb_config(self, cb_config: crate::route::target::CircuitBreakerConfig) -> Self {
+        *self.cb_config.write().unwrap_or_else(|e| e.into_inner()) = Some(cb_config);
         self
     }
 
@@ -637,11 +711,8 @@ impl RouteTable {
 
     /// Apply definitions and swap the table.
     pub fn apply_and_swap(&self, defs: &[RouteDef]) {
-        let table = Table::from_definitions_with_stats(
-            defs,
-            self.stats_registry.clone(),
-            self.cb_config.clone(),
-        );
+        let table =
+            Table::from_definitions_with_stats(defs, self.stats_registry.clone(), self.cb_config());
         self.swap(table);
     }
 
@@ -650,7 +721,14 @@ impl RouteTable {
     }
 
     pub fn cb_config(&self) -> Option<crate::route::target::CircuitBreakerConfig> {
-        self.cb_config.clone()
+        self.cb_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn set_cb_config(&self, cb_config: Option<crate::route::target::CircuitBreakerConfig>) {
+        *self.cb_config.write().unwrap_or_else(|e| e.into_inner()) = cb_config;
     }
 }
 
@@ -743,13 +821,91 @@ mod tests {
         let table = Table::from_definitions(&defs);
         assert!(
             table
-                .lookup_route("example.com", "/api/users", "iprefix")
+                .lookup_route("example.com", "/api/users", MatcherKind::CaseInsensitivePrefix)
                 .is_some()
         );
         assert!(
             table
-                .lookup_route("example.com", "/API/users", "iprefix")
+                .lookup_route("example.com", "/API/users", MatcherKind::CaseInsensitivePrefix)
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn test_static_route_host_is_normalized_to_lowercase() {
+        let defs = vec![RouteDef {
+            cmd: RouteCmd::Add,
+            service: "svc".to_string(),
+            src: "Example.COM/".to_string(),
+            dst: "http://127.0.0.1:8080/".to_string(),
+            weight: 0.0,
+            tags: vec![],
+            opts: HashMap::new(),
+            source: crate::route::definition::RouteSource::Static,
+        }];
+
+        let table = Table::from_definitions(&defs);
+        assert!(table.lookup_route("example.com", "/", MatcherKind::Prefix).is_some());
+        assert!(table.lookup_route("EXAMPLE.COM", "/", MatcherKind::Prefix).is_some());
+    }
+
+    #[test]
+    fn test_target_stats_and_health_are_preserved_across_rebuilds() {
+        let registry = Arc::new(TargetStatsRegistry::new());
+        let defs = vec![RouteDef {
+            cmd: RouteCmd::Add,
+            service: "svc".to_string(),
+            src: "example.com/".to_string(),
+            dst: "http://127.0.0.1:8080/".to_string(),
+            weight: 0.0,
+            tags: vec![],
+            opts: HashMap::new(),
+            source: crate::route::definition::RouteSource::Static,
+        }];
+        let cb_config = crate::route::target::CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 2,
+            recovery_timeout_secs: 30,
+            half_open_max_requests: 1,
+        };
+
+        let first =
+            Table::from_definitions_with_stats(&defs, registry.clone(), Some(cb_config.clone()));
+        let first_target = first
+            .lookup_route("example.com", "/", MatcherKind::Prefix)
+            .unwrap()
+            .targets[0]
+            .clone();
+        first_target.stats.record_request(100, 10, true);
+        first_target.health_tracker.circuit_breaker().record_error();
+        first_target.health_tracker.circuit_breaker().record_error();
+        assert_eq!(
+            first_target
+                .health_tracker
+                .circuit_breaker()
+                .current_state(),
+            crate::route::target::CircuitState::Open
+        );
+
+        let second = Table::from_definitions_with_stats(&defs, registry, Some(cb_config));
+        let second_target = second
+            .lookup_route("example.com", "/", MatcherKind::Prefix)
+            .unwrap()
+            .targets[0]
+            .clone();
+        assert_eq!(
+            second_target
+                .stats
+                .requests_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            second_target
+                .health_tracker
+                .circuit_breaker()
+                .current_state(),
+            crate::route::target::CircuitState::Open
         );
     }
 
@@ -789,7 +945,7 @@ mod tests {
         ];
 
         let table = Table::from_definitions(&defs);
-        let route = table.lookup_route("example.com", "/", "prefix").unwrap();
+        let route = table.lookup_route("example.com", "/", MatcherKind::Prefix).unwrap();
         assert_eq!(route.targets.len(), 1);
         assert_eq!(route.targets[0].service, "svc-b");
     }
@@ -846,12 +1002,12 @@ mod tests {
         let table = Table::from_definitions(&defs);
         assert!(
             table
-                .lookup_route("example.com", "/api", "prefix")
+                .lookup_route("example.com", "/api", MatcherKind::Prefix)
                 .is_none()
         );
         assert!(
             table
-                .lookup_route("example.com", "/other", "prefix")
+                .lookup_route("example.com", "/other", MatcherKind::Prefix)
                 .is_some()
         );
     }
@@ -892,7 +1048,7 @@ mod tests {
         ];
 
         let table = Table::from_definitions(&defs);
-        let route = table.lookup_route("example.com", "/", "prefix").unwrap();
+        let route = table.lookup_route("example.com", "/", MatcherKind::Prefix).unwrap();
         assert_eq!(route.targets.len(), 2);
         assert!((route.targets[0].fixed_weight - 0.3).abs() < f64::EPSILON);
         assert!((route.targets[1].fixed_weight - 0.3).abs() < f64::EPSILON);
@@ -940,7 +1096,7 @@ mod tests {
 
         // `/api/v2/users` must match before `/api` (longer prefix wins)
         let route = table
-            .lookup_route("example.com", "/api/v2/users", "prefix")
+            .lookup_route("example.com", "/api/v2/users", MatcherKind::Prefix)
             .unwrap();
         assert_eq!(
             route.targets[0].service, "svc-api",
@@ -949,7 +1105,7 @@ mod tests {
 
         // `/api/other` must fall back to `/api`
         let route = table
-            .lookup_route("example.com", "/api/other", "prefix")
+            .lookup_route("example.com", "/api/other", MatcherKind::Prefix)
             .unwrap();
         assert_eq!(
             route.targets[0].service, "svc-api-short",
@@ -957,7 +1113,7 @@ mod tests {
         );
 
         // `/z` must still match its own route
-        let route = table.lookup_route("example.com", "/z", "prefix").unwrap();
+        let route = table.lookup_route("example.com", "/z", MatcherKind::Prefix).unwrap();
         assert_eq!(route.targets[0].service, "svc-z", "/z should match svc-z");
     }
 }

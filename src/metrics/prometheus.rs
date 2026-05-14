@@ -38,7 +38,58 @@ fn parse_proc_status_value_bytes(status: &str, key: &str) -> Option<u64> {
     })
 }
 
-fn collect_process_metrics() -> ProcessMetricsSnapshot {
+/// Cached process metrics with a 5-second TTL to avoid /proc walks on every scrape.
+struct CachedProcessMetrics {
+    at: std::time::Instant,
+    snapshot: ProcessMetricsSnapshot,
+}
+
+static PROCESS_METRICS_CACHE: std::sync::OnceLock<std::sync::RwLock<Option<CachedProcessMetrics>>> =
+    std::sync::OnceLock::new();
+
+fn collect_process_metrics_cached() -> ProcessMetricsSnapshot {
+    let cache = PROCESS_METRICS_CACHE
+        .get_or_init(|| std::sync::RwLock::new(None));
+    {
+        let guard = cache.read().unwrap();
+        if let Some(cached) = &*guard
+            && cached.at.elapsed() < std::time::Duration::from_secs(5) {
+                return cached.snapshot; // ProcessMetricsSnapshot is just plain data
+            }
+    }
+    let snapshot = collect_process_metrics_uncached();
+    *cache.write().unwrap() = Some(CachedProcessMetrics {
+        at: std::time::Instant::now(),
+        snapshot,
+    });
+    snapshot
+}
+
+/// Cached render output with a 3-second TTL.
+#[derive(Debug)]
+struct CachedRender {
+    at: std::time::Instant,
+    output: String,
+}
+
+const RENDER_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Escape a string for safe use as a Prometheus label value.
+/// Per the exposition format spec, backslashes, double quotes, and newlines must be escaped.
+fn escape_prometheus_label(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn collect_process_metrics_uncached() -> ProcessMetricsSnapshot {
     #[cfg(target_os = "linux")]
     {
         let status = std::fs::read_to_string("/proc/self/status").ok();
@@ -113,6 +164,12 @@ pub struct Metrics {
     pub dns_cache_misses_total: AtomicU64,
     /// DNS cache negatives (NXDOMAIN)
     pub dns_cache_negatives_total: AtomicU64,
+    /// Rate limit rejections
+    pub rate_limit_rejected_total: AtomicU64,
+    /// Health check probes total
+    pub health_check_probes_total: AtomicU64,
+    /// Health check probe failures
+    pub health_check_probe_failures_total: AtomicU64,
 
     // --- Gauges ---
     /// Currently active connections
@@ -135,6 +192,10 @@ pub struct Metrics {
     pub cert_min_expiry_unix_seconds: AtomicU64,
     /// Per-certificate expiry details
     pub cert_expiry_entries: RwLock<Vec<CertificateExpiryMetric>>,
+    /// Cached render output with a 3-second TTL to avoid redundant String
+    /// allocation on every /admin/metrics scrape. Instance-level so that
+    /// each Metrics (including test instances) gets its own cache.
+    render_cache: RwLock<Option<CachedRender>>,
 
     // --- Histograms (simplified as buckets) ---
     /// Request latency tracking (microseconds)
@@ -188,6 +249,9 @@ impl Metrics {
             dns_cache_hits_total: AtomicU64::new(0),
             dns_cache_misses_total: AtomicU64::new(0),
             dns_cache_negatives_total: AtomicU64::new(0),
+            rate_limit_rejected_total: AtomicU64::new(0),
+            health_check_probes_total: AtomicU64::new(0),
+            health_check_probe_failures_total: AtomicU64::new(0),
             active_connections: AtomicI64::new(0),
             route_count: AtomicI64::new(0),
             target_count: AtomicI64::new(0),
@@ -201,6 +265,7 @@ impl Metrics {
             consul_watcher_last_index_client_ca: AtomicU64::new(0),
             cert_min_expiry_unix_seconds: AtomicU64::new(0),
             cert_expiry_entries: RwLock::new(Vec::new()),
+            render_cache: RwLock::new(None),
             latency_bucket_1ms: AtomicU64::new(0),
             latency_bucket_5ms: AtomicU64::new(0),
             latency_bucket_10ms: AtomicU64::new(0),
@@ -423,8 +488,26 @@ impl Metrics {
             .fetch_add(upstream_response_bytes as u64, Ordering::Relaxed);
     }
 
-    /// Generate Prometheus text exposition format
+    /// Generate Prometheus text exposition format.
+    /// Uses a 3-second render cache to avoid rebuilding the string on every scrape.
     pub fn render(&self) -> String {
+        {
+            let guard = self.render_cache.read().unwrap();
+            if let Some(cached) = &*guard
+                && cached.at.elapsed() < RENDER_CACHE_TTL {
+                    return cached.output.clone();
+                }
+        }
+        let output = self.render_uncached();
+        *self.render_cache.write().unwrap() = Some(CachedRender {
+            at: std::time::Instant::now(),
+            output: output.clone(),
+        });
+        output
+    }
+
+    /// Build the full Prometheus text exposition from scratch.
+    fn render_uncached(&self) -> String {
         let requests_total = self.requests_total.load(Ordering::Relaxed);
         let requests_error_total = self.requests_error_total.load(Ordering::Relaxed);
         let active_connections = self.active_connections.load(Ordering::Relaxed);
@@ -447,6 +530,12 @@ impl Metrics {
         let route_reload_total_static = self.route_reload_total_static.load(Ordering::Relaxed);
         let route_reload_total_kv = self.route_reload_total_kv.load(Ordering::Relaxed);
         let route_reload_total_service = self.route_reload_total_service.load(Ordering::Relaxed);
+        let circuit_breaker_open_total = self.circuit_breaker_open_total.load(Ordering::Relaxed);
+        let circuit_breaker_reopen_total =
+            self.circuit_breaker_reopen_total.load(Ordering::Relaxed);
+        let circuit_breaker_close_total = self.circuit_breaker_close_total.load(Ordering::Relaxed);
+        let circuit_breaker_fastfail_total =
+            self.circuit_breaker_fastfail_total.load(Ordering::Relaxed);
         let watcher_backoff_services = self
             .consul_watcher_backoff_seconds_services
             .load(Ordering::Relaxed);
@@ -483,9 +572,11 @@ impl Metrics {
             .expect("cert expiry entries poisoned")
             .iter()
             .map(|entry| {
+                let entry_name = escape_prometheus_label(&entry.entry);
+                let cn = escape_prometheus_label(&entry.cn);
                 format!(
-                    "sentirum_lb_cert_expiry_unix_seconds{{entry=\"{}\",cn=\"{}\"}} {}\n",
-                    entry.entry, entry.cn, entry.not_after_unix
+                    "sentirum_lb_cert_expiry_unix_seconds{{entry=\"{entry_name}\",cn=\"{cn}\"}} {}\n",
+                    entry.not_after_unix
                 )
             })
             .collect::<String>();
@@ -493,7 +584,10 @@ impl Metrics {
         let status_3xx = self.status_3xx.load(Ordering::Relaxed);
         let status_4xx = self.status_4xx.load(Ordering::Relaxed);
         let status_5xx = self.status_5xx.load(Ordering::Relaxed);
-        let process = collect_process_metrics();
+        let rate_limit_rejected_total = self.rate_limit_rejected_total.load(Ordering::Relaxed);
+        let health_check_probes_total = self.health_check_probes_total.load(Ordering::Relaxed);
+        let health_check_probe_failures_total = self.health_check_probe_failures_total.load(Ordering::Relaxed);
+        let process = collect_process_metrics_cached();
         let process_metrics_available = if process.available { 1 } else { 0 };
 
         let b_1ms = self.latency_bucket_1ms.load(Ordering::Relaxed);
@@ -566,6 +660,16 @@ sentirum_lb_route_reload_total{{source="static"}} {route_reload_total_static}
 sentirum_lb_route_reload_total{{source="kv"}} {route_reload_total_kv}
 sentirum_lb_route_reload_total{{source="service"}} {route_reload_total_service}
 
+# HELP sentirum_lb_circuit_breaker_transitions_total Circuit breaker state transitions by kind
+# TYPE sentirum_lb_circuit_breaker_transitions_total counter
+sentirum_lb_circuit_breaker_transitions_total{{transition="open"}} {circuit_breaker_open_total}
+sentirum_lb_circuit_breaker_transitions_total{{transition="reopen"}} {circuit_breaker_reopen_total}
+sentirum_lb_circuit_breaker_transitions_total{{transition="close"}} {circuit_breaker_close_total}
+
+# HELP sentirum_lb_circuit_breaker_fastfail_total Circuit breaker fast-fail responses
+# TYPE sentirum_lb_circuit_breaker_fastfail_total counter
+sentirum_lb_circuit_breaker_fastfail_total {circuit_breaker_fastfail_total}
+
 # HELP sentirum_lb_consul_watcher_backoff_seconds Current Consul watcher backoff in seconds
 # TYPE sentirum_lb_consul_watcher_backoff_seconds gauge
 sentirum_lb_consul_watcher_backoff_seconds{{watcher="services"}} {watcher_backoff_services}
@@ -617,6 +721,18 @@ sentirum_lb_response_status_total{{code="3xx"}} {status_3xx}
 sentirum_lb_response_status_total{{code="4xx"}} {status_4xx}
 sentirum_lb_response_status_total{{code="5xx"}} {status_5xx}
 
+# HELP sentirum_lb_rate_limit_rejected_total Total requests rejected by per-target rate limiter
+# TYPE sentirum_lb_rate_limit_rejected_total counter
+sentirum_lb_rate_limit_rejected_total {rate_limit_rejected_total}
+
+# HELP sentirum_lb_health_check_probes_total Total active health check probes
+# TYPE sentirum_lb_health_check_probes_total counter
+sentirum_lb_health_check_probes_total {health_check_probes_total}
+
+# HELP sentirum_lb_health_check_probe_failures_total Total failed health check probes
+# TYPE sentirum_lb_health_check_probe_failures_total counter
+sentirum_lb_health_check_probe_failures_total {health_check_probe_failures_total}
+
 # HELP sentirum_lb_request_duration_seconds Request latency histogram
 # TYPE sentirum_lb_request_duration_seconds histogram
 sentirum_lb_request_duration_seconds_bucket{{le="0.001"}} {b_1ms}
@@ -646,6 +762,10 @@ sentirum_lb_request_duration_seconds_count {count}
             route_reload_total_static = route_reload_total_static,
             route_reload_total_kv = route_reload_total_kv,
             route_reload_total_service = route_reload_total_service,
+            circuit_breaker_open_total = circuit_breaker_open_total,
+            circuit_breaker_reopen_total = circuit_breaker_reopen_total,
+            circuit_breaker_close_total = circuit_breaker_close_total,
+            circuit_breaker_fastfail_total = circuit_breaker_fastfail_total,
             watcher_backoff_services = watcher_backoff_services,
             watcher_backoff_kv = watcher_backoff_kv,
             watcher_backoff_tls = watcher_backoff_tls,
@@ -667,8 +787,6 @@ sentirum_lb_request_duration_seconds_count {count}
         )
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

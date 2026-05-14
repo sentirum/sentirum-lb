@@ -3,7 +3,7 @@
 
 use crate::config::ConsulConfig as AppConsulConfig;
 use base64::{Engine, engine::general_purpose::STANDARD};
-use reqwest::{Client, Url};
+use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
@@ -36,7 +36,6 @@ pub struct ConsulConfig {
 
     /// Include services with "warning" health status in route discovery
     pub include_warning: bool,
-
 }
 
 impl std::fmt::Debug for ConsulConfig {
@@ -71,11 +70,7 @@ impl From<&AppConsulConfig> for ConsulConfig {
             tag_prefix: cfg.tag_prefix.clone(),
             allow_stale: true,
             require_consistent: false,
-            query_wait: if cfg.poll_interval.trim().is_empty() {
-                "5m".to_string()
-            } else {
-                cfg.poll_interval.clone()
-            },
+            query_wait: normalize_query_wait(&cfg.poll_interval),
             service_whitelist: cfg.service_whitelist.clone(),
             service_blacklist: cfg.service_blacklist.clone(),
             graceful_shutdown: cfg.graceful_shutdown,
@@ -100,6 +95,13 @@ impl Default for ConsulConfig {
             graceful_shutdown: true,
             include_warning: false,
         }
+    }
+}
+
+fn normalize_query_wait(value: &str) -> String {
+    match crate::config::Config::parse_optional_duration(value) {
+        Some(duration) if !duration.is_zero() => value.trim().to_string(),
+        _ => "5m".to_string(),
     }
 }
 
@@ -128,6 +130,20 @@ pub struct ConsulClient {
 pub struct DecodedKvPair {
     pub key: String,
     pub value: Vec<u8>,
+}
+
+async fn read_success_body(
+    response: reqwest::Response,
+    endpoint: &str,
+) -> Result<String, ConsulError> {
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        return Err(ConsulError::ApiError(format!(
+            "{endpoint} returned HTTP {status}: {body}"
+        )));
+    }
+    Ok(body)
 }
 
 impl ConsulClient {
@@ -219,9 +235,10 @@ impl ConsulClient {
         }
 
         let response = request.send().await?;
-        let agent_self: AgentSelf = response.json().await.map_err(|e| ConsulError::ParseError(
-            format!("failed to parse response from /v1/agent/self: {e}")
-        ))?;
+        let body = read_success_body(response, "/v1/agent/self").await?;
+        let agent_self: AgentSelf = serde_json::from_str(&body).map_err(|e| {
+            ConsulError::ParseError(format!("failed to parse response from /v1/agent/self: {e}"))
+        })?;
 
         let dc = agent_self
             .Config
@@ -255,6 +272,11 @@ impl ConsulClient {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
 
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok((Vec::new(), new_index));
+        }
+        let body = read_success_body(response, &format!("KV watch for path '{path}'")).await?;
+
         #[derive(Deserialize)]
         #[allow(non_snake_case)]
         struct KVPair {
@@ -262,9 +284,11 @@ impl ConsulClient {
             Value: Option<String>,
         }
 
-        let kv_pairs: Vec<KVPair> = response.json().await.map_err(|e| ConsulError::ParseError(
-            format!("failed to parse response from KV watch for path '{path}': {e}")
-        ))?;
+        let kv_pairs: Vec<KVPair> = serde_json::from_str(&body).map_err(|e| {
+            ConsulError::ParseError(format!(
+                "failed to parse response from KV watch for path '{path}': {e}"
+            ))
+        })?;
         let mut decoded_pairs = Vec::with_capacity(kv_pairs.len());
 
         for kv in kv_pairs {
@@ -371,9 +395,10 @@ impl ConsulClient {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
 
-        let checks: Vec<HealthCheck> = response.json().await.map_err(|e| ConsulError::ParseError(
-            format!("failed to parse response from health checks: {e}")
-        ))?;
+        let body = read_success_body(response, "health checks").await?;
+        let checks: Vec<HealthCheck> = serde_json::from_str(&body).map_err(|e| {
+            ConsulError::ParseError(format!("failed to parse response from health checks: {e}"))
+        })?;
 
         Ok((checks, new_index))
     }
@@ -411,9 +436,13 @@ impl ConsulClient {
         }
 
         let response = request.send().await?;
-        let services: Vec<CatalogService> = response.json().await.map_err(|e| ConsulError::ParseError(
-            format!("failed to parse response from catalog service '{service_name}': {e}")
-        ))?;
+        let body =
+            read_success_body(response, &format!("catalog service '{service_name}'")).await?;
+        let services: Vec<CatalogService> = serde_json::from_str(&body).map_err(|e| {
+            ConsulError::ParseError(format!(
+                "failed to parse response from catalog service '{service_name}': {e}"
+            ))
+        })?;
 
         Ok(services)
     }
@@ -450,9 +479,15 @@ impl ConsulClient {
         }
 
         let response = request.send().await?;
-        let keys: Vec<String> = response.json().await.map_err(|e| ConsulError::ParseError(
-            format!("failed to parse response from KV list for path '{path}': {e}")
-        ))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        let body = read_success_body(response, &format!("KV list for path '{path}'")).await?;
+        let keys: Vec<String> = serde_json::from_str(&body).map_err(|e| {
+            ConsulError::ParseError(format!(
+                "failed to parse response from KV list for path '{path}': {e}"
+            ))
+        })?;
 
         Ok(keys)
     }
@@ -541,6 +576,27 @@ mod tests {
         assert!(!query.contains("consistent="));
         assert!(query.contains("index=42"));
         assert!(query.contains("wait=5m"));
+    }
+
+    #[test]
+    fn app_poll_interval_zero_uses_default_blocking_wait() {
+        let app = AppConsulConfig {
+            service_whitelist: Vec::new(),
+            service_blacklist: Vec::new(),
+            graceful_shutdown: true,
+            include_warning: false,
+            address: "127.0.0.1:8500".to_string(),
+            scheme: "http".to_string(),
+            token: String::new(),
+            kv_prefix: "/sentirum-lb/routes".to_string(),
+            tag_prefix: "urlprefix-".to_string(),
+            poll_interval: "0s".to_string(),
+            service_discovery: true,
+            kv_watching: true,
+        };
+        let client = ConsulClient::new(ConsulConfig::from(&app)).expect("client should build");
+        let url = client.kv_watch_url("/sentirum-lb/routes", 42).unwrap();
+        assert!(url.query().unwrap_or_default().contains("wait=5m"));
     }
 
     #[test]

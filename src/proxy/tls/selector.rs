@@ -1,21 +1,22 @@
 use crate::proxy::tls::{
-    certificate_subject_string_ref, should_accept_ca_upgrade_error, ClientAuthMode,
-    DynamicCertStore, DynamicClientCaStore, LoadedCertificate, TlsError,
+    ClientAuthMode, DynamicCertStore, DynamicClientCaStore, LoadedCertificate, TlsError,
+    certificate_subject_string_ref, should_accept_ca_upgrade_error,
 };
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use pingora::listeners::tls::TlsSettings;
 use pingora::tls::{ext, ssl, x509::X509VerifyResult};
 use std::sync::Arc;
 
 enum ServerCertificateSource {
-    Static(Arc<LoadedCertificate>),
+    Static(Arc<ArcSwap<LoadedCertificate>>),
     Dynamic(Arc<DynamicCertStore>),
 }
 
 impl ServerCertificateSource {
     fn select(&self, server_name: Option<&str>) -> Option<Arc<LoadedCertificate>> {
         match self {
-            Self::Static(cert) => Some(cert.clone()),
+            Self::Static(swap) => Some(swap.load_full()),
             Self::Dynamic(store) => store.select_for_server_name(server_name),
         }
     }
@@ -125,7 +126,9 @@ impl pingora::listeners::TlsAccept for TlsSelector {
     }
 }
 
-pub fn load_static_certificate(config: &super::TlsCertConfig) -> Result<Arc<LoadedCertificate>, TlsError> {
+pub fn load_static_certificate(
+    config: &super::TlsCertConfig,
+) -> Result<Arc<LoadedCertificate>, TlsError> {
     let cert_pem = std::fs::read(&config.cert_path)
         .map_err(|e| TlsError::CertReadError(config.cert_path.clone(), e.to_string()))?;
     let key_pem = std::fs::read(&config.key_path)
@@ -145,7 +148,7 @@ pub fn build_tls_settings(
 }
 
 pub fn build_static_tls_settings(
-    cert: Arc<LoadedCertificate>,
+    cert: Arc<ArcSwap<LoadedCertificate>>,
     client_auth: Option<(ClientAuthMode, Arc<DynamicClientCaStore>)>,
 ) -> Result<TlsSettings, TlsError> {
     build_tls_settings_from_source(ServerCertificateSource::Static(cert), client_auth)

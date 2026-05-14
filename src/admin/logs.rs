@@ -8,9 +8,9 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::stream::Stream;
 use serde::Serialize;
 use std::sync::Arc;
-use tokio_stream::StreamExt;
 use std::sync::OnceLock;
 use tokio::sync::broadcast;
+use tokio_stream::StreamExt;
 use tracing::Level;
 use tracing_subscriber::Layer;
 
@@ -19,7 +19,7 @@ static LOG_BUFFER: OnceLock<Arc<LogBuffer>> = OnceLock::new();
 
 /// Get the global log buffer instance.
 pub fn global_log_buffer() -> Arc<LogBuffer> {
-    LOG_BUFFER.get_or_init(|| LogBuffer::new()).clone()
+    LOG_BUFFER.get_or_init(LogBuffer::new).clone()
 }
 /// Maximum number of log entries kept in the ring buffer.
 const RING_BUFFER_CAPACITY: usize = 1000;
@@ -43,14 +43,20 @@ pub struct LogEntry {
 /// Shared log ring buffer state.
 #[derive(Debug)]
 pub struct LogBuffer {
-    /// Ring buffer storing the most recent log entries.
-    entries: parking_lot::Mutex<Vec<LogEntry>>,
-    /// Write position in the ring buffer.
-    write_pos: parking_lot::Mutex<usize>,
-    /// Current number of entries (up to capacity).
-    len: parking_lot::Mutex<usize>,
+    /// Combined mutable state behind a single lock.
+    state: parking_lot::Mutex<LogBufferState>,
     /// Broadcast sender for SSE subscribers.
     sender: broadcast::Sender<LogEntry>,
+}
+
+#[derive(Debug)]
+struct LogBufferState {
+    /// Ring buffer storing the most recent log entries.
+    entries: Vec<LogEntry>,
+    /// Write position in the ring buffer.
+    write_pos: usize,
+    /// Current number of entries (up to capacity).
+    len: usize,
 }
 
 impl LogBuffer {
@@ -58,42 +64,50 @@ impl LogBuffer {
     pub fn new() -> Arc<Self> {
         let (sender, _) = broadcast::channel(BROADCAST_CAPACITY);
         Arc::new(Self {
-            entries: parking_lot::Mutex::new(Vec::with_capacity(RING_BUFFER_CAPACITY)),
-            write_pos: parking_lot::Mutex::new(0),
-            len: parking_lot::Mutex::new(0),
+            state: parking_lot::Mutex::new(LogBufferState {
+                entries: Vec::with_capacity(RING_BUFFER_CAPACITY),
+                write_pos: 0,
+                len: 0,
+            }),
             sender,
         })
     }
 
     /// Push a new log entry into the ring buffer and broadcast it.
     pub fn push(&self, entry: LogEntry) {
-        let mut entries = self.entries.lock();
-        let mut pos = self.write_pos.lock();
-        let mut len = self.len.lock();
-
-        if *len < RING_BUFFER_CAPACITY {
-            entries.push(entry.clone());
-            *pos = *len;
-            *len += 1;
-        } else {
-            *pos = (*pos + 1) % RING_BUFFER_CAPACITY;
-            entries[*pos] = entry.clone();
+        {
+            let mut state = self.state.lock();
+            if state.len < RING_BUFFER_CAPACITY {
+                state.entries.push(entry.clone());
+                state.write_pos = state.len;
+                state.len += 1;
+            } else {
+                let pos = state.write_pos;
+                let next_pos = (pos + 1) % RING_BUFFER_CAPACITY;
+                state.entries[next_pos] = entry.clone();
+                state.write_pos = next_pos;
+            }
         }
-
-        drop(entries);
-        drop(pos);
-        drop(len);
 
         // Broadcast to SSE subscribers (ignore if no receivers).
         let _ = self.sender.send(entry);
     }
 
     /// Get the last `limit` entries, optionally filtered by minimum level.
-    pub fn recent(&self, limit: usize, min_level: Option<&str>, search: Option<&str>) -> Vec<LogEntry> {
-        let entries = self.entries.lock();
-        let len = *self.len.lock();
+    pub fn recent(
+        &self,
+        limit: usize,
+        min_level: Option<&str>,
+        search: Option<&str>,
+    ) -> Vec<LogEntry> {
+        let state = self.state.lock();
+        let len = state.len;
+        let write_pos = state.write_pos;
+        let entries = &state.entries;
 
         let min_level_order = min_level.and_then(level_order);
+        // Pre-compute the search needle once instead of per-entry.
+        let search = search.map(|s| s.to_ascii_lowercase());
 
         let mut result = Vec::with_capacity(limit.min(len));
         // Iterate from newest to oldest.
@@ -103,16 +117,19 @@ impl LogBuffer {
                 len - 1 - i
             } else {
                 // Buffer full: write_pos points to newest entry
-                (*self.write_pos.lock() + RING_BUFFER_CAPACITY - i) % RING_BUFFER_CAPACITY
+                (write_pos + RING_BUFFER_CAPACITY - i) % RING_BUFFER_CAPACITY
             };
             let entry = &entries[idx];
-            if let Some(min_ord) = min_level_order {
-                if level_order(&entry.level).unwrap_or(0) > min_ord {
+            if let Some(min_ord) = min_level_order
+                && level_order(&entry.level).unwrap_or(0) > min_ord {
                     continue;
                 }
-            }
-            if let Some(s) = search {
-                if !entry.message.to_lowercase().contains(&s.to_lowercase()) {
+            if let Some(query) = &search {
+                // Check each field individually to avoid format!() allocation per entry.
+                let level = entry.level.to_ascii_lowercase();
+                let target = entry.target.to_ascii_lowercase();
+                let message = entry.message.to_ascii_lowercase();
+                if !level.contains(query) && !target.contains(query) && !message.contains(query) {
                     continue;
                 }
             }
@@ -132,7 +149,12 @@ impl LogBuffer {
 
     /// Current number of entries in the buffer.
     pub fn len(&self) -> usize {
-        *self.len.lock()
+        self.state.lock().len
+    }
+
+    /// Returns `true` if the buffer contains no entries.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -210,7 +232,8 @@ impl tracing::field::Visit for LogFieldVisitor {
             if !self.message.is_empty() {
                 self.message.push(' ');
             }
-            self.message.push_str(&format!("{}={}", field.name(), value));
+            self.message
+                .push_str(&format!("{}={}", field.name(), value));
         }
     }
 
@@ -221,7 +244,8 @@ impl tracing::field::Visit for LogFieldVisitor {
             if !self.message.is_empty() {
                 self.message.push(' ');
             }
-            self.message.push_str(&format!("{}={:?}", field.name(), value));
+            self.message
+                .push_str(&format!("{}={:?}", field.name(), value));
         }
     }
 
@@ -229,21 +253,24 @@ impl tracing::field::Visit for LogFieldVisitor {
         if !self.message.is_empty() {
             self.message.push(' ');
         }
-        self.message.push_str(&format!("{}={}", field.name(), value));
+        self.message
+            .push_str(&format!("{}={}", field.name(), value));
     }
 
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
         if !self.message.is_empty() {
             self.message.push(' ');
         }
-        self.message.push_str(&format!("{}={}", field.name(), value));
+        self.message
+            .push_str(&format!("{}={}", field.name(), value));
     }
 
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
         if !self.message.is_empty() {
             self.message.push(' ');
         }
-        self.message.push_str(&format!("{}={}", field.name(), value));
+        self.message
+            .push_str(&format!("{}={}", field.name(), value));
     }
 }
 
@@ -252,8 +279,8 @@ pub fn log_stream(
     buffer: Arc<LogBuffer>,
 ) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
     let receiver = buffer.subscribe();
-    let stream = tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(
-        |result| match result {
+    let stream =
+        tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(|result| match result {
             Ok(entry) => {
                 let data = serde_json::to_string(&entry).unwrap_or_default();
                 Some(Ok(Event::default().data(data)))
@@ -262,8 +289,7 @@ pub fn log_stream(
                 // Skip lagged messages.
                 None
             }
-        },
-    );
+        });
 
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
@@ -340,6 +366,28 @@ mod tests {
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].level, "WARN");
         assert_eq!(recent[1].level, "ERROR");
+    }
+
+    #[test]
+    fn ring_buffer_search_matches_target_and_level() {
+        let buffer = LogBuffer::new();
+
+        buffer.push(LogEntry {
+            ts: 1,
+            level: "INFO".to_string(),
+            message: "access request".to_string(),
+            target: "sentirum_lb::proxy::handler".to_string(),
+        });
+        buffer.push(LogEntry {
+            ts: 2,
+            level: "WARN".to_string(),
+            message: "watcher backoff".to_string(),
+            target: "sentirum_lb::consul::watcher".to_string(),
+        });
+
+        assert_eq!(buffer.recent(10, None, Some("proxy::handler")).len(), 1);
+        assert_eq!(buffer.recent(10, None, Some("warn")).len(), 1);
+        assert_eq!(buffer.recent(10, None, Some("backoff"))[0].level, "WARN");
     }
 
     #[test]

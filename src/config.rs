@@ -1,5 +1,34 @@
 use serde::Deserialize;
+use std::sync::Arc;
 use std::time::Duration;
+
+pub type SharedConfig = Arc<arc_swap::ArcSwap<Config>>;
+
+pub fn shared_config(config: Config) -> SharedConfig {
+    Arc::new(arc_swap::ArcSwap::from_pointee(config))
+}
+
+/// Pre-parsed timeout durations so the proxy hot path doesn't re-parse strings per request.
+#[derive(Debug, Clone)]
+pub struct ParsedProxyTimeouts {
+    pub connect: Duration,
+    pub read: Duration,
+    pub write: Duration,
+    pub idle: Duration,
+    pub h2_ping_interval: Option<Duration>,
+}
+
+impl ParsedProxyTimeouts {
+    pub fn from_proxy_config(cfg: &ProxyConfig) -> Self {
+        Self {
+            connect: Config::parse_duration(&cfg.connect_timeout),
+            read: Config::parse_duration(&cfg.read_timeout),
+            write: Config::parse_duration(&cfg.write_timeout),
+            idle: Config::parse_duration(&cfg.idle_timeout),
+            h2_ping_interval: Config::parse_optional_duration(&cfg.upstream_h2_ping_interval),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
@@ -11,8 +40,19 @@ pub struct Config {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub tls: TlsConfig,
+    /// Additional TLS listeners. Each entry defines an independent TLS endpoint
+    /// with its own certificate, listen address, and optional client auth.
+    ///
+    /// The legacy `[tls]` section is always listener 0 for backward compatibility.
+    /// `[[tls_listeners]]` entries become listeners 1..N.
+    #[serde(default)]
+    pub tls_listeners: Vec<TlsConfig>,
     #[serde(default)]
     pub tcp: TcpConfig,
+    /// Pre-parsed proxy timeouts (lazily computed on first access).
+    /// Avoids re-parsing duration strings on every request.
+    #[serde(skip)]
+    pub parsed_timeouts: std::sync::OnceLock<ParsedProxyTimeouts>,
 }
 
 /// Admin user for dashboard authentication
@@ -38,6 +78,9 @@ pub struct ServerConfig {
     /// Number of worker threads (0 = auto)
     #[serde(default)]
     pub workers: usize,
+    /// Graceful connection drain timeout on shutdown.
+    #[serde(default = "default_drain_timeout")]
+    pub drain_timeout: String,
 }
 
 fn default_admin_listen() -> String {
@@ -50,6 +93,10 @@ fn default_admin_token() -> String {
 
 fn default_admin_users() -> Vec<AdminUser> {
     Vec::new()
+}
+
+fn default_drain_timeout() -> String {
+    "30s".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -95,8 +142,6 @@ pub struct ConsulConfig {
     /// When true, services with "warning" checks are also considered healthy.
     #[serde(default)]
     pub include_warning: bool,
-
-
 }
 
 fn default_consul_address() -> String {
@@ -195,7 +240,7 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
     /// Enable circuit breaker for upstream failure protection.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub circuit_breaker_enabled: bool,
     /// Error threshold percentage for circuit breaker (0-100).
     /// When this percentage of requests in the window fail, circuit opens.
@@ -210,6 +255,32 @@ pub struct ProxyConfig {
     /// Max probe requests in half-open state.
     #[serde(default = "default_circuit_breaker_half_open_max")]
     pub circuit_breaker_half_open_max: usize,
+    /// Health check interval (e.g., "15s"). 0 = disabled.
+    #[serde(default = "default_health_check_interval")]
+    pub health_check_interval: String,
+    /// Health check timeout.
+    #[serde(default = "default_health_check_timeout")]
+    pub health_check_timeout: String,
+    /// Consecutive failures to remove target from pool.
+    #[serde(default = "default_health_check_fall")]
+    pub health_check_fall: usize,
+    /// Consecutive successes to add target back to pool.
+    #[serde(default = "default_health_check_rise")]
+    pub health_check_rise: usize,
+    /// Rate limit per target (0 = unlimited).
+    #[serde(default)]
+    pub rate_limit_per_target: usize,
+    /// Rate limit burst allowance.
+    #[serde(default = "default_rate_limit_burst")]
+    pub rate_limit_burst: usize,
+    /// HTTP path for active health checks (default: "/").
+    #[serde(default = "default_health_check_path")]
+    pub health_check_path: String,
+    /// Skip TLS certificate verification for HTTPS health check probes.
+    /// **Warning:** Enabling this is insecure and should only be used for
+    /// internal health checks where TLS verification is not possible.
+    #[serde(default)]
+    pub health_check_tls_skip_verify: bool,
 }
 
 impl Default for ProxyConfig {
@@ -236,6 +307,14 @@ impl Default for ProxyConfig {
             circuit_breaker_window_size: default_circuit_breaker_window_size(),
             circuit_breaker_recovery_timeout: default_circuit_breaker_recovery_timeout(),
             circuit_breaker_half_open_max: default_circuit_breaker_half_open_max(),
+            health_check_interval: default_health_check_interval(),
+            health_check_timeout: default_health_check_timeout(),
+            health_check_fall: default_health_check_fall(),
+            health_check_rise: default_health_check_rise(),
+            rate_limit_per_target: 0,
+            rate_limit_burst: default_rate_limit_burst(),
+            health_check_path: default_health_check_path(),
+            health_check_tls_skip_verify: false,
         }
     }
 }
@@ -272,6 +351,30 @@ fn default_pool_size() -> usize {
 }
 fn default_max_connections() -> usize {
     10000
+}
+
+fn default_health_check_interval() -> String {
+    "15s".to_string()
+}
+
+fn default_health_check_timeout() -> String {
+    "5s".to_string()
+}
+
+fn default_health_check_fall() -> usize {
+    3
+}
+
+fn default_health_check_rise() -> usize {
+    2
+}
+
+fn default_rate_limit_burst() -> usize {
+    100
+}
+
+fn default_health_check_path() -> String {
+    "/".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -368,6 +471,11 @@ pub struct TlsConfig {
     /// Fabio-compatible CA upgrade CN for self-signed/non-CA client auth certs.
     #[serde(default)]
     pub client_ca_upgrade_cn: String,
+    /// Enable OCSP stapling (default: false).
+    /// When enabled, the stapler fetches and caches OCSP responses.
+    /// Note: actual TLS stapling depends on Pingora exposing the SSL callback.
+    #[serde(default)]
+    pub ocsp_stapling_enabled: bool,
 }
 
 fn default_tls_consul_cert_prefix() -> String {
@@ -389,11 +497,21 @@ impl Default for TlsConfig {
             client_ca_path: String::new(),
             client_ca_consul_prefix: String::new(),
             client_ca_upgrade_cn: String::new(),
+            ocsp_stapling_enabled: false,
         }
     }
 }
 
 impl Config {
+    /// Return the pre-parsed timeouts (no per-request string parsing).
+    /// Lazily computes on first call; cached for the lifetime of this Config.
+    /// When config is swapped (ArcSwap), a new Config is created with an empty
+    /// OnceLock, so it re-computes automatically with the new values.
+    #[inline]
+    pub fn parsed_timeouts(&self) -> &ParsedProxyTimeouts {
+        self.parsed_timeouts.get_or_init(|| ParsedProxyTimeouts::from_proxy_config(&self.proxy))
+    }
+
     pub fn parse_optional_duration(s: &str) -> Option<Duration> {
         let s = s.trim();
         if s.is_empty() {
@@ -414,7 +532,14 @@ impl Config {
             s.trim_end_matches('m')
                 .parse::<u64>()
                 .ok()
-                .map(|m| Duration::from_secs(m * 60))
+                .and_then(|m| m.checked_mul(60))
+                .map(Duration::from_secs)
+        } else if s.ends_with('h') {
+            s.trim_end_matches('h')
+                .parse::<u64>()
+                .ok()
+                .and_then(|h| h.checked_mul(3600))
+                .map(Duration::from_secs)
         } else {
             None
         };
@@ -437,6 +562,285 @@ impl Config {
             Duration::ZERO
         })
     }
+
+    /// Validate configuration and return errors as a combined message.
+    /// Returns None if valid, Some(String) with error description if invalid.
+    pub fn validate(&self) -> Option<String> {
+        let mut errors = Vec::new();
+
+        validate_duration_field(
+            &mut errors,
+            "server.drain_timeout",
+            &self.server.drain_timeout,
+            false,
+        );
+        validate_duration_field(
+            &mut errors,
+            "consul.poll_interval",
+            &self.consul.poll_interval,
+            true,
+        );
+        validate_duration_field(
+            &mut errors,
+            "proxy.connect_timeout",
+            &self.proxy.connect_timeout,
+            true,
+        );
+        validate_duration_field(
+            &mut errors,
+            "proxy.read_timeout",
+            &self.proxy.read_timeout,
+            true,
+        );
+        validate_duration_field(
+            &mut errors,
+            "proxy.write_timeout",
+            &self.proxy.write_timeout,
+            true,
+        );
+        validate_duration_field(
+            &mut errors,
+            "proxy.idle_timeout",
+            &self.proxy.idle_timeout,
+            true,
+        );
+        if !self.proxy.upstream_h2_ping_interval.trim().is_empty() {
+            validate_duration_field(
+                &mut errors,
+                "proxy.upstream_h2_ping_interval",
+                &self.proxy.upstream_h2_ping_interval,
+                true,
+            );
+        }
+        validate_duration_field(
+            &mut errors,
+            "proxy.health_check_interval",
+            &self.proxy.health_check_interval,
+            true,
+        );
+        validate_duration_field(
+            &mut errors,
+            "proxy.health_check_timeout",
+            &self.proxy.health_check_timeout,
+            true,
+        );
+        validate_duration_field(&mut errors, "tcp.refresh", &self.tcp.refresh, true);
+
+        // Validate circuit breaker threshold (0-100)
+        if self.proxy.circuit_breaker_error_threshold > 100 {
+            errors.push(format!(
+                "circuit_breaker_error_threshold must be 0-100, got {}",
+                self.proxy.circuit_breaker_error_threshold
+            ));
+        }
+
+        // Validate circuit breaker window size
+        if self.proxy.circuit_breaker_window_size == 0 {
+            errors.push("circuit_breaker_window_size must be > 0".to_string());
+        }
+
+        // Validate circuit breaker recovery timeout
+        if self.proxy.circuit_breaker_recovery_timeout == 0 {
+            errors.push("circuit_breaker_recovery_timeout must be > 0".to_string());
+        }
+
+        // Validate circuit breaker half-open max
+        if self.proxy.circuit_breaker_half_open_max == 0 {
+            errors.push("circuit_breaker_half_open_max must be > 0".to_string());
+        }
+
+        // Validate DNS cache TTL
+        if self.proxy.dns_cache_ttl > 3600 {
+            errors.push(format!(
+                "dns_cache_ttl should be <= 3600 (1 hour), got {} seconds",
+                self.proxy.dns_cache_ttl
+            ));
+        }
+
+        // Validate DNS negative cache TTL
+        if self.proxy.dns_negative_cache_ttl > 300 {
+            errors.push(format!(
+                "dns_negative_cache_ttl should be <= 300 (5 min), got {} seconds",
+                self.proxy.dns_negative_cache_ttl
+            ));
+        }
+
+        // Validate trusted_proxies CIDR format
+        for cidr in &self.proxy.trusted_proxies {
+            if let Err(e) = validate_cidr(cidr) {
+                errors.push(format!("Invalid CIDR '{}': {}", cidr, e));
+            }
+        }
+
+        // Validate health_check_path starts with '/' and doesn't contain traversal
+        if !self.proxy.health_check_path.starts_with('/') {
+            errors.push(format!(
+                "health_check_path must start with '/', got '{}'",
+                self.proxy.health_check_path
+            ));
+        }
+        if self.proxy.health_check_path.contains("..") {
+            errors.push(format!(
+                "health_check_path must not contain '..' (path traversal), got '{}'",
+                self.proxy.health_check_path
+            ));
+        }
+
+        // Validate admin token length (security warning)
+        if !self.server.admin_token.is_empty() && self.server.admin_token.len() < 16 {
+            tracing::warn!(
+                "admin_token is {} characters, recommend >= 16 for security",
+                self.server.admin_token.len()
+            );
+        }
+
+        // Validate TLS cert path when source=file
+        if self.tls.source == "file" {
+            if self.tls.cert_path.is_empty() {
+                errors.push("tls.cert_path required when tls.source='file'".to_string());
+            }
+            if self.tls.key_path.is_empty() {
+                errors.push("tls.key_path required when tls.source='file'".to_string());
+            }
+        }
+
+        // Validate consul_cert_prefix format
+        if !self.tls.consul_cert_prefix.is_empty() && !self.tls.consul_cert_prefix.starts_with('/')
+        {
+            errors.push("tls.consul_cert_prefix must start with '/'".to_string());
+        }
+
+        // Validate client_auth values
+        if !self.tls.client_auth.is_empty()
+            && self.tls.client_auth != "optional"
+            && self.tls.client_auth != "required"
+        {
+            errors.push("tls.client_auth must be 'optional', 'required', or empty".to_string());
+        }
+
+        // Validate additional TLS listeners
+        for (i, listener) in self.tls_listeners.iter().enumerate() {
+            let tag = format!("tls_listeners[{}]", i);
+
+            // Must have a listen address
+            if listener.listen.trim().is_empty() {
+                errors.push(format!("{tag}.listen is required for additional TLS listeners"));
+            }
+
+            // Validate source
+            if listener.source == "file" {
+                if listener.cert_path.is_empty() {
+                    errors.push(format!("{tag}.cert_path required when {tag}.source='file'"));
+                }
+                if listener.key_path.is_empty() {
+                    errors.push(format!("{tag}.key_path required when {tag}.source='file'"));
+                }
+            }
+
+            // Validate client_auth values
+            if !listener.client_auth.is_empty()
+                && listener.client_auth != "optional"
+                && listener.client_auth != "required"
+            {
+                errors.push(format!(
+                    "{tag}.client_auth must be 'optional', 'required', or empty"
+                ));
+            }
+
+            // Validate consul_cert_prefix
+            if !listener.consul_cert_prefix.is_empty()
+                && !listener.consul_cert_prefix.starts_with('/')
+            {
+                errors.push(format!("{tag}.consul_cert_prefix must start with '/'"));
+            }
+
+            // Check for duplicate listen addresses
+            if listener.listen == self.tls.listen {
+                errors.push(format!("{tag}.listen '{}' conflicts with primary [tls].listen", listener.listen));
+            }
+            for (j, prev) in self.tls_listeners[..i].iter().enumerate() {
+                if listener.listen == prev.listen {
+                    errors.push(format!(
+                        "{tag}.listen '{}' conflicts with tls_listeners[{j}].listen",
+                        listener.listen
+                    ));
+                }
+            }
+        }
+
+        // Validate workers
+        if self.server.workers > 256 {
+            errors.push(format!(
+                "workers should be <= 256, got {} (consider 0 for auto)",
+                self.server.workers
+            ));
+        }
+
+        // Validate upstream_h2_max_streams
+        if self.proxy.upstream_h2_max_streams > 1000 {
+            errors.push(format!(
+                "upstream_h2_max_streams should be <= 1000, got {}",
+                self.proxy.upstream_h2_max_streams
+            ));
+        }
+
+        if errors.is_empty() {
+            None
+        } else {
+            Some(errors.join("; "))
+        }
+    }
+}
+
+fn validate_duration_field(errors: &mut Vec<String>, name: &str, value: &str, allow_zero: bool) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        errors.push(format!("{name} must not be empty"));
+        return;
+    }
+
+    match Config::parse_optional_duration(trimmed) {
+        Some(duration) if allow_zero || !duration.is_zero() => {}
+        Some(_) => errors.push(format!("{name} must be > 0, got {trimmed}")),
+        None => errors.push(format!(
+            "{name} has invalid duration '{trimmed}' (expected e.g. 150ms, 5s, 2m)"
+        )),
+    }
+}
+
+fn validate_cidr(cidr: &str) -> Result<(), String> {
+    let cidr = cidr.trim();
+    if cidr.is_empty() {
+        return Err("empty CIDR".to_string());
+    }
+
+    let (ip, prefix_str) = cidr
+        .split_once('/')
+        .ok_or_else(|| format!("CIDR '{}' missing '/' separator", cidr))?;
+
+    // Validate IP part
+    ip.parse::<std::net::IpAddr>()
+        .map_err(|e| format!("invalid IP '{}': {}", ip, e))?;
+
+    // Validate prefix
+    let prefix: u8 = prefix_str
+        .parse()
+        .map_err(|_| format!("prefix '{}' not a number", prefix_str))?;
+
+    // Check prefix range for the IP family
+    let ip_is_v4 = ip.contains('.') && !ip.contains(':');
+    let max_prefix = if ip_is_v4 { 32 } else { 128 };
+
+    if prefix > max_prefix {
+        return Err(format!(
+            "prefix {} > {} for {}",
+            prefix,
+            max_prefix,
+            if ip_is_v4 { "IPv4" } else { "IPv6" }
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -463,6 +867,50 @@ mod tests {
             Config::parse_optional_duration("2m"),
             Some(Duration::from_secs(120))
         );
+        assert_eq!(
+            Config::parse_optional_duration("1h"),
+            Some(Duration::from_secs(3600))
+        );
+    }
+
+    #[test]
+    fn validate_rejects_invalid_timeout_strings() {
+        let mut config = Config {
+            server: ServerConfig {
+                listen: ":9999".to_string(),
+                admin_listen: "127.0.0.1:9998".to_string(),
+                admin_users: Vec::new(),
+                admin_token: String::new(),
+                workers: 0,
+                drain_timeout: "30s".to_string(),
+            },
+            consul: ConsulConfig {
+                address: "127.0.0.1:8500".to_string(),
+                scheme: "http".to_string(),
+                token: String::new(),
+                kv_prefix: "/sentirum-lb/routes".to_string(),
+                tag_prefix: "urlprefix-".to_string(),
+                poll_interval: "0s".to_string(),
+                service_discovery: true,
+                kv_watching: true,
+                service_whitelist: Vec::new(),
+                service_blacklist: Vec::new(),
+                graceful_shutdown: true,
+                include_warning: false,
+            },
+            proxy: ProxyConfig::default(),
+            logging: LoggingConfig::default(),
+            tls: TlsConfig::default(),
+            tls_listeners: Vec::new(),
+                parsed_timeouts: Default::default(),
+            tcp: TcpConfig::default(),
+        };
+        config.proxy.connect_timeout = "abc".to_string();
+
+        let error = config
+            .validate()
+            .expect("invalid timeout should fail validation");
+        assert!(error.contains("proxy.connect_timeout"));
     }
 
     #[test]
@@ -489,5 +937,257 @@ mod tests {
         assert!(tcp.mode.is_empty());
         assert!(tcp.listen.is_empty());
         assert_eq!(tcp.refresh, "5s");
+    }
+
+    #[test]
+    fn proxy_config_health_check_defaults() {
+        let proxy = ProxyConfig::default();
+        assert_eq!(proxy.health_check_interval, "15s");
+        assert_eq!(proxy.health_check_timeout, "5s");
+        assert_eq!(proxy.health_check_fall, 3);
+        assert_eq!(proxy.health_check_rise, 2);
+        assert_eq!(proxy.health_check_path, "/");
+        assert!(!proxy.health_check_tls_skip_verify);
+    }
+
+    #[test]
+    fn proxy_config_rate_limit_defaults() {
+        let proxy = ProxyConfig::default();
+        assert_eq!(proxy.rate_limit_per_target, 0);
+        assert_eq!(proxy.rate_limit_burst, 100);
+    }
+
+    #[test]
+    fn server_config_drain_timeout_default() {
+        let toml_str = r#"
+listen = ":9999"
+admin_listen = "127.0.0.1:9998"
+admin_token = ""
+admin_users = []
+workers = 0
+drain_timeout = "30s"
+"#;
+        let server: ServerConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(server.drain_timeout, "30s");
+    }
+
+    #[test]
+    fn validate_cidr_rejects_invalid() {
+        // Empty CIDR
+        assert!(validate_cidr("").is_err());
+        // Missing prefix
+        assert!(validate_cidr("192.168.1.1").is_err());
+        // Invalid prefix
+        assert!(validate_cidr("192.168.1.1/33").is_err());
+        // Invalid IP
+        assert!(validate_cidr("not.an.ip/24").is_err());
+    }
+
+    #[test]
+    fn validate_cidr_accepts_valid() {
+        assert!(validate_cidr("192.168.1.0/24").is_ok());
+        assert!(validate_cidr("10.0.0.0/8").is_ok());
+        assert!(validate_cidr("172.16.0.0/12").is_ok());
+        assert!(validate_cidr("127.0.0.1/32").is_ok());
+        assert!(validate_cidr("::1/128").is_ok());
+        assert!(validate_cidr("2001:db8::/32").is_ok());
+    }
+
+    #[test]
+    fn config_validate_rejects_invalid_settings() {
+        // Use toml parsing or construct manually
+        let toml_str = r#"
+[server]
+listen = ":9999"
+admin_listen = "127.0.0.1:9998"
+admin_token = ""
+admin_users = []
+workers = 0
+drain_timeout = "30s"
+
+[consul]
+address = "127.0.0.1:8500"
+services = []
+tags = []
+"#
+        .to_string();
+
+        let mut config: Config = toml::from_str(&toml_str).unwrap();
+        config.proxy.circuit_breaker_error_threshold = 150; // > 100
+        assert!(config.validate().is_some());
+
+        let mut config: Config = toml::from_str(&toml_str).unwrap();
+        config.proxy.circuit_breaker_window_size = 0; // must be > 0
+        assert!(config.validate().is_some());
+
+        let mut config: Config = toml::from_str(&toml_str).unwrap();
+        config.proxy.trusted_proxies = vec!["invalid-cidr".to_string()];
+        assert!(config.validate().is_some());
+
+        let mut config: Config = toml::from_str(&toml_str).unwrap();
+        config.tls.source = "file".to_string();
+        config.tls.cert_path = "".to_string();
+        config.tls.key_path = "".to_string();
+        assert!(config.validate().is_some());
+    }
+
+    #[test]
+    fn config_validate_accepts_valid_settings() {
+        let toml_str = r#"
+[server]
+listen = ":9999"
+admin_listen = "127.0.0.1:9998"
+admin_token = "averysecuretoken123456789"
+admin_users = []
+workers = 0
+drain_timeout = "30s"
+
+[consul]
+address = "127.0.0.1:8500"
+services = []
+tags = []
+"#
+        .to_string();
+
+        let config: Config = toml::from_str(&toml_str).unwrap();
+        assert!(config.validate().is_none());
+    }
+
+    #[test]
+    fn config_validate_rejects_invalid_health_check_path() {
+        let mut config = Config {
+            server: ServerConfig {
+                listen: ":9999".to_string(),
+                admin_listen: "127.0.0.1:9998".to_string(),
+                admin_token: String::new(),
+                admin_users: vec![],
+                workers: 0,
+                drain_timeout: "30s".to_string(),
+            },
+            consul: ConsulConfig {
+                address: "127.0.0.1:8500".to_string(),
+                scheme: "http".to_string(),
+                token: String::new(),
+                kv_prefix: "/sentirum-lb/routes".to_string(),
+                tag_prefix: "urlprefix-".to_string(),
+                poll_interval: "0s".to_string(),
+                service_discovery: true,
+                kv_watching: true,
+                service_whitelist: Vec::new(),
+                service_blacklist: Vec::new(),
+                graceful_shutdown: true,
+                include_warning: false,
+            },
+            proxy: ProxyConfig::default(),
+            logging: LoggingConfig::default(),
+            tls: TlsConfig::default(),
+                parsed_timeouts: Default::default(),
+            tls_listeners: Vec::new(),
+            tcp: TcpConfig::default(),
+        };
+        config.proxy.health_check_path = "../../etc/passwd".to_string();
+        let error = config.validate().expect("should have validation error");
+        assert!(error.contains("health_check_path"));
+    }
+
+    #[test]
+    fn config_validate_rejects_tls_listeners_with_empty_listen() {
+        let toml_str = r#"
+[server]
+listen = ":9999"
+admin_listen = "127.0.0.1:9998"
+admin_token = "test-token-12345678"
+admin_users = []
+workers = 0
+drain_timeout = "30s"
+
+[consul]
+address = "127.0.0.1:8500"
+services = []
+tags = []
+
+[[tls_listeners]]
+cert_path = "/some/cert.pem"
+key_path = "/some/key.pem"
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let error = config.validate().expect("should have validation error");
+        assert!(
+            error.contains("tls_listeners[0].listen is required"),
+            "expected tls_listeners[0].listen error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn config_validate_rejects_duplicate_tls_listener_addresses() {
+        let toml_str = r#"
+[server]
+listen = ":9999"
+admin_listen = "127.0.0.1:9998"
+admin_token = "test-token-12345678"
+admin_users = []
+workers = 0
+drain_timeout = "30s"
+
+[consul]
+address = "127.0.0.1:8500"
+services = []
+tags = []
+
+[tls]
+cert_path = "/some/cert.pem"
+key_path = "/some/key.pem"
+listen = ":9443"
+
+[[tls_listeners]]
+cert_path = "/other/cert.pem"
+key_path = "/other/key.pem"
+listen = ":9443"
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let error = config.validate().expect("should have validation error");
+        assert!(
+            error.contains("conflicts with primary [tls].listen"),
+            "expected duplicate listen error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn config_validate_accepts_valid_tls_listeners() {
+        let toml_str = r#"
+[server]
+listen = ":9999"
+admin_listen = "127.0.0.1:9998"
+admin_token = "test-token-12345678"
+admin_users = []
+workers = 0
+drain_timeout = "30s"
+
+[consul]
+address = "127.0.0.1:8500"
+services = []
+tags = []
+
+[tls]
+cert_path = "/some/cert.pem"
+key_path = "/some/key.pem"
+listen = ":9443"
+
+[[tls_listeners]]
+cert_path = "/other/cert.pem"
+key_path = "/other/key.pem"
+listen = ":9444"
+client_auth = "required"
+client_ca_source = "file"
+client_ca_path = "/some/ca.pem"
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.validate().is_none(), "config should be valid");
+        assert_eq!(config.tls_listeners.len(), 1);
+        assert_eq!(config.tls_listeners[0].listen, ":9444");
+        assert_eq!(config.tls_listeners[0].client_auth, "required");
     }
 }
