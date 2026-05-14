@@ -665,7 +665,8 @@
         }
         .overview-guide-item strong { color: var(--text-1); display: block; margin-bottom: 0.18rem; }
         .overview-guide-item span { color: var(--text-4); font-size: 0.72rem; line-height: 1.55; }
-        .topo-controls { display: flex; gap: 0.55rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.75rem; }
+        .topo-controls { display: flex; gap: 0.55rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.45rem; }
+        .topo-hint { color: var(--text-4); font-size: 0.7rem; margin: -0.1rem 0 0.75rem; }
         .topo-hosts { display: flex; gap: 0.35rem; flex-wrap: wrap; }
         .topo-host-btn {
             padding: 0.28rem 0.55rem; border-radius: 999px; border: 1px solid var(--border);
@@ -685,6 +686,15 @@
         .topo-route-trend .spark { display: block; opacity: 0.95; }
         .topo-heat-badge { display: inline-flex; align-items: center; gap: 0.28rem; padding: 0.16rem 0.42rem; border-radius: 999px; border: 1px solid rgba(251,191,36,0.24); background: rgba(251,191,36,0.10); color: #fcd34d; font-size: 0.64rem; letter-spacing: 0.01em; }
         .topo-route-targets { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+        .topo-state-badge {
+            display: inline-flex; align-items: center; gap: 0.28rem; padding: 0.16rem 0.42rem;
+            border-radius: 999px; border: 1px solid var(--border); background: var(--bg-2); color: var(--text-3); font-size: 0.64rem;
+        }
+        .topo-state-badge.warn { border-color: var(--yellow-border); color: var(--yellow); background: var(--yellow-dim); }
+        .topo-state-badge.danger { border-color: var(--red-border); color: var(--red); background: var(--red-dim); }
+        .topo-state-badge.accent { border-color: var(--accent-border); color: var(--accent); background: var(--accent-dim); }
+        .topo-focus-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.6rem; }
+        .topo-focus-actions { display: inline-flex; gap: 0.35rem; flex-wrap: wrap; }
         .topo-target-chip {
             display: inline-flex; align-items: center; gap: 0.28rem; padding: 0.18rem 0.42rem;
             border-radius: 999px; border: 1px solid var(--border); background: var(--bg-2); color: var(--text-2);

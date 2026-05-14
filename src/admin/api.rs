@@ -110,6 +110,7 @@ pub fn build_router(state: AdminState) -> Router {
             "/admin/assets/dashboard.js",
             get(super::dashboard_assets::dashboard_js),
         )
+        .route("/favicon.ico", get(|| async { axum::response::Response::builder().status(204).body(axum::body::Body::empty()).unwrap() }))
         .route("/admin/login", post(super::auth::login_handler))
         .route("/admin/logout", post(super::auth::logout_handler))
         .route("/admin/me", get(super::auth::me_handler));

@@ -22,6 +22,8 @@ pub struct TargetMetrics {
     pub requests: u64,
     pub errors: u64,
     pub avg_latency_us: u64,
+    pub bytes_total: u64,
+    pub flow: TopologyFlowMetrics,
 }
 
 #[derive(Serialize)]
@@ -55,6 +57,7 @@ pub(super) async fn metrics_stream_handler(
     async fn make_snapshot(state: &AdminState) -> MetricsSnapshot {
         let table = state.route_table.get();
         let hosts = table.hosts();
+        let flow_snapshot = state.topology_flow_cache.snapshot(&state.route_table);
 
         let mut targets = Vec::new();
         for host in hosts {
@@ -62,6 +65,7 @@ pub(super) async fn metrics_stream_handler(
                 for route in routes.iter() {
                     for target in route.targets.iter() {
                         let stats = target.stats.as_ref();
+                        let flow_key = topology_target_key(host, &route.path, &target.service, &target.url);
                         targets.push(TargetMetrics {
                             host: host.to_string(),
                             path: route.path.clone(),
@@ -77,6 +81,8 @@ pub(super) async fn metrics_stream_handler(
                             requests: stats.requests_total.load(Ordering::Relaxed),
                             errors: stats.errors_total.load(Ordering::Relaxed),
                             avg_latency_us: stats.avg_latency_us(),
+                            bytes_total: stats.bytes_total.load(Ordering::Relaxed),
+                            flow: flow_snapshot.edges.get(&flow_key).cloned().unwrap_or_default(),
                         });
                     }
                 }

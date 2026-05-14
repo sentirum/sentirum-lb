@@ -123,9 +123,9 @@
                     <div class="page-head">
                         <h1 class="page-title">Topology</h1>
                         <div class="topo-bar">
-                            <button class="btn btn-sm" data-action="topology-zoom" data-factor="1.2">+</button>
-                            <button class="btn btn-sm" data-action="topology-zoom" data-factor="0.8">&minus;</button>
-                            <button class="btn btn-sm" data-action="topology-reset">Reset</button>
+                            <button class="btn btn-sm" data-action="topology-zoom" data-factor="1.2" title="Zoom in">+</button>
+                            <button class="btn btn-sm" data-action="topology-zoom" data-factor="0.8" title="Zoom out">&minus;</button>
+                            <button class="btn btn-sm" data-action="topology-reset" title="Reset pan, zoom, and selection">Reset view</button>
                             <span class="pill pill-live js-live-pill"><span class="pill-dot"></span> LIVE</span>
                         </div>
                     </div>
@@ -135,12 +135,12 @@
                             <button class="seg-btn on" id="topo-mode-all" data-action="set-topology-mode" data-mode="all">All</button>
                             <button class="seg-btn" id="topo-mode-issues" data-action="set-topology-mode" data-mode="issues">Issues</button>
                             <button class="seg-btn" id="topo-mode-hot" data-action="set-topology-mode" data-mode="hot">Hot paths</button>
-                            <button class="seg-btn" id="topo-mode-heat" data-action="set-topology-mode" data-mode="heat">🔥 Heat</button>
                         </div>
-                        <button class="seg-btn" id="topo-heat-btn" data-action="toggle-topology-heat-mode">Heat map</button>
-                        <button class="btn btn-sm" data-action="reset-topology-focus">Reset focus</button>
+                        <button class="seg-btn" id="topo-heat-btn" data-action="toggle-topology-heat-mode" title="Color topology by traffic intensity">Heat map</button>
+                        <button class="btn btn-sm" data-action="reset-topology-focus" title="Reset host filter, mode, heat map, and selection">Reset filters</button>
                         <span class="toolbar-meta" id="topology-meta">All hosts visible</span>
                     </div>
+                    <div class="topo-hint">Drag to pan · scroll to zoom · click a target to pin details</div>
                     <div class="topo-hosts" id="topology-hosts"></div>
                     <div class="split-grid">
                         <div class="panel">
