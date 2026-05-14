@@ -1,2 +1,30 @@
 # Default owner for the entire repository.
 * @ersintarhan
+
+# Proxy and request handling
+src/proxy/ @ersintarhan
+
+# Route parsing, table, targets, circuit breaker
+src/route/ @ersintarhan
+
+# Consul integration
+src/consul/ @ersintarhan
+
+# Admin API and dashboard
+src/admin/ @ersintarhan
+
+# Configuration
+src/config.rs @ersintarhan
+
+# TLS and certificate handling
+src/proxy/tls/ @ersintarhan
+
+# Metrics
+src/metrics/ @ersintarhan
+
+# CI/CD
+.github/ @ersintarhan
+
+# Deployment
+docker/ @ersintarhan
+docs/ @ersintarhan

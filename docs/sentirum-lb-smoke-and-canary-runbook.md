@@ -1,4 +1,4 @@
-# sent irum-lb Smoke Test + Canary Runbook
+# Sentirum LB Smoke Test + Canary Runbook
 
 ## 0. Goal
 Validate that `sentirum-lb` can replace Fabio for HTTP/HTTPS ingress with:

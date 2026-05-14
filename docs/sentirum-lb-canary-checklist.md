@@ -1,4 +1,4 @@
-# sent irum-lb Canary Checklist
+# Sentirum LB Canary Checklist
 
 ## Goal
 Replace Fabio for HTTP/HTTPS ingress without dropping active users.

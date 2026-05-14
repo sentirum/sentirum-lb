@@ -1,11 +1,11 @@
-# Fabio → sent irum-lb Migration Table
+# Fabio → Sentirum LB Migration Table
 
 ## Scope
 
 This table covers the **current migration target**:
 - replace Fabio for **HTTP/HTTPS host/path ingress**
 - preserve current **Cloudflare + Consul service-tag routing** behavior
-- use **mounted PEM files** for TLS in sent irum-lb
+- use **mounted PEM files** for TLS in Sentirum LB
 
 Out of scope for phase 1:
 - full Fabio property compatibility
@@ -20,7 +20,7 @@ Important note:
 
 ## Executive summary
 
-| Area | Fabio today | sent irum-lb today | Migration status | Action |
+| Area | Fabio today | Sentirum LB today | Migration status | Action |
 |---|---|---|---|---|
 | HTTP ingress | Supported | Supported | OK | Migrate |
 | HTTPS ingress | Supported | Supported | OK with TLS delivery change | Migrate with PEM mount |
@@ -38,14 +38,14 @@ Important note:
 
 ## Property / behavior mapping
 
-| Fabio property / behavior | Current Fabio usage | sent irum-lb equivalent | Status | Notes |
+| Fabio property / behavior | Current Fabio usage | Sentirum LB equivalent | Status | Notes |
 |---|---|---|---|---|
-| `proxy.addr = :80;proto=http,:443;proto=https;cs=consul` | Yes | `server.listen`, `tls.listen` | Partial | sent irum-lb separates HTTP and TLS listener config |
+| `proxy.addr = :80;proto=http,:443;proto=https;cs=consul` | Yes | `server.listen`, `tls.listen` | Partial | Sentirum LB separates HTTP and TLS listener config |
 | `proxy.cs = cs=consul;type=consul;cert=http://consul.../v1/kv/fabio/cert` | Yes | None native | Missing | Must migrate to mounted PEM files or add new cert watcher feature |
 | `registry.consul.addr = consul.service.consul:8500` | Yes | `consul.address`, `consul.scheme` | Supported | Direct mapping |
 | `registry.consul.register.enabled = true` | Yes | None | Not needed / separate concern | Nomad service stanza can handle registration |
-| `registry.consul.register.name = fabio` | Yes | None | Not needed | sent irum-lb does not need Fabio-style self-registration for routing |
-| `registry.consul.kvpath = /fabio/config` | Configured, but KV empty | `consul.kv_prefix` | Partial | Only relevant if you actually want route KV in sent irum-lb |
+| `registry.consul.register.name = fabio` | Yes | None | Not needed | Sentirum LB does not need Fabio-style self-registration for routing |
+| `registry.consul.kvpath = /fabio/config` | Configured, but KV empty | `consul.kv_prefix` | Partial | Only relevant if you actually want route KV in Sentirum LB |
 | `registry.consul.tagprefix = urlprefix-` | Yes | `consul.tag_prefix` | Supported | Direct mapping |
 | `ui.addr` | Yes | None | Missing | Replace with `/admin/*` + Prometheus/Grafana |
 | `log.level` | Yes | `server.log_level` / runtime logging | Supported-ish | Use native logging style |
@@ -58,11 +58,11 @@ Important note:
 | `proxy.dialtimeout = 30s` | Yes | `proxy.connect_timeout` | Supported | Map value |
 | `proxy.responseheadertimeout = 300s` | Yes | No exact dedicated knob seen | Partial | Check current timeout surface |
 | `proxy.keepalivetimeout = 90s` | Yes | `proxy.idle_timeout` | Approximate | Validate semantics |
-| `proxy.maxconn = 10000` | Yes | `proxy.max_connections` | Partial | sent irum-lb enforces per-upstream target, not same global semantic |
+| `proxy.maxconn = 10000` | Yes | `proxy.max_connections` | Partial | Sentirum LB enforces per-upstream target, not same global semantic |
 | `proxy.strategy = rr` | Yes | `proxy.strategy` | Supported | Map to existing picker strategy |
 | `proxy.matcher = prefix` | Yes | `proxy.matcher` | Supported | Direct mapping |
 | `proxy.noroutestatus = 404` | Yes | `proxy.no_route_status` | Supported | Direct mapping |
-| `proxy.header.clientip = X-Forwarded-For` | Yes | Forwarded-header handling in proxy | Partial | sent irum-lb appends/forwards based on trusted proxy policy |
+| `proxy.header.clientip = X-Forwarded-For` | Yes | Forwarded-header handling in proxy | Partial | Sentirum LB appends/forwards based on trusted proxy policy |
 | `proxy.header.clientip.header = CF-Connecting-IP` | Yes | `CF-Connecting-IP` trusted only from `trusted_proxies` | Supported | Must configure Cloudflare CIDRs |
 | `proxy.header.tls = X-Forwarded-Proto` | Yes | native forwarded header behavior | Supported | Verify exact output in canary |
 | `proxy.header.tls.value = https` | Yes | inferred from TLS/trusted proxy path | Supported-ish | Verify parity |
@@ -74,7 +74,7 @@ Important note:
 
 ## Route source mapping
 
-| Current Fabio route source | Observed state | sent irum-lb migration | Decision |
+| Current Fabio route source | Observed state | Sentirum LB migration | Decision |
 |---|---|---|---|
 | Consul service tags with `urlprefix-` | Active | Keep as-is | Primary path |
 | `/fabio/config` KV routes | Configured in Fabio but currently empty | Optional: map to `consul.kv_prefix` if needed later | Not required for phase 1 |
@@ -91,7 +91,7 @@ Important note:
   - chain
   - private key
 
-### sent irum-lb current model
+### Sentirum LB current model
 - expects file paths:
   - `tls.cert_path`
   - `tls.key_path`
@@ -105,7 +105,7 @@ Important note:
 | Current | Target |
 |---|---|
 | Consul KV cert bundles | Either `source = "consul_kv"` (direct) or mounted PEM files |
-| Fabio loads from KV | sent irum-lb loads from Consul KV or file |
+| Fabio loads from KV | Sentirum LB loads from Consul KV or file |
 | dynamic KV-based rotation | Automatic with `consul_kv` source; rolling restart for file source |
 
 ### Recommended delivery options
@@ -120,7 +120,7 @@ Important note:
 
 ## Cloudflare / real IP mapping
 
-| Behavior | Fabio today | sent irum-lb target | Required action |
+| Behavior | Fabio today | Sentirum LB target | Required action |
 |---|---|---|---|
 | trust `CF-Connecting-IP` | Yes | Yes | configure `proxy.trusted_proxies` with Cloudflare CIDRs / trusted edge chain |
 | set forwarded proto correctly | Yes | Yes | validate under HTTPS canary |
@@ -135,7 +135,7 @@ Important note:
 
 ## Observability / operations mapping
 
-| Fabio capability | Current usage | sent irum-lb replacement |
+| Fabio capability | Current usage | Sentirum LB replacement |
 |---|---|---|
 | Fabio UI | Internal UI on `:9997` | `/admin/routes`, `/admin/config`, `/admin/metrics` + Grafana |
 | stdout metrics | Yes | Prometheus scrape |
@@ -146,7 +146,7 @@ Important note:
 Team will lose Fabio dashboard, so dashboards and alerts must move to:
 - Prometheus
 - Grafana
-- sent irum-lb admin endpoints
+- Sentirum LB admin endpoints
 
 ---
 
@@ -168,7 +168,7 @@ Team will lose Fabio dashboard, so dashboards and alerts must move to:
 
 ## Future phase: NATS / TCP routing
 
-If you later want to proxy NATS through this LB, current sent irum-lb is **not enough yet**.
+If you later want to proxy NATS through this LB, current Sentirum LB is **not enough yet**.
 
 ### Why
 - route parsing may recognize `proto=tcp`
