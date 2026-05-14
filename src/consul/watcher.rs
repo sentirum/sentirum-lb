@@ -129,17 +129,16 @@ impl ServiceMonitor {
         // Concurrent catalog queries, bounded to avoid fan-out spikes on large Consul clusters.
         const MAX_CATALOG_LOOKUP_CONCURRENCY: usize = 32;
         let service_names: Vec<String> = passing_services.keys().cloned().collect();
-        let catalog_results: Vec<_> =
-            stream::iter(service_names.into_iter().map(|service_name| {
-                let client = self.client.clone();
-                async move {
-                    let result = client.get_catalog_service(&service_name).await;
-                    (service_name, result)
-                }
-            }))
-            .buffer_unordered(MAX_CATALOG_LOOKUP_CONCURRENCY)
-            .collect()
-            .await;
+        let catalog_results: Vec<_> = stream::iter(service_names.into_iter().map(|service_name| {
+            let client = self.client.clone();
+            async move {
+                let result = client.get_catalog_service(&service_name).await;
+                (service_name, result)
+            }
+        }))
+        .buffer_unordered(MAX_CATALOG_LOOKUP_CONCURRENCY)
+        .collect()
+        .await;
 
         let mut config = Vec::new();
         let mut failures = Vec::new();
