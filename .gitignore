@@ -1,2 +1,26 @@
+# Build
 /target
+
+# IDE
 /.idea
+/.vscode
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Agent/coding artifacts
+analysis-*.txt
+context.md
+meta-prompt.md
+plan.md
+progress.md
+research.md
+*-impl.md
+false
+REVIEW.md
+
+# Local config overrides
+config.local.toml
