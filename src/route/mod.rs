@@ -1,6 +1,10 @@
+pub mod circuit_breaker;
 pub mod definition;
+pub mod dns_cache;
+pub mod health_tracker;
 pub mod parser;
 pub mod picker;
 pub mod registry;
 pub mod table;
 pub mod target;
+pub mod target_stats;
