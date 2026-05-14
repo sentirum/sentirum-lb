@@ -54,6 +54,12 @@ listen = ":80"
 admin_listen = "127.0.0.1:9998"
 admin_token = "{{ with nomadVar \"nomad/jobs/sentirum-lb\" }}{{ .admin_token }}{{ end }}"
 workers = 0
+drain_timeout = "30s"
+
+# Admin users for dashboard login
+[[server.admin_users]]
+username = "admin"
+password = "{{ with nomadVar \"nomad/jobs/sentirum-lb\" }}{{ .admin_password }}{{ end }}"
 
 [consul]
 address = "consul.service.consul:8500"
@@ -79,6 +85,29 @@ upstream_h2_max_streams = 128
 upstream_h2_ping_interval = ""
 pool_size = 128
 max_connections = 10000
+
+# Circuit breaker
+circuit_breaker_enabled = true
+circuit_breaker_error_threshold = 50
+circuit_breaker_window_size = 100
+circuit_breaker_recovery_timeout = 30
+circuit_breaker_half_open_max = 3
+
+# Health checking
+health_check_interval = "10s"
+health_check_timeout = "5s"
+health_check_fall = 3
+health_check_rise = 2
+health_check_path = "/health"
+
+# Rate limiting (per-target)
+rate_limit_per_target = 0   # 0 = disabled; set e.g. 100 for 100 req/s
+rate_limit_burst = 0
+
+# DNS cache
+dns_cache_ttl = 30
+dns_negative_cache_ttl = 10
+
 trusted_proxies = [
   # Fill with Cloudflare CIDRs or your trusted ingress hop ranges.
   # "173.245.48.0/20",
@@ -100,6 +129,14 @@ client_ca_source = ""              # "file" or "consul_kv"
 client_ca_path = ""                # file/dir path when client_ca_source=file
 client_ca_consul_prefix = ""       # e.g. "/fabio/client-ca" when client_ca_source=consul_kv
 client_ca_upgrade_cn = ""          # e.g. "ApiGateway" for Fabio-style CA-upgrade compatibility
+
+# Additional TLS listeners (e.g., mTLS on a separate port)
+# [[tls_listeners]]
+# listen = ":8443"
+# cert_path = "/etc/sentirum-lb/mtls-cert.pem"
+# key_path = "/etc/sentirum-lb/mtls-key.pem"
+# client_auth = "required"
+# client_ca_path = "/etc/sentirum-lb/client-ca.pem"
 EOF
       }
 
@@ -157,6 +194,11 @@ EOF
 # Notes
 # - This job keeps the Fabio route model: service tags still use `urlprefix-...`.
 # - Downstream HTTPS certs are loaded dynamically from Consul KV under `/fabio/cert/*`.
+# - File-based cert hot-reload also supported via `FileCertWatcherService` (30s poll).
+# - Manual cert reload: `POST /admin/certs/reload`
 # - Existing connections are not dropped on cert updates; new TLS handshakes use the new snapshot.
 # - Optional downstream mTLS can be enabled with `tls.client_auth` + client CA settings.
+# - Additional TLS listeners can be configured via `[[tls_listeners]]` array.
 # - `/fabio/config` route KV remains optional; if empty, only KV routes are empty, service-tag routes continue.
+# - Runtime config hot-reload via `PUT /admin/config` (no restart needed for strategy, timeouts, CB, HC, rate limits).
+# - Live route addition via `POST /admin/routes` (Fabio-style commands).

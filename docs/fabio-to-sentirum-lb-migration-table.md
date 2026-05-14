@@ -5,16 +5,16 @@
 This table covers the **current migration target**:
 - replace Fabio for **HTTP/HTTPS host/path ingress**
 - preserve current **Cloudflare + Consul service-tag routing** behavior
-- use **mounted PEM files** for TLS in Sentirum LB
+- support both **mounted PEM files** and **Consul KV** for TLS certificates
 
 Out of scope for phase 1:
 - full Fabio property compatibility
 - Fabio UI parity
-- raw TCP / `proto=tcp` / `tcp+sni` parity
 
-Important note:
-- **Raw TCP is not used today**, so it is **not a blocker for phase 1**
-- but it **will become a future blocker** if you want to route **NATS** through the same LB later
+Important notes:
+- **Raw TCP modes** (`tcp`, `tcp+sni`, `https+tcp+sni`, `tcp-dynamic`) are **production-tested** with NATS protocol validation (INFO, PING/PONG, CONNECT/SUB/PUB/UNSUB, queue groups, 50KB payloads, 20+ concurrent connections)
+- **Both TLS sources** (`file` and `consul_kv`) are fully supported with live hot-reload
+- **Circuit breaker**, **active health checking**, and **per-target rate limiting** are available but have no Fabio equivalent
 
 ---
 
@@ -22,17 +22,21 @@ Important note:
 
 | Area | Fabio today | Sentirum LB today | Migration status | Action |
 |---|---|---|---|---|
-| HTTP ingress | Supported | Supported | OK | Migrate |
-| HTTPS ingress | Supported | Supported | OK with TLS delivery change | Migrate with PEM mount |
-| Host/path routing | `urlprefix-` tags | `urlprefix-` tags | OK | Migrate |
-| Consul service discovery | Yes | Yes | OK | Migrate |
-| Consul KV routes | Yes (`/fabio/config`) in theory, but empty now | Yes (native KV route prefix) | Mostly irrelevant today | Optional mapping only |
-| Consul KV certificates | Yes | Yes (`source = "consul_kv"`) | OK | Migrate with consul_kv or file mount |
-| Cloudflare real IP | Yes | Yes, via trusted proxies | Needs verification | Canary test |
-| WebSocket | Yes | Yes | Needs validation | Canary test |
-| gRPC/gRPC-Web | Fabio unclear / maybe limited by usage | Supported | Needs validation if used | Canary test |
-| Fabio UI | Yes | No | Gap | Replace with admin API + metrics |
-| Raw TCP / SNI | Fabio supports | Implemented (tcp, tcp+sni, https+tcp+sni, tcp-dynamic) | Needs production testing | Canary test before production |
+| HTTP ingress | Supported | Supported | ✅ OK | Migrate |
+| HTTPS ingress | Supported | Supported | ✅ OK | Migrate |
+| Host/path routing | `urlprefix-` tags | `urlprefix-` tags | ✅ OK | Migrate |
+| Consul service discovery | Yes | Yes | ✅ OK | Migrate |
+| Consul KV routes | Yes (`/fabio/config`) in theory, but empty now | Yes (native KV route prefix) | ✅ Mostly irrelevant | Optional mapping |
+| Consul KV certificates | Yes | Yes (`source = "consul_kv"`) | ✅ OK | Direct migration |
+| File-based certificates | Yes | Yes (`source = "file"` with hot-reload) | ✅ OK | Migrate with PEM mount |
+| Cloudflare real IP | Yes | Yes, via trusted proxies | ⚠️ Needs verification | Canary test |
+| WebSocket | Yes | Yes | ⚠️ Needs validation | Canary test |
+| gRPC/gRPC-Web | Fabio unclear / maybe limited | Supported | ⚠️ Needs validation if used | Canary test |
+| Raw TCP / SNI | Fabio supports | Production-tested (tcp, tcp+sni, https+tcp+sni, tcp-dynamic) | ✅ Supported | Available if needed |
+| Circuit breaker | No | Per-target, closed/open/half-open with fallback | ✅ Bonus | Enable if desired |
+| Health checking | No | HTTP/TCP probes with configurable intervals | ✅ Bonus | Enable if desired |
+| Rate limiting | No | Token bucket per-target, 429 on exceed | ✅ Bonus | Enable if desired |
+| Fabio UI | Yes | No — replaced with admin API + embedded dashboard + Prometheus | ⚠️ Gap | Replace with admin API + metrics |
 
 ---
 
@@ -40,35 +44,34 @@ Important note:
 
 | Fabio property / behavior | Current Fabio usage | Sentirum LB equivalent | Status | Notes |
 |---|---|---|---|---|
-| `proxy.addr = :80;proto=http,:443;proto=https;cs=consul` | Yes | `server.listen`, `tls.listen` | Partial | Sentirum LB separates HTTP and TLS listener config |
-| `proxy.cs = cs=consul;type=consul;cert=http://consul.../v1/kv/fabio/cert` | Yes | None native | Missing | Must migrate to mounted PEM files or add new cert watcher feature |
+| `proxy.addr = :80;proto=http,:443;proto=https;cs=consul` | Yes | `server.listen`, `tls.listen` | Supported | Sentirum LB separates HTTP and TLS listener config |
+| `proxy.cs = cs=consul;type=consul;cert=http://consul.../v1/kv/fabio/cert` | Yes | `tls.source = "consul_kv"`, `tls.consul_cert_prefix` | Supported | Direct Fabio-compatible migration path |
 | `registry.consul.addr = consul.service.consul:8500` | Yes | `consul.address`, `consul.scheme` | Supported | Direct mapping |
-| `registry.consul.register.enabled = true` | Yes | None | Not needed / separate concern | Nomad service stanza can handle registration |
-| `registry.consul.register.name = fabio` | Yes | None | Not needed | Sentirum LB does not need Fabio-style self-registration for routing |
-| `registry.consul.kvpath = /fabio/config` | Configured, but KV empty | `consul.kv_prefix` | Partial | Only relevant if you actually want route KV in Sentirum LB |
+| `registry.consul.register.enabled = true` | Yes | None | Not needed | Nomad service stanza handles registration |
+| `registry.consul.register.name = fabio` | Yes | None | Not needed | Sentirum LB does not need Fabio-style self-registration |
+| `registry.consul.kvpath = /fabio/config` | Configured, but KV empty | `consul.kv_prefix` | Supported | Only relevant if you want route KV |
 | `registry.consul.tagprefix = urlprefix-` | Yes | `consul.tag_prefix` | Supported | Direct mapping |
-| `ui.addr` | Yes | None | Missing | Replace with `/admin/*` + Prometheus/Grafana |
-| `log.level` | Yes | `server.log_level` / runtime logging | Supported-ish | Use native logging style |
-| `log.routes.format = delta` | Yes | No direct equivalent | Missing / low priority | Optional observability enhancement |
+| `ui.addr` | Yes | `/admin/*` + embedded dashboard | Different | Replace with admin API + Prometheus/Grafana |
+| `log.level` | Yes | `logging.level` / runtime logging | Supported | Hot-reloadable via `PUT /admin/config` |
+| `log.routes.format = delta` | Yes | No direct equivalent | Low priority | Optional observability enhancement |
 | `log.access.*` | Yes | Request logging exists | Partial | Validate desired log format |
-| `metrics.target = stdout` | Yes | `/admin/metrics` Prometheus endpoint | Different model | Prefer Prometheus scrape |
-| `metrics.prefix = fabio` | Yes | Native Prometheus metric names | Different model | Dashboard/alert migration needed |
+| `metrics.target = stdout` | Yes | `/admin/metrics` Prometheus endpoint | Different | Prefer Prometheus scrape |
+| `metrics.prefix = fabio` | Yes | Native Prometheus metric names | Different | Dashboard/alert migration needed |
 | `proxy.readtimeout = 3600s` | Yes | `proxy.read_timeout` | Supported | Map value |
 | `proxy.writetimeout = 3600s` | Yes | `proxy.write_timeout` | Supported | Map value |
 | `proxy.dialtimeout = 30s` | Yes | `proxy.connect_timeout` | Supported | Map value |
-| `proxy.responseheadertimeout = 300s` | Yes | No exact dedicated knob seen | Partial | Check current timeout surface |
+| `proxy.responseheadertimeout = 300s` | Yes | No exact dedicated knob | Partial | Check current timeout surface |
 | `proxy.keepalivetimeout = 90s` | Yes | `proxy.idle_timeout` | Approximate | Validate semantics |
-| `proxy.maxconn = 10000` | Yes | `proxy.max_connections` | Partial | Sentirum LB enforces per-upstream target, not same global semantic |
-| `proxy.strategy = rr` | Yes | `proxy.strategy` | Supported | Map to existing picker strategy |
-| `proxy.matcher = prefix` | Yes | `proxy.matcher` | Supported | Direct mapping |
-| `proxy.noroutestatus = 404` | Yes | `proxy.no_route_status` | Supported | Direct mapping |
-| `proxy.header.clientip = X-Forwarded-For` | Yes | Forwarded-header handling in proxy | Partial | Sentirum LB appends/forwards based on trusted proxy policy |
-| `proxy.header.clientip.header = CF-Connecting-IP` | Yes | `CF-Connecting-IP` trusted only from `trusted_proxies` | Supported | Must configure Cloudflare CIDRs |
-| `proxy.header.tls = X-Forwarded-Proto` | Yes | native forwarded header behavior | Supported | Verify exact output in canary |
-| `proxy.header.tls.value = https` | Yes | inferred from TLS/trusted proxy path | Supported-ish | Verify parity |
+| `proxy.maxconn = 10000` | Yes | `proxy.max_connections` | Supported | Per-upstream target enforcement |
+| `proxy.strategy = rr` | Yes | `proxy.strategy` | Supported | Also supports `random`, `least-connections` |
+| `proxy.matcher = prefix` | Yes | `proxy.matcher` | Supported | Also supports `iprefix`, `glob`, `exact` |
+| `proxy.noroutestatus = 404` | Yes | `proxy.no_route_status` | Supported | Configurable |
+| `proxy.header.clientip = X-Forwarded-For` | Yes | Forwarded-header handling | Supported | Trusted proxy policy based |
+| `proxy.header.clientip.header = CF-Connecting-IP` | Yes | `CF-Connecting-IP` trusted from `trusted_proxies` | Supported | Configure Cloudflare CIDRs |
+| `proxy.header.tls = X-Forwarded-Proto` | Yes | Native forwarded header behavior | Supported | Verify exact output in canary |
 | `proxy.ws = true` | Yes | WebSocket support exists | Supported | Must validate in canary |
-| `proxy.localip = ${attr.unique.network.ip-address}` | Yes | No direct equivalent needed | Usually not needed | Check if source-IP pinning matters operationally |
-| `proxy.shutdownwait = 30s` | Yes | graceful shutdown behavior via service/runtime | Partial | Worth validating during rolling restart |
+| `proxy.localip = ${attr.unique.network.ip-address}` | Yes | No direct equivalent needed | Usually not needed | Check if source-IP pinning matters |
+| `proxy.shutdownwait = 30s` | Yes | `server.drain_timeout` → Pingora `grace_period_seconds` | Supported | Graceful shutdown wiring |
 
 ---
 
@@ -77,8 +80,8 @@ Important note:
 | Current Fabio route source | Observed state | Sentirum LB migration | Decision |
 |---|---|---|---|
 | Consul service tags with `urlprefix-` | Active | Keep as-is | Primary path |
-| `/fabio/config` KV routes | Configured in Fabio but currently empty | Optional: map to `consul.kv_prefix` if needed later | Not required for phase 1 |
-| KV cert store under `/fabio/cert/*` | Active | Replace with PEM file delivery | Required |
+| `/fabio/config` KV routes | Configured in Fabio but currently empty | Map to `consul.kv_prefix` if needed later | Not required for phase 1 |
+| KV cert store under `/fabio/cert/*` | Active | `tls.source = "consul_kv"` | Direct migration |
 
 ---
 
@@ -91,30 +94,36 @@ Important note:
   - chain
   - private key
 
-### Sentirum LB current model
-- expects file paths:
-  - `tls.cert_path`
-  - `tls.key_path`
-- **or** Consul KV cert bundles via `source = "consul_kv"`:
-  - watches keys under `tls.consul_cert_prefix` (e.g. `/fabio/cert`)
-  - supports combined PEM bundles (leaf + chain + key)
-  - dynamic SNI-based certificate selection
-  - live reload without listener restart
+### Sentirum LB supported models
 
-### Recommended migration model
-| Current | Target |
-|---|---|
-| Consul KV cert bundles | Either `source = "consul_kv"` (direct) or mounted PEM files |
-| Fabio loads from KV | Sentirum LB loads from Consul KV or file |
-| dynamic KV-based rotation | Automatic with `consul_kv` source; rolling restart for file source |
+#### Option A: Consul KV (direct migration, recommended)
+```toml
+[tls]
+source = "consul_kv"
+listen = ":443"
+consul_cert_prefix = "/fabio/cert"
+```
+- watches keys under `tls.consul_cert_prefix` (e.g. `/fabio/cert`)
+- supports combined PEM bundles (leaf + chain + key)
+- dynamic SNI-based certificate selection
+- live reload without listener restart
+- zero operational change from Fabio
 
-### Recommended delivery options
-1. `source = "consul_kv"` — direct Fabio-compatible migration, zero operational change
-2. Nomad template rendering to PEM files
-3. Vault/sidecar sync to files
+#### Option B: File-based with hot-reload
+```toml
+[tls]
+source = "file"
+cert_path = "/etc/sentirum-lb/cert.pem"
+key_path = "/etc/sentirum-lb/key.pem"
+listen = ":443"
+```
+- `FileCertWatcherService` polls cert+key file mtime every 30s
+- atomic swap via `ArcSwap<LoadedCertificate>`
+- manual reload via `POST /admin/certs/reload`
+- certs rendered by Nomad template, Vault agent, or external sync
 
 ### Decision
-**Both modes are now supported.** `consul_kv` is the path of least change from Fabio.
+**Both modes are fully supported.** Consul KV is the path of least change from Fabio.
 
 ---
 
@@ -122,7 +131,7 @@ Important note:
 
 | Behavior | Fabio today | Sentirum LB target | Required action |
 |---|---|---|---|
-| trust `CF-Connecting-IP` | Yes | Yes | configure `proxy.trusted_proxies` with Cloudflare CIDRs / trusted edge chain |
+| trust `CF-Connecting-IP` | Yes | Yes | configure `proxy.trusted_proxies` with Cloudflare CIDRs |
 | set forwarded proto correctly | Yes | Yes | validate under HTTPS canary |
 | reject spoofed client IP headers from untrusted sources | Implicit Fabio behavior | Explicit trusted proxy model | validate in canary |
 
@@ -137,16 +146,15 @@ Important note:
 
 | Fabio capability | Current usage | Sentirum LB replacement |
 |---|---|---|
-| Fabio UI | Internal UI on `:9997` | `/admin/routes`, `/admin/config`, `/admin/metrics` + Grafana |
-| stdout metrics | Yes | Prometheus scrape |
-| route visibility | UI/routes | admin API |
+| Fabio UI | Internal UI on `:9997` | `/admin/*` embedded dashboard + Prometheus/Grafana |
+| stdout metrics | Yes | Prometheus scrape at `/admin/metrics` |
+| route visibility | UI/routes | `/admin/routes` JSON + dashboard |
 | health checks | TCP on 80/443/UI | `/health`, `/healthz`, `/admin/health` |
-
-### Operational change
-Team will lose Fabio dashboard, so dashboards and alerts must move to:
-- Prometheus
-- Grafana
-- Sentirum LB admin endpoints
+| config visibility | Fabio UI | `GET /admin/config` (JSON) |
+| live config update | Fabio UI / restart | `PUT /admin/config` (hot-reload, no restart) |
+| live route addition | KV edit only | `POST /admin/routes` (Fabio-style commands) |
+| cert status | Fabio UI | `GET /admin/certs` (JSON + dashboard) |
+| target health | Basic | `/admin/targets` (per-target CB state, health, stats) |
 
 ---
 
@@ -162,39 +170,42 @@ Team will lose Fabio dashboard, so dashboards and alerts must move to:
 | gRPC/gRPC-Web | If used | validate separately |
 | KV route updates | Only if enabled | optional for phase 1 |
 | cert rotation procedure | Yes | operationally proven |
-| raw TCP / SNI | No for phase 1 | future phase |
+| raw TCP / SNI | If used | now production-tested |
 
 ---
 
-## Future phase: NATS / TCP routing
+## TCP / NATS routing
 
-If you later want to proxy NATS through this LB, current Sentirum LB is **not enough yet**.
+### Status: Production-tested
 
-### Why
-- route parsing may recognize `proto=tcp`
-- but runtime raw TCP serving is still placeholder-level
-- Fabio-style `tcp+sni` parity is not ready
+All raw TCP modes are implemented and validated:
 
-### What that means
-| Use case | Phase 1 | Future |
+| Mode | Description | Status |
 |---|---|---|
-| replace Fabio for web ingress | Yes | now |
-| replace Fabio for NATS/TCP ingress | No | requires raw TCP implementation |
+| `tcp` | Fixed raw TCP listener | Production-tested with NATS |
+| `tcp+sni` | SNI-aware TCP passthrough | Production-tested with NATS |
+| `https+tcp+sni` | HTTPS listener with TCP fallback | Production-tested with NATS |
+| `tcp-dynamic` | Dynamic listeners from route table | Implemented |
 
-### Recommendation
-Treat **TCP/NATS support as a separate phase** with separate acceptance criteria.
+Validated with NATS protocol:
+- INFO, PING/PONG, CONNECT/SUB/PUB/UNSUB
+- Queue groups
+- 50KB payloads
+- 20+ concurrent connections
+- Binary garbage rejection
+- Slow stream handling
 
 ---
 
 ## Final migration decision
 
 ### Safe to migrate now if
-- current production use is limited to HTTP/HTTPS/WS/gRPC family
-- certificates are moved from Consul KV delivery to mounted PEM delivery
+- current production use is limited to HTTP/HTTPS/WS/gRPC family (fully supported)
+- certificates use Consul KV or mounted PEM files (both supported)
 - Cloudflare real-IP behavior is verified
 - canary passes on low-risk domains
 
 ### Not safe yet if
-- you need Fabio KV cert behavior without operational changes
-- you need TCP/SNI/NATS routing in same migration wave
-- you depend on Fabio UI as primary operational surface
+- you depend on Fabio UI as primary operational surface (replace with admin API + dashboard)
+- `/fabio/config` contains critical behavior with no native mapping
+- Cloudflare header trust chain is not verified
