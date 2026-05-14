@@ -3,8 +3,9 @@ target
 .github
 .idea
 .worktrees
-Dockerfile
-README.md
-PLAN.md
-FIX_COPILOT_COMMENTS.md
+docs
+tests
+*.md
 *.log
+docker
+proto

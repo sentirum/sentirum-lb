@@ -24,5 +24,5 @@ WORKDIR /app
 COPY --from=builder /app/target/release/sentirum-lb /usr/local/bin/sentirum-lb
 
 USER sentirum
-EXPOSE 9999 9998
+EXPOSE 9999 9998 9222
 ENTRYPOINT ["/usr/local/bin/sentirum-lb"]

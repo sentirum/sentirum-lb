@@ -5,8 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] - 2026-05-09
+## [1.3.0] - 2026-05-13
 
+### Added
+
+- **Directory restructuring** — split god-object files into single-responsibility modules:
+  - `route/target.rs` (2,112 → 811 lines, -62%): extracted `circuit_breaker.rs`, `dns_cache.rs`, `health_tracker.rs`, `target_stats.rs`
+  - `admin/api.rs` (2,521 → 759 lines, -70%): extracted `auth.rs`, `config_handler.rs`, `metrics_handler.rs`, `certs_handler.rs`, `routes_handler.rs`
+- **Runtime hot-reloadable health check settings** — `proxy.health_check_interval`, `proxy.health_check_timeout`, `proxy.health_check_fall`, `proxy.health_check_rise`, `proxy.health_check_path`, `proxy.health_check_tls_skip_verify` now switchable via `PUT /admin/config` without restart
+- **Header-based routing (Approach A)** — target-level header filtering via `opts "header=X-Api-Key:required"` in route commands; backward-compatible with existing routes
+- **`drain_timeout` wiring** — `server.drain_timeout` config maps to Pingora `grace_period_seconds` for graceful shutdown
+- **Active health checking** — HTTP/TCP probes via `src/proxy/health.rs`; integrates with circuit breaker and per-target health tracking
+- **Token Bucket rate limiting (per-target)** — `parking_lot::Mutex<BucketState>` based; config: `proxy.rate_limit_per_target`, `proxy.rate_limit_burst`; per-target override via `opts "ratelimit=X burst=Y"`; returns 429 when exceeded
+- **Multi-TLS listener** — `[[tls_listeners]]` in config for additional TLS endpoints (e.g., mTLS on separate port); each listener has independent cert, client auth, and hot-reload
+- **File-based TLS cert hot-reload** — `FileCertWatcherService` polls cert+key file mtime every 30s and atomically swaps via `ArcSwap`; manual reload via `POST /admin/certs/reload`
+- **Dynamic route management** — `POST /admin/routes` for live Fabio-style route addition; `DELETE /admin/routes/static` to clear static routes
+- **OCSP stapling infrastructure** — fetcher, cache, and config wiring; actual handshake stapling deferred to Pingora upstream support
+
+### Changed
+
+- **Pingora 0.5 → 0.8 upgrade** — only breaking change was `upstream_response_body_filter` return type
+- **Config internals** — `Config` clone replaced with `Arc` for zero-copy runtime swaps; `ParsedProxyTimeouts` cached via `OnceLock`
+- **Monotonic unified epoch** — single `MONO_EPOCH: OnceLock<Instant>` shared across circuit breaker, rate limiter, and DNS cache modules
+- **Admin auth lock contention eliminated** — session eviction moved to dedicated background task (every 60s) instead of per-request write lock
+- **Root directory cleanup** — removed 14 agent/junk files, updated `.gitignore` with agent artifact patterns
+
+### Fixed
+
+- **DnsCache TOCTOU** — replaced `remove()` + re-insert with `remove_if()` for atomic conditional update
+- **Circuit breaker stale count** — re-read error count after lock acquisition to prevent stale window computation
+- **Rate limiter connection slot leak** — added `retain()` cleanup for abandoned slots on target re-registration
+- **26+ clippy warnings** — all resolved, zero warnings in CI
+- **Path traversal validation** — admin API endpoints validate paths against directory traversal
+- **Timestamp consistency** — `timestamp_ms` replaced with `elapsed_ms` for monotonic time sources across all modules
+
+### Testing
+
+- **250 tests, 0 failures, 0 clippy warnings**
+- **Live load testing** — 93K+ requests across HTTP (3,445 req/s), HTTPS (248 req/s), gRPC, circuit breaker, and mixed protocols
+- **29/29 live protocol tests** — gRPC unary/streaming, gRPC-Web, WebSocket, TCP/NATS
+
+## [1.2.0] - 2026-05-09
 
 ### Added
 
@@ -63,6 +102,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Edge test shell compatibility** — replaced `curl -sf` with `curl -s`, removed
   `curl -o /dev/null` (Pingora keep-alive hang), replaced `timeout` (unavailable on macOS)
   with `curl --max-time` and `nc -w`.
+
+## [1.2.1] - 2026-05-09
+
+### Fixed
+
+- **Security: Admin auth lock contention** — hot-path auth middleware no longer acquires write lock on every request; eviction handled by background task
+- **Weight-aware least-connections picker** — respects configured weights by selecting target with lowest effective load (`active_connections / weight`)
 
 ## [1.1.2] - 2026-05-08
 
@@ -147,7 +193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Certs nav entry** — added certificate management to sidebar navigation.
 
 
-## [1.1.1] - 2025-05-08
+## [1.1.1] - 2026-05-08
 
 ### Fixed
 
@@ -166,7 +212,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Admin dashboard language** — standardized all UI strings to English
 - **Consul client error handling** — JSON deserialization failures now produce `ParseError` instead of generic `RequestError`
 
-## [1.1.0] - 2025-05-08
+## [1.1.0] - 2026-05-08
 
 ### Added
 
@@ -193,25 +239,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Logic: Consul service watcher spin-loop** — fixed condition to skip on unchanged index regardless of check contents, consistent with KV watcher behavior
 - Production blocker fixes — config panic, duration parser, Consul timeout, TLS port, feature flags, mutex recovery, backoff, loopback checks
 
-## [1.0.3] - 2025-04-XX
+## [1.0.3] - 2026-04-XX
 
 ### Fixed
 
 - Minor reliability fixes
 
-## [1.0.2] - 2025-04-XX
+## [1.0.2] - 2026-04-XX
 
 ### Fixed
 
 - Bug fixes and stability improvements
 
-## [1.0.1] - 2025-04-XX
+## [1.0.1] - 2026-04-XX
 
 ### Fixed
 
 - Initial production fixes
 
-## [1.0.0] - 2025-04-XX
+## [1.0.0] - 2026-04-XX
 
 ### Added
 

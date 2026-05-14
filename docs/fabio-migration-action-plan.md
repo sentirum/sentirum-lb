@@ -1,4 +1,4 @@
-# Fabio → sent irum-lb Action Plan
+# Fabio → Sentirum LB Action Plan
 
 ## Recommendation
 
@@ -6,14 +6,14 @@
 
 Goal:
 - replace current Fabio usage for **HTTP/HTTPS host/path ingress**
-- **do not** target raw TCP/SNI parity in first wave
+- optionally target raw TCP/SNI parity — all modes are now production-tested
 - **do not** build full Fabio config compatibility unless inventory proves it is required
-- prefer **mounted PEM + rolling restart** over Consul-backed live cert reload
+- prefer **mounted PEM or Consul KV** for certificate delivery — both fully supported
 
 Reason:
 - repo already supports service-tag and route-KV driven HTTP-family ingress
-- biggest gap is **TLS source/rotation model**, not core routing
-- raw TCP is not production-ready
+- TLS source supports both **file** (`cert_path` + `key_path`) and **Consul KV** (`consul_kv` source with live reload)
+- raw TCP modes (`tcp`, `tcp+sni`, `https+tcp+sni`, `tcp-dynamic`) are production-tested with NATS
 - full Fabio parity is expensive and risky
 
 ---
@@ -30,7 +30,7 @@ Confirm what production Fabio actually uses.
    - verify whether `/fabio/config` contains only routes or also operational config/certs
 2. Inventory protocol usage
    - classify traffic as: `http`, `https`, `ws`, `wss`, `grpc`, `grpcs`, `tcp`
-   - flag any `proto=tcp` or TCP+SNI style usage as blocker
+   - flag any `proto=tcp` or TCP+SNI style usage — now supported and production-tested
 3. Inventory certificate source
    - confirm whether certs come from mounted files, Consul KV, Vault template, or another sync path
 4. Inventory Cloudflare assumptions
@@ -52,7 +52,7 @@ No unknowns left around:
 
 ---
 
-## P1 — Make native sent irum-lb deployment operable
+## P1 — Make native Sentirum LB deployment operable
 
 ### Objective
 Close must-have gaps without widening scope.
@@ -95,9 +95,9 @@ Files:
 
 Changes:
 - document clearly:
-  - supported today: service tags + route KV + HTTP-family protocols
-  - not parity today: Fabio UI, raw TCP, generic Fabio property ingestion
-  - recommended cert model: mounted PEM + rolling restart
+  - supported today: service tags + route KV + HTTP-family protocols + TCP modes
+  - not parity today: Fabio UI, generic Fabio property ingestion
+  - recommended cert model: Consul KV (direct migration) or mounted PEM + rolling restart
   - Cloudflare real-IP behavior depends on `trusted_proxies`
 
 Acceptance:
@@ -107,44 +107,33 @@ Acceptance:
 
 ## P2 — Decide TLS strategy
 
-### Recommended option
-**Use mounted PEM files + rolling restart.**
+### Recommended options (both fully supported)
 
-Operational model:
+#### Option A: Consul KV source (path of least change)
+- `tls.source = "consul_kv"` watches keys under `tls.consul_cert_prefix`
+- Fabio-compatible cert bundles (leaf + chain + key in one PEM)
+- Live reload without restart
+- SNI-based certificate selection
+- Zero operational change from current Fabio setup
+
+#### Option B: Mounted PEM files + rolling restart
+- `tls.source = "file"` via `cert_path` + `key_path`
 - certs rendered/synced by Nomad template, Vault agent, sidecar, or external secret sync
 - checksum/version change triggers rolling restart
-- sent irum-lb keeps simple file-based TLS
+- Sentirum LB keeps simple file-based TLS
 
-Why this is default:
-- smallest code change
-- lowest runtime risk
-- aligns with current implementation
-
-### Only if inventory requires it
-Build **separate** Consul-backed cert/config watch.
-
-Files if needed:
-- `src/config.rs`
-- `src/consul/client.rs`
-- `src/consul/watcher.rs`
-- `src/main.rs`
-- maybe `src/proxy/tls.rs`
-
-Rules if implemented:
-- keep route watch and cert/config watch separate
-- do not overload route KV parser with Fabio general config
-- define clear precedence between file config and KV config
-- add tests for empty/invalid/stale cert states
-
-### No-go for this branch unless truly required
-Do **not** build live cert reload just because Fabio had it. Only do it if P0 proves it is a real production dependency.
+Why Option A is default:
+- smallest operational change from Fabio
+- cert bundles stay in the same Consul KV path
+- live cert rotation without restart
+- both options support hot-reload (file mode via `FileCertWatcherService` polling mtime)
 
 ---
 
 ## P3 — Canary rollout plan
 
 ### Topology
-- run Fabio and sent irum-lb side-by-side
+- run Fabio and Sentirum LB side-by-side
 - same Consul route sources
 - separate listener/bind or separate hostname subset
 - move 1–2 low-risk domains first
@@ -165,11 +154,13 @@ Do **not** build live cert reload just because Fabio had it. Only do it if P0 pr
    - `X-Forwarded-Host`
    - ensure only trusted proxies can influence these
 4. TLS
-   - correct cert served
+   - correct cert served per SNI
    - rotation procedure works operationally
+   - cert hot-reload without restart
 5. Protocols in use
    - WebSocket if any
    - gRPC / gRPC-Web if any
+   - Raw TCP if any (production-tested with NATS)
 6. Observability
    - `/admin/routes`
    - `/admin/metrics`
@@ -193,14 +184,13 @@ Do **not** build live cert reload just because Fabio had it. Only do it if P0 pr
 ## P4 — Replace criteria
 
 ### Replace allowed when
-- all active prod traffic is HTTP-family
+- all active prod traffic is HTTP-family or TCP (both supported)
 - no required Fabio-only config remains unmapped
 - cert delivery strategy is proven and documented
 - Cloudflare real-IP behavior validated
 - canary passes for pilot domains
 
 ### No-go when
-- any production route requires raw TCP/SNI parity
 - cert rotation model is still unclear
 - `/fabio/config` contains critical behavior with no native mapping
 - Cloudflare header trust chain is not verified
@@ -240,14 +230,14 @@ If we want fastest path to usable replacement, do only this first:
 4. README/config migration notes
 5. side-by-side canary
 
-This gets us to a safe decision point **without** prematurely building Consul-backed cert reload.
+This gets us to a safe decision point.
 
 ---
 
 ## Immediate next 5 actions
 
 1. Confirm whether prod certs are **mounted files** or **Consul/Vault-backed dynamic material**.
-2. Confirm whether any active route uses `proto=tcp`.
+2. Confirm whether any active route uses `proto=tcp` — now fully supported.
 3. Inspect `/fabio/config` usage and classify each key as route / cert / other config.
 4. Implement admin/runtime visibility + TLS diagnostics in this repo.
 5. Stand up one canary deployment and test 1–2 low-risk hostnames.

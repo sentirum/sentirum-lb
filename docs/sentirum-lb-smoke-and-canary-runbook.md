@@ -1,11 +1,11 @@
-# sent irum-lb Smoke Test + Canary Runbook
+# Sentirum LB Smoke Test + Canary Runbook
 
 ## 0. Goal
-Validate that `sentirum-lb` can replace Fabio for HTTP/HTTPS ingress with:
+Validate that Sentirum LB can replace Fabio for HTTP/HTTPS ingress with:
 - runtime route updates
-- runtime TLS cert updates from Consul KV
+- runtime TLS cert updates from Consul KV or file source
 - optional downstream mTLS / client-cert auth
-- no LB restart for route/cert changes
+- no LB restart for route/cert/config changes
 - no active connection drops during cert changes
 
 ---
@@ -14,7 +14,6 @@ Validate that `sentirum-lb` can replace Fabio for HTTP/HTTPS ingress with:
 
 ### Build / test
 ```bash
-cd /Users/alper/dev/sentirum/sentirum-lb
 cargo test --quiet
 cargo build --release --locked
 ```
@@ -45,8 +44,8 @@ consul catalog nodes
 ## 2. Validate the Nomad job
 
 ```bash
-nomad job validate /Users/alper/dev/devops/sentirum-nomad/nomad/jobs/services/sentirum-lb.nomad
-nomad job plan /Users/alper/dev/devops/sentirum-nomad/nomad/jobs/services/sentirum-lb.nomad
+nomad job validate <path-to-nomad-job>
+nomad job plan <path-to-nomad-job>
 ```
 
 Before deploy, confirm:
@@ -54,12 +53,13 @@ Before deploy, confirm:
 - admin token variable exists
 - consul token variable exists if needed
 - trusted proxy CIDRs are filled
+- TLS source is configured (`consul_kv` or `file`)
 
 ---
 
 ## 3. Recommended canary topology
 
-Do **not** bind Fabio and `sentirum-lb` to `:80/:443` on the same node simultaneously.
+Do **not** bind Fabio and Sentirum LB to `:80/:443` on the same node simultaneously.
 
 Use one of these:
 1. separate ingress nodes
@@ -67,7 +67,7 @@ Use one of these:
 3. temporary alt ports in a canary-only job variant
 
 Recommended first canary:
-- dedicate 1 ingress node to `sentirum-lb`
+- dedicate 1 ingress node to Sentirum LB
 - route only 1–2 low-risk domains there
 - keep Fabio unchanged on the rest
 
@@ -82,7 +82,7 @@ Port note:
 
 ### Deploy
 ```bash
-nomad job run /Users/alper/dev/devops/sentirum-nomad/nomad/jobs/services/sentirum-lb.nomad
+nomad job run <path-to-nomad-job>
 nomad job status sentirum-lb
 ```
 
@@ -99,10 +99,10 @@ nomad alloc logs -stderr <alloc-id>
 
 Expected logs:
 - HTTP listener started
-- HTTPS listener started
-- initial Consul TLS snapshot loaded
+- HTTPS listener started (if TLS configured)
+- initial Consul TLS snapshot loaded (if `consul_kv` source)
 - Consul watcher started
-- TLS cert watcher started
+- TLS cert watcher started (if `file` source)
 
 ---
 
@@ -119,9 +119,9 @@ curl -s -H "X-Admin-Token: <token>" http://127.0.0.1:<admin-port>/admin/config |
 ```
 
 Look for:
-- `tls.source == "consul_kv"`
-- `tls.consul_cert_prefix == "/fabio/cert"`
-- `tls.require_initial_snapshot == true`
+- `tls.source` matches intended mode (`consul_kv` or `file`)
+- `tls.consul_cert_prefix` (if `consul_kv`) or `tls.cert_path`/`tls.key_path` (if `file`)
+- `tls.require_initial_snapshot == true` (if `consul_kv`)
 - if enabled: `tls.client_auth`, `tls.client_ca_source`, `tls.client_ca_consul_prefix` / `tls.client_ca_path`
 
 ### Cert runtime state
@@ -131,13 +131,13 @@ curl -s -H "X-Admin-Token: <token>" http://127.0.0.1:<admin-port>/admin/certs | 
 
 ### Memory / FD baseline
 ```bash
-curl -s -H "X-Admin-Token: <token>" http://127.0.0.1:<admin-port>/admin/metrics | rg 'sentirum_lb_process_(resident_memory_bytes|virtual_memory_bytes|open_fds|metrics_available)'
+curl -s -H "X-Admin-Token: <token>" http://127.0.0.1:<admin-port>/admin/metrics | rg 'sentirum_lb_process_(resident_memory_bytes|virtual_memory_bytes|open_fds)'
 ```
 
 Look for:
 - `loaded_certificates`
 - `default_certificate`
-- `last_consul_index`
+- `last_consul_index` (if `consul_kv` source)
 - `last_error == null`
 - if enabled: `client_auth.loaded_entries` is non-empty and `client_auth.last_error == null`
 
@@ -182,7 +182,7 @@ Expected:
 ### Wildcard behavior
 If a wildcard cert exists:
 ```bash
-openssl s_client -connect <canary-node-ip>:<https-port> -servername foo.betapi.win </dev/null 2>/dev/null | openssl x509 -noout -ext subjectAltName
+openssl s_client -connect <canary-node-ip>:<https-port> -servername foo.example.com </dev/null 2>/dev/null | openssl x509 -noout -ext subjectAltName
 ```
 
 Expected:
@@ -200,9 +200,9 @@ curl -s -H "X-Admin-Token: <token>" http://127.0.0.1:<admin-port>/admin/certs | 
 openssl s_client -connect <canary-node-ip>:<https-port> -servername <test-host> </dev/null 2>/dev/null | openssl x509 -noout -serial -subject
 ```
 
-### Step B — update KV entry
-Update:
-- `/fabio/cert/<test-host>.pem`
+### Step B — update cert
+- **Consul KV mode**: update `/fabio/cert/<test-host>.pem`
+- **File mode**: update the cert/key files on disk, then either wait 30s for auto-reload or trigger `POST /admin/certs/reload`
 
 ### Step C — verify runtime pickup
 ```bash
@@ -211,7 +211,7 @@ openssl s_client -connect <canary-node-ip>:<https-port> -servername <test-host> 
 ```
 
 Expected:
-- `last_consul_index` advances
+- `last_consul_index` advances (Consul KV mode) or cert mtime changes (file mode)
 - cert serial changes for **new** handshakes
 - no process restart
 - no allocation replacement
@@ -233,8 +233,8 @@ Expected:
 Use a long-lived WebSocket/SSE/gRPC stream if available.
 
 ### Flow
-1. open a long-lived connection through `sentirum-lb`
-2. change a test certificate in `/fabio/cert/*`
+1. open a long-lived connection through Sentirum LB
+2. change a test certificate
 3. keep the connection open
 4. open a **new** connection and verify new cert is served
 
@@ -291,6 +291,8 @@ If you rely on self-signed/non-CA client-auth roots similar to Fabio's `ApiGatew
 - verify the same client cert fails without it
 - verify the same client cert succeeds with it
 
+---
+
 ## 11. Route update test without restart
 
 Register or edit a test service tag:
@@ -309,9 +311,31 @@ Expected:
 
 ---
 
-## 12. Broken cert safety test
+## 12. Runtime config hot-reload test
 
-Create a temporary bad PEM for a test-only hostname under `/fabio/cert/*`.
+### Change a setting
+```bash
+curl -s -X PUT -H "X-Admin-Token: <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"proxy":{"strategy":"random"}}' \
+  http://127.0.0.1:<admin-port>/admin/config | jq
+```
+
+### Verify
+```bash
+curl -s -H "X-Admin-Token: <token>" http://127.0.0.1:<admin-port>/admin/config | jq '.proxy.strategy'
+```
+
+Expected:
+- setting changes immediately
+- no restart
+- no traffic disruption
+
+---
+
+## 13. Broken cert safety test
+
+Create a temporary bad PEM for a test-only hostname.
 
 Then check:
 ```bash
@@ -327,7 +351,7 @@ This validates last-known-good protection.
 
 ---
 
-## 13. Cloudflare / trusted proxy validation
+## 14. Cloudflare / trusted proxy validation
 
 After filling `proxy.trusted_proxies`:
 
@@ -346,7 +370,7 @@ Send a direct request from an untrusted source with fake headers and confirm the
 
 ---
 
-## 14. Metrics validation
+## 15. Metrics validation
 
 ```bash
 curl -s -H "X-Admin-Token: <token>" http://127.0.0.1:<admin-port>/admin/metrics | head -80
@@ -359,40 +383,27 @@ Check:
 
 ---
 
-## 15. Rollback
+## 16. Rollback
 
 Rollback is traffic-level, not state-level.
 
 Steps:
-1. stop sending canary traffic to `sentirum-lb`
+1. stop sending canary traffic to Sentirum LB
 2. send traffic back to Fabio
 3. keep KV and service tags unchanged
 4. inspect logs before next attempt
 
 No route/cert migration rollback is needed because:
 - service tags are still Fabio-compatible
-- certs still live under `/fabio/cert/*`
+- certs still live under `/fabio/cert/*` (or file paths are independent)
 
 ---
 
-## 15. Exit criteria for wider rollout
-
-Promote only if all pass:
-- admin API healthy
-- `/admin/certs` shows stable snapshot state
-- real host/path parity confirmed
-- correct cert served per SNI
-- cert update picked up without restart
-- existing connections survive cert rotation
-- route updates work without restart
-- Cloudflare IP/header handling verified
-- rollback path proven
-
-## 9. Graceful Reload / Nomad Lifecycle
+## 17. Graceful Reload / Nomad Lifecycle
 
 ### Procedure for Zero-Downtime Reload
 
-When deploying a new version of sentirum-lb via Nomad:
+When deploying a new version of Sentirum LB via Nomad:
 
 1. **Pre-maintenance**: Before stopping the old instance, enable Consul node maintenance mode:
    ```bash
@@ -423,12 +434,31 @@ service_discovery = true
 kv_watching = true
 poll_interval = "3s"  # Balance between responsiveness and Consul load
 service_whitelist = ["webapp", "api"]  # Only route traffic for specific services
+
+[server]
+drain_timeout = "30s"  # Grace period for in-flight requests during shutdown
 ```
 
 ### Consul Node Maintenance
 
-When a sentirum-lb node is in Consul node maintenance mode:
+When a Sentirum LB node is in Consul node maintenance mode:
 - Health checks are marked critical
 - Consul's `passing_services` logic will exclude that node's services
-- Other sentirum-lb instances will automatically route around the node
+- Other Sentirum LB instances will automatically route around the node
 - No new traffic is sent to the node during maintenance
+
+---
+
+## 18. Exit criteria for wider rollout
+
+Promote only if all pass:
+- admin API healthy
+- `/admin/certs` shows stable snapshot state
+- real host/path parity confirmed
+- correct cert served per SNI
+- cert update picked up without restart
+- existing connections survive cert rotation
+- route updates work without restart
+- runtime config changes work without restart
+- Cloudflare IP/header handling verified
+- rollback path proven

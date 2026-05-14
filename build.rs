@@ -1,4 +1,6 @@
 fn main() {
+    println!("cargo:rerun-if-changed=proto/echo.proto");
+
     let protoc = protoc_bin_vendored::protoc_bin_path().expect("failed to resolve protoc");
     unsafe {
         std::env::set_var("PROTOC", protoc);
