@@ -130,7 +130,7 @@ impl ServiceMonitor {
         const MAX_CATALOG_LOOKUP_CONCURRENCY: usize = 32;
         let service_names: Vec<String> = passing_services.keys().cloned().collect();
         let catalog_results: Vec<_> =
-            stream::iter(service_names.iter().cloned().map(|service_name| {
+            stream::iter(service_names.into_iter().map(|service_name| {
                 let client = self.client.clone();
                 async move {
                     let result = client.get_catalog_service(&service_name).await;
@@ -145,7 +145,7 @@ impl ServiceMonitor {
         let mut failures = Vec::new();
         for (service_name, result) in catalog_results {
             let service_ids_set: std::collections::HashSet<&str> = passing_services
-                .get(&service_name)
+                .get(service_name.as_str())
                 .unwrap()
                 .iter()
                 .map(String::as_str)

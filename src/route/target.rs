@@ -746,16 +746,20 @@ mod tests {
     // Header-based routing tests
     #[test]
     fn test_header_matches_no_constraints() {
-        let mut t = Target::default();
-        t.opts = HashMap::new();
+        let t = Target {
+            opts: HashMap::new(),
+            ..Default::default()
+        };
         let headers = http::HeaderMap::new();
         assert!(t.matches_headers(&headers));
     }
 
     #[test]
     fn test_header_matches_single_constraint() {
-        let mut t = Target::default();
-        t.opts = HashMap::from([("header".to_string(), "x-version:v2".to_string())]);
+        let t = Target {
+            opts: HashMap::from([("header".to_string(), "x-version:v2".to_string())]),
+            ..Default::default()
+        };
 
         let mut headers = http::HeaderMap::new();
         assert!(!t.matches_headers(&headers));
@@ -767,8 +771,10 @@ mod tests {
 
     #[test]
     fn test_header_matches_multiple_constraints() {
-        let mut t = Target::default();
-        t.opts = HashMap::from([("header".to_string(), "x-version:v2,x-env:prod".to_string())]);
+        let t = Target {
+            opts: HashMap::from([("header".to_string(), "x-version:v2,x-env:prod".to_string())]),
+            ..Default::default()
+        };
 
         let mut headers = http::HeaderMap::new();
         headers.insert("x-version", http::HeaderValue::from_static("v2"));
@@ -781,8 +787,10 @@ mod tests {
 
     #[test]
     fn test_header_matches_case_insensitive_name() {
-        let mut t = Target::default();
-        t.opts = HashMap::from([("header".to_string(), "X-Version:v2".to_string())]);
+        let t = Target {
+            opts: HashMap::from([("header".to_string(), "X-Version:v2".to_string())]),
+            ..Default::default()
+        };
 
         let mut headers = http::HeaderMap::new();
         headers.insert("x-version", http::HeaderValue::from_static("v2"));
@@ -791,10 +799,10 @@ mod tests {
 
     #[test]
     fn test_header_matches_separate_opts() {
-        let mut t = Target::default();
-        t.opts = HashMap::new();
-        t.opts
-            .insert("header".to_string(), "x-version:v2,x-env:prod".to_string());
+        let t = Target {
+            opts: HashMap::from([("header".to_string(), "x-version:v2,x-env:prod".to_string())]),
+            ..Default::default()
+        };
 
         let mut headers = http::HeaderMap::new();
         headers.insert("x-version", http::HeaderValue::from_static("v2"));
@@ -804,8 +812,10 @@ mod tests {
 
     #[test]
     fn test_header_matches_empty_value() {
-        let mut t = Target::default();
-        t.opts = HashMap::from([("header".to_string(), "x-debug:".to_string())]);
+        let t = Target {
+            opts: HashMap::from([("header".to_string(), "x-debug:".to_string())]),
+            ..Default::default()
+        };
 
         let mut headers = http::HeaderMap::new();
         headers.insert("x-debug", http::HeaderValue::from_bytes(b"").unwrap());
