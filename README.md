@@ -192,9 +192,11 @@ client_ca_path = ""
 client_ca_consul_prefix = ""
 client_ca_upgrade_cn = ""
 
-# Additional TLS listeners (e.g., mTLS on a separate port)
+# Additional TLS listeners — each gets its own port, cert, and optional mTLS config
+# Useful for exposing mTLS endpoints alongside public HTTPS on the same LB instance
 # [[tls_listeners]]
 # listen = ":8443"
+# source = "file"
 # cert_path = "/etc/sentirum-lb/mtls-cert.pem"
 # key_path = "/etc/sentirum-lb/mtls-key.pem"
 # client_auth = "required"
@@ -254,18 +256,27 @@ key_path = "/etc/sentirum-lb/key.pem"
 
 ### Multi-TLS listeners
 
-Additional TLS endpoints can be configured via `[[tls_listeners]]`:
+Sentirum LB supports multiple TLS endpoints on different ports, each with independent certificates, client auth, and hot-reload. This lets you serve public HTTPS and mTLS on the same LB instance:
 
 ```toml
+# Primary listener — public HTTPS
+[tls]
+source = "file"
+listen = ":443"
+cert_path = "/etc/sentirum-lb/cert.pem"
+key_path = "/etc/sentirum-lb/key.pem"
+
+# Additional listener — mTLS for internal services
 [[tls_listeners]]
 listen = ":8443"
+source = "file"
 cert_path = "/etc/sentirum-lb/mtls-cert.pem"
 key_path = "/etc/sentirum-lb/mtls-key.pem"
 client_auth = "required"
 client_ca_path = "/etc/sentirum-lb/client-ca.pem"
 ```
 
-Each additional listener has independent certificates, client auth settings, and file-based hot-reload.
+Each additional listener supports the same options as `[tls]`: `source`, `cert_path`/`key_path` or `consul_cert_prefix`, `client_auth`, `client_ca_*`, `strict_sni`, and file-based hot-reload via `FileCertWatcherService`.
 
 ### mTLS / client certificate auth
 
