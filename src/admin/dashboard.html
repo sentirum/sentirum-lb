@@ -2337,7 +2337,7 @@
         const recoveringWatchers = watchers.filter(w => w.state === 'recovering');
         const openTargets = targets.filter(t => t.circuit_breaker === 'open');
         const halfOpenTargets = targets.filter(t => t.circuit_breaker === 'halfopen');
-        const activeTargets = targets.filter(t => (t.active_connections || 0) > 0);
+        const activeTargets = targets.filter(t => t.circuit_breaker !== 'open' && (t.stats?.requests || 0) > 0);
         const warningLogs = logs.filter(l => l.level === 'WARN').length;
         const errorLogs = logs.filter(l => l.level === 'ERROR').length;
         const latestErrorLog = logs.find(l => l.level === 'ERROR');
