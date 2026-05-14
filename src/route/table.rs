@@ -208,6 +208,76 @@ impl Route {
                 }
             }
         }
+
+        // Interleave w_targets for smoother round-robin distribution.
+        // Without interleaving, equal-weight targets are grouped (all A, then all B),
+        // causing round-robin to hit only the first target for small N.
+        // We interleave proportionally: each target's slots are distributed uniformly
+        // across the full range while preserving weight ratios.
+        // Example with 3 equal targets: A B C A B C ... instead of A A A B B B C C C.
+        // Example with 70/30 weights: A A B A A B A A B A ... (7:3 ratio preserved).
+        if self.targets.len() > 1 && !self.w_targets.is_empty() {
+            let n = self.w_targets.len();
+
+            // Group consecutive identical targets into runs
+            let mut runs: Vec<(Arc<Target>, usize)> = Vec::new();
+            let mut i = 0;
+            while i < n {
+                let current = Arc::clone(&self.w_targets[i]);
+                let mut count = 1;
+                while i + count < n && Arc::ptr_eq(&self.w_targets[i + count], &current) {
+                    count += 1;
+                }
+                runs.push((current, count));
+                i += count;
+            }
+
+            if runs.len() > 1 {
+                // Weighted interleaving: spread each group's slots uniformly.
+                // Use fractional accumulators to distribute proportionally.
+                let mut interleaved: Vec<Arc<Target>> = Vec::with_capacity(n);
+                let num_groups = runs.len();
+                let mut remaining: Vec<usize> = runs.iter().map(|(_, c)| *c).collect();
+                let total_remaining: usize = remaining.iter().sum();
+
+                // Use a fractional position for each group to determine next pick.
+                // Each group advances by total_remaining / group_count per step,
+                // which naturally maintains weight ratios.
+                let mut positions: Vec<f64> = (0..num_groups)
+                    .map(|g| {
+                        let group_total = runs[g].1 as f64;
+                        // Start position biased by group size (larger groups start earlier)
+                        if group_total > 0.0 {
+                            (total_remaining as f64 / group_total) * 0.5
+                        } else {
+                            f64::MAX
+                        }
+                    })
+                    .collect();
+
+                for _ in 0..n {
+                    // Pick the group with the smallest position that still has remaining slots
+                    let mut best_group = 0;
+                    let mut best_pos = f64::MAX;
+                    for g in 0..num_groups {
+                        if remaining[g] > 0 && positions[g] < best_pos {
+                            best_pos = positions[g];
+                            best_group = g;
+                        }
+                    }
+                    interleaved.push(Arc::clone(&runs[best_group].0));
+                    remaining[best_group] -= 1;
+                    // Advance this group's position by its stride (total / count)
+                    let stride = if runs[best_group].1 > 0 {
+                        n as f64 / runs[best_group].1 as f64
+                    } else {
+                        f64::MAX
+                    };
+                    positions[best_group] += stride;
+                }
+                self.w_targets = interleaved;
+            }
+        }
     }
 
     /// Get the number of targets.
@@ -331,6 +401,7 @@ impl Table {
             format!("/{}", def.src_path())
         };
 
+        let edge_stats_key = format!("{host}\u{001f}{path}\u{001f}{}\u{001f}{}", def.service, def.dst);
         let mut target = Target {
             service: def.service.clone(),
             url: def.dst.clone(),
@@ -346,6 +417,7 @@ impl Table {
             active_connections: self.active_connections_for(&def.dst),
             health_tracker: self.health_tracker_for(&def.dst),
             stats: self.stats_for(&def.dst),
+            edge_stats: self.edge_stats_for(&edge_stats_key),
             rate_limiter: Arc::new(crate::proxy::ratelimit::TokenBucket::new()),
         };
         target.pre_parse();
@@ -538,6 +610,13 @@ impl Table {
         self.stats_registry
             .as_ref()
             .map(|registry| registry.stats_for(key))
+            .unwrap_or_else(|| Arc::new(crate::route::target::TargetStats::default()))
+    }
+
+    fn edge_stats_for(&self, key: &str) -> Arc<crate::route::target::TargetStats> {
+        self.stats_registry
+            .as_ref()
+            .map(|registry| registry.edge_stats_for(key))
             .unwrap_or_else(|| Arc::new(crate::route::target::TargetStats::default()))
     }
 

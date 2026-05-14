@@ -120,6 +120,9 @@ pub struct Target {
     pub health_tracker: Arc<TargetHealthTracker>,
     #[serde(skip)]
     pub stats: Arc<TargetStats>,
+    /// Per route-target edge statistics used by topology visualization.
+    #[serde(skip)]
+    pub edge_stats: Arc<TargetStats>,
     /// Per-target token bucket rate limiter
     #[serde(skip)]
     pub rate_limiter: Arc<crate::proxy::ratelimit::TokenBucket>,
@@ -142,6 +145,7 @@ impl Clone for Target {
             active_connections: Arc::clone(&self.active_connections),
             health_tracker: Arc::clone(&self.health_tracker),
             stats: Arc::clone(&self.stats),
+            edge_stats: Arc::clone(&self.edge_stats),
             rate_limiter: Arc::clone(&self.rate_limiter),
         }
     }
@@ -164,6 +168,7 @@ impl Default for Target {
             active_connections: Arc::new(AtomicU64::new(0)),
             health_tracker: Arc::new(TargetHealthTracker::new()),
             stats: Arc::new(TargetStats::default()),
+            edge_stats: Arc::new(TargetStats::default()),
             rate_limiter: Arc::new(crate::proxy::ratelimit::TokenBucket::new()),
         }
     }

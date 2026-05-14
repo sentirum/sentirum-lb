@@ -12,8 +12,10 @@ pub mod api;
 pub mod auth;
 pub mod certs_handler;
 pub mod config_handler;
+pub mod dashboard_assets;
 pub mod logs;
 pub mod metrics_handler;
 pub mod routes_handler;
+pub(crate) mod topology_flow;
 
 pub use api::{AdminState, SessionEntry, build_router, run_admin_server};

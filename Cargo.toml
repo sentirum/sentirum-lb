@@ -81,6 +81,7 @@ protoc-bin-vendored = "3"
 tonic-build = "0.12"
 
 [dev-dependencies]
+criterion = "0.5"
 prost = "0.13"
 rcgen = "0.13"
 rustls-pemfile = "2"
@@ -89,6 +90,10 @@ tokio-rustls = "0.26"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 tonic = { version = "0.12", features = ["transport", "tls"] }
+
+[[bench]]
+name = "proxy_hot_path"
+harness = false
 
 [profile.release]
 opt-level = 3

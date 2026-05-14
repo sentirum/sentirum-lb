@@ -1,6 +1,7 @@
 //! Metrics, topology, target status, and Consul status handlers.
 
 use super::api::AdminState;
+use crate::admin::topology_flow::{TopologyFlowMetrics, topology_target_key};
 use crate::route::target::CircuitState;
 use axum::extract::State;
 use futures::stream::Stream;
@@ -218,6 +219,7 @@ pub(super) async fn targets_handler(
     State(state): State<AdminState>,
 ) -> axum::Json<serde_json::Value> {
     let table = state.route_table.get();
+    let flow_snapshot = state.topology_flow_cache.snapshot(&state.route_table);
 
     let mut targets = Vec::new();
     for (host, route, target) in table.iter_targets() {
@@ -255,6 +257,7 @@ pub(super) async fn targets_handler(
             })
             .collect();
 
+        let flow_key = topology_target_key(host, &route.path, &target.service, &target.url);
         targets.push(serde_json::json!({
             "host": host,
             "path": &route.path,
@@ -270,6 +273,7 @@ pub(super) async fn targets_handler(
             "circuit_breaker": format!("{:?}", cb_state).to_lowercase(),
             "probe_healthy": target.health_tracker.is_probe_healthy(),
             "circuit_breaker_history": cb_transitions,
+            "flow": flow_snapshot.edges.get(&flow_key).cloned().unwrap_or_default(),
             "stats": {
                 "requests": requests,
                 "errors": errors,
@@ -293,6 +297,7 @@ pub(super) async fn topology_handler(
     let hosts = table.hosts();
     let metrics = crate::metrics::prometheus::global();
     let ordering = Ordering::Relaxed;
+    let flow_snapshot = state.topology_flow_cache.snapshot(&state.route_table);
 
     let total_requests = metrics.requests_total.load(ordering);
     let total_errors = metrics.requests_error_total.load(ordering);
@@ -307,11 +312,13 @@ pub(super) async fn topology_handler(
         "requests": total_requests,
         "active_connections": metrics.active_connections.load(ordering),
         "error_rate": error_rate,
+        "flow": flow_snapshot.lb,
     });
 
     let mut host_entries = Vec::new();
     for host in hosts {
         let mut route_entries = Vec::new();
+        let mut host_flows = Vec::new();
         if let Some(routes) = table.get_routes(host) {
             for route in routes.iter() {
                 let matcher = if route.glob.is_some() {
@@ -320,22 +327,31 @@ pub(super) async fn topology_handler(
                     "prefix"
                 };
                 let mut target_entries = Vec::new();
+                let mut route_flows = Vec::new();
                 for target in route.targets.iter() {
                     let cb_state = target.health_tracker.circuit_breaker().current_state();
                     let active_conns = target.active_connections.load(ordering);
-                    let reqs = target.stats.requests_total.load(ordering);
-                    let errs = target.stats.errors_total.load(ordering);
+                    let edge_stats = target.edge_stats.as_ref();
+                    let reqs = edge_stats.requests_total.load(ordering);
+                    let errs = edge_stats.errors_total.load(ordering);
                     let err_pct = if reqs > 0 {
                         (errs as f64 / reqs as f64 * 100.0).round() as u64
                     } else {
                         0
                     };
-                    let avg_lat = target
-                        .stats
+                    let avg_lat = edge_stats
                         .latency_sum_us
                         .load(ordering)
                         .checked_div(reqs.max(1))
                         .unwrap_or(0);
+                    let flow_key =
+                        topology_target_key(host, &route.path, &target.service, &target.url);
+                    let flow = flow_snapshot
+                        .edges
+                        .get(&flow_key)
+                        .cloned()
+                        .unwrap_or_default();
+                    route_flows.push(flow.clone());
 
                     target_entries.push(serde_json::json!({
                         "service": target.service,
@@ -346,24 +362,29 @@ pub(super) async fn topology_handler(
                         "active_connections": active_conns,
                         "circuit_breaker": format!("{:?}", cb_state).to_lowercase(),
                         "probe_healthy": target.health_tracker.is_probe_healthy(),
+                        "flow": flow,
                         "stats": {
                             "requests": reqs,
                             "errors": errs,
                             "error_rate_pct": err_pct,
                             "avg_latency_us": avg_lat,
-                            "bytes_total": target.stats.bytes_total.load(ordering),
+                            "bytes_total": edge_stats.bytes_total.load(ordering),
                         }
                     }));
                 }
+                let route_flow = TopologyFlowMetrics::combine(route_flows.iter());
+                host_flows.push(route_flow.clone());
                 route_entries.push(serde_json::json!({
                     "path": route.path,
                     "matcher": matcher,
+                    "flow": route_flow,
                     "targets": target_entries,
                 }));
             }
         }
         host_entries.push(serde_json::json!({
             "host": host,
+            "flow": TopologyFlowMetrics::combine(host_flows.iter()),
             "routes": route_entries,
         }));
     }
@@ -403,4 +424,90 @@ pub(super) async fn consul_status_handler() -> axum::Json<serde_json::Value> {
             "errors": m.consul_watcher_errors_total_client_ca.load(Ordering::Relaxed),
         },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::route::definition::{RouteCmd, RouteDef, RouteSource};
+    use crate::route::registry::ManagedRouteTable;
+    use crate::test_support::admin_test_state;
+    use std::collections::HashMap;
+
+    fn test_state(route_table: Arc<ManagedRouteTable>) -> AdminState {
+        admin_test_state(route_table)
+    }
+
+    #[tokio::test]
+    async fn targets_handler_exposes_flow_payload() {
+        let route_table = Arc::new(ManagedRouteTable::new());
+        route_table.apply_and_swap(&[RouteDef {
+            cmd: RouteCmd::Add,
+            service: "svc-a".to_string(),
+            src: "example.com/api".to_string(),
+            dst: "http://127.0.0.1:8080".to_string(),
+            weight: 1.0,
+            tags: vec![],
+            opts: HashMap::new(),
+            source: RouteSource::Static,
+        }]);
+
+        let table = route_table.get();
+        let target = table
+            .lookup_route(
+                "example.com",
+                "/api",
+                crate::route::table::MatcherKind::Prefix,
+            )
+            .unwrap()
+            .targets[0]
+            .clone();
+        target.edge_stats.record_request(123, 456, false);
+        target.stats.record_request(123, 456, false);
+
+        let response = targets_handler(State(test_state(route_table))).await.0;
+        let target_json = &response["targets"][0];
+        assert_eq!(target_json["stats"]["requests"], 1);
+        assert_eq!(target_json["stats"]["bytes_total"], 456);
+        assert!(target_json["flow"].get("rps_1s").is_some());
+        assert!(target_json["flow"].get("activity_level").is_some());
+    }
+
+    #[tokio::test]
+    async fn topology_uses_edge_stats_and_exposes_flow_payload() {
+        let route_table = Arc::new(ManagedRouteTable::new());
+        route_table.apply_and_swap(&[RouteDef {
+            cmd: RouteCmd::Add,
+            service: "svc-a".to_string(),
+            src: "example.com/api".to_string(),
+            dst: "http://127.0.0.1:8080".to_string(),
+            weight: 1.0,
+            tags: vec![],
+            opts: HashMap::new(),
+            source: RouteSource::Static,
+        }]);
+
+        let table = route_table.get();
+        let target = table
+            .lookup_route(
+                "example.com",
+                "/api",
+                crate::route::table::MatcherKind::Prefix,
+            )
+            .unwrap()
+            .targets[0]
+            .clone();
+        target.edge_stats.record_request(123, 456, true);
+
+        let response = topology_handler(State(test_state(route_table))).await.0;
+        let target_json = &response["hosts"][0]["routes"][0]["targets"][0];
+
+        assert_eq!(target_json["stats"]["requests"], 1);
+        assert_eq!(target_json["stats"]["errors"], 1);
+        assert_eq!(target_json["stats"]["bytes_total"], 456);
+        assert_eq!(target_json["stats"]["avg_latency_us"], 123);
+        assert!(target_json.get("flow").is_some());
+        assert!(response["hosts"][0]["flow"].get("activity_level").is_some());
+        assert!(response["lb"]["flow"].get("rps_1s").is_some());
+    }
 }
