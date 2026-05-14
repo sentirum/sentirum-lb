@@ -19,8 +19,8 @@ use futures::{SinkExt, StreamExt};
 use http::StatusCode;
 use prost::Message;
 use rcgen::generate_simple_self_signed;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::ServerConfig as RustlsServerConfig;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::time::{sleep, timeout};
@@ -67,9 +67,15 @@ impl EchoService for EchoSvc {
     ) -> Result<Response<Self::ServerStreamStream>, Status> {
         let base = request.into_inner().message;
         let items = vec![
-            Ok(EchoReply { message: format!("{base}-1") }),
-            Ok(EchoReply { message: format!("{base}-2") }),
-            Ok(EchoReply { message: format!("{base}-3") }),
+            Ok(EchoReply {
+                message: format!("{base}-1"),
+            }),
+            Ok(EchoReply {
+                message: format!("{base}-2"),
+            }),
+            Ok(EchoReply {
+                message: format!("{base}-3"),
+            }),
         ];
         Ok(Response::new(Box::pin(tokio_stream::iter(items))))
     }
@@ -83,7 +89,9 @@ impl EchoService for EchoSvc {
         while let Some(item) = stream.next().await {
             parts.push(item?.message);
         }
-        Ok(Response::new(EchoReply { message: parts.join(",") }))
+        Ok(Response::new(EchoReply {
+            message: parts.join(","),
+        }))
     }
 
     type BidiStreamStream = BoxStream<EchoReply>;
@@ -98,7 +106,13 @@ impl EchoService for EchoSvc {
             while let Some(item) = inbound.next().await {
                 match item {
                     Ok(msg) => {
-                        if tx.send(Ok(EchoReply { message: msg.message })).await.is_err() {
+                        if tx
+                            .send(Ok(EchoReply {
+                                message: msg.message,
+                            }))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -151,7 +165,9 @@ async fn spawn_grpc_server(tls: bool) -> (SocketAddr, tokio::sync::oneshot::Send
                 .tls_config(ServerTlsConfig::new().identity(identity))
                 .unwrap()
                 .add_service(svc)
-                .serve_with_incoming_shutdown(incoming, async { let _ = rx.await; })
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = rx.await;
+                })
                 .await
                 .unwrap();
         });
@@ -159,7 +175,9 @@ async fn spawn_grpc_server(tls: bool) -> (SocketAddr, tokio::sync::oneshot::Send
         tokio::spawn(async move {
             Server::builder()
                 .add_service(svc)
-                .serve_with_incoming_shutdown(incoming, async { let _ = rx.await; })
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = rx.await;
+                })
                 .await
                 .unwrap();
         });
@@ -168,7 +186,11 @@ async fn spawn_grpc_server(tls: bool) -> (SocketAddr, tokio::sync::oneshot::Send
     (addr, tx)
 }
 
-async fn spawn_websocket_server(tls: bool, cert_pem: Option<String>, key_pem: Option<String>) -> SocketAddr {
+async fn spawn_websocket_server(
+    tls: bool,
+    cert_pem: Option<String>,
+    key_pem: Option<String>,
+) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -185,8 +207,12 @@ async fn spawn_websocket_server(tls: bool, cert_pem: Option<String>, key_pem: Op
                     let mut ws = accept_async(tls_stream).await.unwrap();
                     while let Some(msg) = ws.next().await {
                         let Ok(msg) = msg else { break };
-                        if msg.is_close() { break }
-                        if ws.send(msg).await.is_err() { break }
+                        if msg.is_close() {
+                            break;
+                        }
+                        if ws.send(msg).await.is_err() {
+                            break;
+                        }
                     }
                 });
             }
@@ -199,8 +225,12 @@ async fn spawn_websocket_server(tls: bool, cert_pem: Option<String>, key_pem: Op
                     let mut ws = accept_async_with_config(stream, None).await.unwrap();
                     while let Some(msg) = ws.next().await {
                         let Ok(msg) = msg else { break };
-                        if msg.is_close() { break }
-                        if ws.send(msg).await.is_err() { break }
+                        if msg.is_close() {
+                            break;
+                        }
+                        if ws.send(msg).await.is_err() {
+                            break;
+                        }
                     }
                 });
             }
@@ -255,7 +285,11 @@ async fn spawn_proxy_with_routes(routes: String, extra_proxy_config: &str) -> Te
     spawn_proxy_with_options(routes, extra_proxy_config, true).await
 }
 
-async fn spawn_proxy_with_options(routes: String, extra_proxy_config: &str, enable_h2c: bool) -> TestRuntime {
+async fn spawn_proxy_with_options(
+    routes: String,
+    extra_proxy_config: &str,
+    enable_h2c: bool,
+) -> TestRuntime {
     let tempdir = TempDir::new().unwrap();
     let http_port = free_port().await;
     let tls_port = free_port().await;
@@ -347,9 +381,10 @@ async fn wait_for_ready(http_port: u16) {
             .get(format!("http://127.0.0.1:{http_port}/health"))
             .send()
             .await
-            && resp.status().is_success() {
-                return;
-            }
+            && resp.status().is_success()
+        {
+            return;
+        }
         sleep(Duration::from_millis(250)).await;
     }
     panic!("proxy did not become ready on port {http_port} in time");
@@ -357,7 +392,10 @@ async fn wait_for_ready(http_port: u16) {
 
 async fn wait_for_tls_port(tls_port: u16) {
     for _ in 0..40 {
-        if tokio::net::TcpStream::connect(format!("127.0.0.1:{tls_port}")).await.is_ok() {
+        if tokio::net::TcpStream::connect(format!("127.0.0.1:{tls_port}"))
+            .await
+            .is_ok()
+        {
             // Port is open, give a small extra delay for TLS handshake readiness
             sleep(Duration::from_millis(100)).await;
             return;
@@ -433,8 +471,7 @@ async fn wss_tls_listener_accepts_connection() {
     wait_for_tls_port(rt.tls_port).await;
 
     // Verify the TLS listener is up and responds to h2 requests
-    let root_cert =
-        reqwest::Certificate::from_pem(rt.proxy_cert_pem.as_bytes()).unwrap();
+    let root_cert = reqwest::Certificate::from_pem(rt.proxy_cert_pem.as_bytes()).unwrap();
     let client = reqwest::Client::builder()
         .add_root_certificate(root_cert)
         .danger_accept_invalid_certs(true)
@@ -548,8 +585,7 @@ async fn https_downstream_http1_and_http2() {
 
     wait_for_tls_port(rt.tls_port).await;
 
-    let root_cert =
-        reqwest::Certificate::from_pem(rt.proxy_cert_pem.as_bytes()).unwrap();
+    let root_cert = reqwest::Certificate::from_pem(rt.proxy_cert_pem.as_bytes()).unwrap();
 
     // Pingora's TLS listener with enable_h2() negotiates h2 via ALPN.
     // HTTP/1.1 clients may still connect but the protocol on the wire is h2.
@@ -608,7 +644,10 @@ async fn https_downstream_http1_and_http2() {
     let h2_resp = h2_resp.expect("h2 TLS request should succeed after retries");
     assert_eq!(h2_resp.status(), StatusCode::OK);
     // Pingora may negotiate h1 or h2 depending on configuration
-    assert!(matches!(h2_resp.version(), http::Version::HTTP_2 | http::Version::HTTP_11));
+    assert!(matches!(
+        h2_resp.version(),
+        http::Version::HTTP_2 | http::Version::HTTP_11
+    ));
     let body = h2_resp.text().await.unwrap();
     assert_eq!(body, "echo:/tls-h2-test");
 }
@@ -637,7 +676,9 @@ async fn grpc_h2c_all_streaming_modes() {
 
     // Unary
     let unary = client
-        .unary_echo(Request::new(EchoRequest { message: "unary".into() }))
+        .unary_echo(Request::new(EchoRequest {
+            message: "unary".into(),
+        }))
         .await
         .unwrap()
         .into_inner();
@@ -645,7 +686,9 @@ async fn grpc_h2c_all_streaming_modes() {
 
     // Server streaming
     let items: Vec<String> = client
-        .server_stream(Request::new(EchoRequest { message: "ss".into() }))
+        .server_stream(Request::new(EchoRequest {
+            message: "ss".into(),
+        }))
         .await
         .unwrap()
         .into_inner()
@@ -656,8 +699,12 @@ async fn grpc_h2c_all_streaming_modes() {
 
     // Client streaming
     let input = tokio_stream::iter(vec![
-        EchoRequest { message: "a".into() },
-        EchoRequest { message: "b".into() },
+        EchoRequest {
+            message: "a".into(),
+        },
+        EchoRequest {
+            message: "b".into(),
+        },
     ]);
     let cs = client
         .client_stream(Request::new(input))
@@ -668,8 +715,12 @@ async fn grpc_h2c_all_streaming_modes() {
 
     // Bidi streaming
     let bidi_input = tokio_stream::iter(vec![
-        EchoRequest { message: "x".into() },
-        EchoRequest { message: "y".into() },
+        EchoRequest {
+            message: "x".into(),
+        },
+        EchoRequest {
+            message: "y".into(),
+        },
     ]);
     let bidi_msgs: Vec<String> = client
         .bidi_stream(Request::new(bidi_input))
@@ -700,7 +751,9 @@ async fn grpc_web_unary_and_trailers() {
     )
     .await;
 
-    let msg = EchoRequest { message: "grpc-web-e2e".into() };
+    let msg = EchoRequest {
+        message: "grpc-web-e2e".into(),
+    };
     let payload = msg.encode_to_vec();
     let mut body = Vec::with_capacity(5 + payload.len());
     body.push(0); // uncompressed flag
@@ -721,7 +774,12 @@ async fn grpc_web_unary_and_trailers() {
         .unwrap();
 
     assert!(resp.status().is_success());
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.starts_with("application/grpc-web"));
 
     let bytes = resp.bytes().await.unwrap();
@@ -1011,7 +1069,10 @@ circuit_breaker_half_open_max = 1"#,
             "expected 500 or 503, got {status}"
         );
     }
-    assert!(got_503, "circuit breaker should open after consecutive failures");
+    assert!(
+        got_503,
+        "circuit breaker should open after consecutive failures"
+    );
 }
 
 // ===========================================================================
@@ -1091,7 +1152,9 @@ async fn grpcs_tls_downstream_to_grpc_plain_upstream() {
             Ok(channel) => {
                 let mut client = EchoServiceClient::new(channel);
                 let resp = client
-                    .unary_echo(Request::new(EchoRequest { message: "grpcs-e2e".into() }))
+                    .unary_echo(Request::new(EchoRequest {
+                        message: "grpcs-e2e".into(),
+                    }))
                     .await
                     .unwrap()
                     .into_inner();

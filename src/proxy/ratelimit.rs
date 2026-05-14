@@ -126,7 +126,9 @@ impl TokenBucket {
     /// Get current nanosecond timestamp from a monotonic clock.
     /// Shares the same epoch as `target::monotonic_elapsed_ms()` for consistency.
     fn now_ns() -> u64 {
-        crate::route::circuit_breaker::mono_start().elapsed().as_nanos() as u64
+        crate::route::circuit_breaker::mono_start()
+            .elapsed()
+            .as_nanos() as u64
     }
 
     /// Returns `true` if this bucket is configured with a non-zero rate.

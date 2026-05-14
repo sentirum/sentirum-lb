@@ -4,8 +4,8 @@ use pingora::protocols::tls::ALPN;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::route::definition::RouteSource;
 
@@ -216,14 +216,15 @@ impl Target {
 
         // Configure per-target rate limiter from route opts
         if let Some(rate_str) = self.opts.get("ratelimit")
-            && let Ok(rate) = rate_str.parse::<u64>() {
-                let burst = self
-                    .opts
-                    .get("burst")
-                    .and_then(|b| b.parse::<u64>().ok())
-                    .unwrap_or(rate);
-                self.rate_limiter.configure(rate, burst);
-            }
+            && let Ok(rate) = rate_str.parse::<u64>()
+        {
+            let burst = self
+                .opts
+                .get("burst")
+                .and_then(|b| b.parse::<u64>().ok())
+                .unwrap_or(rate);
+            self.rate_limiter.configure(rate, burst);
+        }
     }
 
     /// Check if the upstream host is safe for proxying.
@@ -303,7 +304,8 @@ impl Target {
             return true;
         }
 
-        self.rate_limiter.configure(global_rate as u64, global_burst as u64);
+        self.rate_limiter
+            .configure(global_rate as u64, global_burst as u64);
         self.rate_limiter.try_acquire()
     }
 
@@ -456,11 +458,10 @@ impl Target {
             .iter()
             .filter(|(k, _)| *k == "header")
             .flat_map(|(_, v)| {
-                v.split(',')
-                    .filter_map(|pair| {
-                        let trimmed = pair.trim();
-                        trimmed.split_once(':').map(|(k, v)| (k, v))
-                    })
+                v.split(',').filter_map(|pair| {
+                    let trimmed = pair.trim();
+                    trimmed.split_once(':')
+                })
             })
             .collect()
     }
@@ -641,7 +642,8 @@ mod tests {
     #[test]
     fn test_ssrf_skip_verify_opt() {
         let mut t = Target::new("svc".into(), "http://10.0.0.1:8080/".into());
-        t.opts.insert("ssrfskipverify".to_string(), "true".to_string());
+        t.opts
+            .insert("ssrfskipverify".to_string(), "true".to_string());
         assert!(t.ssrf_skip_verify());
     }
 
@@ -791,7 +793,8 @@ mod tests {
     fn test_header_matches_separate_opts() {
         let mut t = Target::default();
         t.opts = HashMap::new();
-        t.opts.insert("header".to_string(), "x-version:v2,x-env:prod".to_string());
+        t.opts
+            .insert("header".to_string(), "x-version:v2,x-env:prod".to_string());
 
         let mut headers = http::HeaderMap::new();
         headers.insert("x-version", http::HeaderValue::from_static("v2"));

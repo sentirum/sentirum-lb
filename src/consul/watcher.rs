@@ -144,9 +144,12 @@ impl ServiceMonitor {
         let mut config = Vec::new();
         let mut failures = Vec::new();
         for (service_name, result) in catalog_results {
-            let service_ids_set: std::collections::HashSet<&str> =
-                passing_services.get(&service_name).unwrap()
-                    .iter().map(String::as_str).collect();
+            let service_ids_set: std::collections::HashSet<&str> = passing_services
+                .get(&service_name)
+                .unwrap()
+                .iter()
+                .map(String::as_str)
+                .collect();
 
             match result {
                 Ok(instances) => {

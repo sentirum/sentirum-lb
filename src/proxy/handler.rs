@@ -2,8 +2,8 @@
 use crate::config::Config;
 use crate::config::SharedConfig;
 use crate::route::picker::pick_target_by_strategy;
-use crate::route::table::MatcherKind;
 use crate::route::registry::ManagedRouteTable;
+use crate::route::table::MatcherKind;
 use crate::route::table::Table;
 use async_trait::async_trait;
 use pingora::http::ResponseHeader;
@@ -168,9 +168,7 @@ impl SentirumProxy {
         {
             // Header-based target filtering:
             // Fast path: if no target has header constraints, skip filtering entirely.
-            let any_header_constraint = route.targets.iter().any(|t| {
-                t.opts.contains_key("header")
-            });
+            let any_header_constraint = route.targets.iter().any(|t| t.opts.contains_key("header"));
 
             let (header_matching_targets, header_matching_w) = if any_header_constraint {
                 let matching: Vec<Arc<crate::route::target::Target>> = route
@@ -218,22 +216,30 @@ impl SentirumProxy {
                         "Skipping unhealthy target (active health check)"
                     );
                     // Fall through to try fallback targets below
-                } else if !cb_enabled || target.health_tracker.circuit_breaker().can_accept_request() {
+                } else if !cb_enabled
+                    || target.health_tracker.circuit_breaker().can_accept_request()
+                {
                     return Some(target);
                 }
 
                 let best_fallback = {
-                    let healthy_fallbacks: Vec<Arc<crate::route::target::Target>> = header_matching_targets
-                        .iter()
-                        .filter(|t| {
-                            t.url != target.url
-                                && t.health_tracker.is_probe_healthy()
-                                && t.health_tracker.circuit_breaker().can_accept_request()
-                        })
-                        .cloned()
-                        .collect();
+                    let healthy_fallbacks: Vec<Arc<crate::route::target::Target>> =
+                        header_matching_targets
+                            .iter()
+                            .filter(|t| {
+                                t.url != target.url
+                                    && t.health_tracker.is_probe_healthy()
+                                    && t.health_tracker.circuit_breaker().can_accept_request()
+                            })
+                            .cloned()
+                            .collect();
                     if !healthy_fallbacks.is_empty() {
-                        pick_target_by_strategy(strategy, &healthy_fallbacks, &healthy_fallbacks, &route.rr_counter)
+                        pick_target_by_strategy(
+                            strategy,
+                            &healthy_fallbacks,
+                            &healthy_fallbacks,
+                            &route.rr_counter,
+                        )
                     } else {
                         None
                     }
@@ -1109,7 +1115,7 @@ mod tests {
             tls: crate::config::TlsConfig::default(),
             tls_listeners: Vec::new(),
             tcp: crate::config::TcpConfig::default(),
-                parsed_timeouts: Default::default(),
+            parsed_timeouts: Default::default(),
         });
         let target =
             crate::route::target::Target::new("svc".into(), "grpcs://example.com/service".into());
@@ -1155,7 +1161,7 @@ mod tests {
             logging: crate::config::LoggingConfig::default(),
             tls: crate::config::TlsConfig::default(),
             tls_listeners: Vec::new(),
-                parsed_timeouts: Default::default(),
+            parsed_timeouts: Default::default(),
             tcp: crate::config::TcpConfig::default(),
         });
         let mut target =
@@ -1200,7 +1206,7 @@ mod tests {
             proxy: crate::config::ProxyConfig::default(),
             logging: crate::config::LoggingConfig::default(),
             tls: crate::config::TlsConfig::default(),
-                parsed_timeouts: Default::default(),
+            parsed_timeouts: Default::default(),
             tls_listeners: Vec::new(),
             tcp: crate::config::TcpConfig::default(),
         });

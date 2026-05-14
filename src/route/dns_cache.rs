@@ -1,8 +1,8 @@
 //! Thread-safe DNS cache with TTL-based expiration and global singleton.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::circuit_breaker::monotonic_elapsed_ms;
 
@@ -90,24 +90,32 @@ impl DnsCache {
             .is_some()
         {
             self.misses.fetch_add(1, Ordering::Relaxed);
-            self.prom.dns_cache_misses_total.fetch_add(1, Ordering::Relaxed);
+            self.prom
+                .dns_cache_misses_total
+                .fetch_add(1, Ordering::Relaxed);
             return None;
         }
 
         let Some(entry) = self.inner.get(host) else {
             self.misses.fetch_add(1, Ordering::Relaxed);
-            self.prom.dns_cache_misses_total.fetch_add(1, Ordering::Relaxed);
+            self.prom
+                .dns_cache_misses_total
+                .fetch_add(1, Ordering::Relaxed);
             return None;
         };
 
         if entry.negative {
             self.negatives.fetch_add(1, Ordering::Relaxed);
-            self.prom.dns_cache_negatives_total.fetch_add(1, Ordering::Relaxed);
+            self.prom
+                .dns_cache_negatives_total
+                .fetch_add(1, Ordering::Relaxed);
             return None;
         }
 
         self.hits.fetch_add(1, Ordering::Relaxed);
-        self.prom.dns_cache_hits_total.fetch_add(1, Ordering::Relaxed);
+        self.prom
+            .dns_cache_hits_total
+            .fetch_add(1, Ordering::Relaxed);
         Some(Arc::clone(&entry.addrs))
     }
 

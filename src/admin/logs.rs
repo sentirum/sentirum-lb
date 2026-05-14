@@ -121,9 +121,10 @@ impl LogBuffer {
             };
             let entry = &entries[idx];
             if let Some(min_ord) = min_level_order
-                && level_order(&entry.level).unwrap_or(0) > min_ord {
-                    continue;
-                }
+                && level_order(&entry.level).unwrap_or(0) > min_ord
+            {
+                continue;
+            }
             if let Some(query) = &search {
                 // Check each field individually to avoid format!() allocation per entry.
                 let level = entry.level.to_ascii_lowercase();

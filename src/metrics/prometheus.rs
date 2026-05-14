@@ -48,14 +48,14 @@ static PROCESS_METRICS_CACHE: std::sync::OnceLock<std::sync::RwLock<Option<Cache
     std::sync::OnceLock::new();
 
 fn collect_process_metrics_cached() -> ProcessMetricsSnapshot {
-    let cache = PROCESS_METRICS_CACHE
-        .get_or_init(|| std::sync::RwLock::new(None));
+    let cache = PROCESS_METRICS_CACHE.get_or_init(|| std::sync::RwLock::new(None));
     {
         let guard = cache.read().unwrap();
         if let Some(cached) = &*guard
-            && cached.at.elapsed() < std::time::Duration::from_secs(5) {
-                return cached.snapshot; // ProcessMetricsSnapshot is just plain data
-            }
+            && cached.at.elapsed() < std::time::Duration::from_secs(5)
+        {
+            return cached.snapshot; // ProcessMetricsSnapshot is just plain data
+        }
     }
     let snapshot = collect_process_metrics_uncached();
     *cache.write().unwrap() = Some(CachedProcessMetrics {
@@ -494,9 +494,10 @@ impl Metrics {
         {
             let guard = self.render_cache.read().unwrap();
             if let Some(cached) = &*guard
-                && cached.at.elapsed() < RENDER_CACHE_TTL {
-                    return cached.output.clone();
-                }
+                && cached.at.elapsed() < RENDER_CACHE_TTL
+            {
+                return cached.output.clone();
+            }
         }
         let output = self.render_uncached();
         *self.render_cache.write().unwrap() = Some(CachedRender {
@@ -586,7 +587,9 @@ impl Metrics {
         let status_5xx = self.status_5xx.load(Ordering::Relaxed);
         let rate_limit_rejected_total = self.rate_limit_rejected_total.load(Ordering::Relaxed);
         let health_check_probes_total = self.health_check_probes_total.load(Ordering::Relaxed);
-        let health_check_probe_failures_total = self.health_check_probe_failures_total.load(Ordering::Relaxed);
+        let health_check_probe_failures_total = self
+            .health_check_probe_failures_total
+            .load(Ordering::Relaxed);
         let process = collect_process_metrics_cached();
         let process_metrics_available = if process.available { 1 } else { 0 };
 

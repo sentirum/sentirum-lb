@@ -509,7 +509,8 @@ impl Config {
     /// OnceLock, so it re-computes automatically with the new values.
     #[inline]
     pub fn parsed_timeouts(&self) -> &ParsedProxyTimeouts {
-        self.parsed_timeouts.get_or_init(|| ParsedProxyTimeouts::from_proxy_config(&self.proxy))
+        self.parsed_timeouts
+            .get_or_init(|| ParsedProxyTimeouts::from_proxy_config(&self.proxy))
     }
 
     pub fn parse_optional_duration(s: &str) -> Option<Duration> {
@@ -724,7 +725,9 @@ impl Config {
 
             // Must have a listen address
             if listener.listen.trim().is_empty() {
-                errors.push(format!("{tag}.listen is required for additional TLS listeners"));
+                errors.push(format!(
+                    "{tag}.listen is required for additional TLS listeners"
+                ));
             }
 
             // Validate source
@@ -756,7 +759,10 @@ impl Config {
 
             // Check for duplicate listen addresses
             if listener.listen == self.tls.listen {
-                errors.push(format!("{tag}.listen '{}' conflicts with primary [tls].listen", listener.listen));
+                errors.push(format!(
+                    "{tag}.listen '{}' conflicts with primary [tls].listen",
+                    listener.listen
+                ));
             }
             for (j, prev) in self.tls_listeners[..i].iter().enumerate() {
                 if listener.listen == prev.listen {
@@ -902,7 +908,7 @@ mod tests {
             logging: LoggingConfig::default(),
             tls: TlsConfig::default(),
             tls_listeners: Vec::new(),
-                parsed_timeouts: Default::default(),
+            parsed_timeouts: Default::default(),
             tcp: TcpConfig::default(),
         };
         config.proxy.connect_timeout = "abc".to_string();
@@ -1081,7 +1087,7 @@ tags = []
             proxy: ProxyConfig::default(),
             logging: LoggingConfig::default(),
             tls: TlsConfig::default(),
-                parsed_timeouts: Default::default(),
+            parsed_timeouts: Default::default(),
             tls_listeners: Vec::new(),
             tcp: TcpConfig::default(),
         };

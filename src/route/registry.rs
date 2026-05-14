@@ -261,7 +261,11 @@ mod tests {
         );
         assert!(
             snapshot
-                .lookup_route("kv.example.com", "/", crate::route::table::MatcherKind::Prefix)
+                .lookup_route(
+                    "kv.example.com",
+                    "/",
+                    crate::route::table::MatcherKind::Prefix
+                )
                 .is_some()
         );
     }
@@ -275,10 +279,18 @@ mod tests {
         let snapshot = table.get();
         assert!(
             snapshot
-                .lookup_route("kv.example.com", "/", crate::route::table::MatcherKind::Prefix)
+                .lookup_route(
+                    "kv.example.com",
+                    "/",
+                    crate::route::table::MatcherKind::Prefix
+                )
                 .is_some()
         );
-        assert!(snapshot.lookup_route("", "/api/users", crate::route::table::MatcherKind::Prefix).is_some());
+        assert!(
+            snapshot
+                .lookup_route("", "/api/users", crate::route::table::MatcherKind::Prefix)
+                .is_some()
+        );
     }
 
     #[test]
@@ -287,7 +299,9 @@ mod tests {
         table.update_services(vec![def("svc-a", "/", "http://10.0.0.1:8080/")]);
 
         let first_snapshot = table.get();
-        let first_route = first_snapshot.lookup_route("", "/", crate::route::table::MatcherKind::Prefix).unwrap();
+        let first_route = first_snapshot
+            .lookup_route("", "/", crate::route::table::MatcherKind::Prefix)
+            .unwrap();
         let first_target = first_route.targets[0].clone();
         first_target
             .active_connections
@@ -296,7 +310,9 @@ mod tests {
         table.update_services(vec![def("svc-a", "/", "http://10.0.0.1:8080/")]);
 
         let second_snapshot = table.get();
-        let second_route = second_snapshot.lookup_route("", "/", crate::route::table::MatcherKind::Prefix).unwrap();
+        let second_route = second_snapshot
+            .lookup_route("", "/", crate::route::table::MatcherKind::Prefix)
+            .unwrap();
         let second_target = second_route.targets[0].clone();
 
         assert_eq!(
@@ -316,7 +332,9 @@ mod tests {
         ]);
 
         let first_snapshot = table.get();
-        let first_route = first_snapshot.lookup_route("", "/", crate::route::table::MatcherKind::Prefix).unwrap();
+        let first_route = first_snapshot
+            .lookup_route("", "/", crate::route::table::MatcherKind::Prefix)
+            .unwrap();
         first_route.targets[0]
             .active_connections
             .store(10, std::sync::atomic::Ordering::Relaxed);
@@ -330,7 +348,9 @@ mod tests {
         ]);
 
         let second_snapshot = table.get();
-        let second_route = second_snapshot.lookup_route("", "/", crate::route::table::MatcherKind::Prefix).unwrap();
+        let second_route = second_snapshot
+            .lookup_route("", "/", crate::route::table::MatcherKind::Prefix)
+            .unwrap();
         let picker = LeastConnectionsPicker;
         let picked = picker
             .pick(

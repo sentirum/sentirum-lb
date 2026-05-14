@@ -841,7 +841,7 @@ mod tests {
             tls: TlsConfig::default(),
             tls_listeners: Vec::new(),
             tcp: TcpConfig::default(),
-                parsed_timeouts: Default::default(),
+            parsed_timeouts: Default::default(),
         })
     }
 

@@ -16,8 +16,8 @@
 use parking_lot::Mutex as ParkingMutex;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Circuit breaker state machine
@@ -172,9 +172,12 @@ impl CircuitBreaker {
                     if self.half_open_in_flight.load(Ordering::Acquire) {
                         let probe_sent = self.half_open_probe_sent_at_ms.load(Ordering::Relaxed);
                         let recovery_ms = self.recovery_timeout_secs.load(Ordering::Relaxed) * 1000;
-                        if probe_sent > 0 && monotonic_elapsed_ms().saturating_sub(probe_sent) > recovery_ms {
+                        if probe_sent > 0
+                            && monotonic_elapsed_ms().saturating_sub(probe_sent) > recovery_ms
+                        {
                             tracing::warn!(
-                                probe_sent_ago_ms = monotonic_elapsed_ms().saturating_sub(probe_sent),
+                                probe_sent_ago_ms =
+                                    monotonic_elapsed_ms().saturating_sub(probe_sent),
                                 recovery_ms,
                                 "Half-open probe appears stuck; auto-resetting"
                             );
@@ -186,7 +189,8 @@ impl CircuitBreaker {
                         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                         .is_ok()
                     {
-                        self.half_open_probe_sent_at_ms.store(monotonic_elapsed_ms(), Ordering::Relaxed);
+                        self.half_open_probe_sent_at_ms
+                            .store(monotonic_elapsed_ms(), Ordering::Relaxed);
                         return true;
                     }
                     return false;
@@ -244,9 +248,10 @@ impl CircuitBreaker {
                 let mut window = self.window.lock();
                 if window.len() >= self.window_size
                     && let Some(was_error) = window.pop_front()
-                        && was_error {
-                            self.error_count.fetch_sub(1, Ordering::Relaxed);
-                        }
+                    && was_error
+                {
+                    self.error_count.fetch_sub(1, Ordering::Relaxed);
+                }
                 window.push_back(false);
             }
             STATE_HALF_OPEN => {
@@ -278,9 +283,10 @@ impl CircuitBreaker {
                     let mut window = self.window.lock();
                     if window.len() >= self.window_size
                         && let Some(was_error) = window.pop_front()
-                            && was_error {
-                                self.error_count.fetch_sub(1, Ordering::Relaxed);
-                            }
+                        && was_error
+                    {
+                        self.error_count.fetch_sub(1, Ordering::Relaxed);
+                    }
                     window.push_back(true);
                     window.len()
                 };
@@ -300,10 +306,8 @@ impl CircuitBreaker {
                 if errors >= threshold as u64 && window_len >= min_samples {
                     self.transition_to_open();
                     tracing::warn!(
-                        error_rate = format!(
-                            "{:.1}%",
-                            100.0 * errors as f64 / self.window_size as f64
-                        ),
+                        error_rate =
+                            format!("{:.1}%", 100.0 * errors as f64 / self.window_size as f64),
                         error_count = errors,
                         window_size = self.window_size,
                         threshold = threshold,
@@ -317,7 +321,8 @@ impl CircuitBreaker {
                 tracing::warn!("Circuit breaker REOPENED — probe failed");
             }
             STATE_OPEN => {
-                self.opened_at_ms.store(monotonic_elapsed_ms(), Ordering::Relaxed);
+                self.opened_at_ms
+                    .store(monotonic_elapsed_ms(), Ordering::Relaxed);
             }
             _ => {}
         }
@@ -325,7 +330,8 @@ impl CircuitBreaker {
 
     #[inline(always)]
     fn transition_to_open(&self) {
-        self.opened_at_ms.store(monotonic_elapsed_ms(), Ordering::Relaxed);
+        self.opened_at_ms
+            .store(monotonic_elapsed_ms(), Ordering::Relaxed);
         self.half_open_in_flight.store(false, Ordering::Release);
         let mut attempts = 0u32;
         loop {
@@ -475,7 +481,9 @@ impl Clone for CircuitBreaker {
             error_count: AtomicU64::new(self.error_count.load(Ordering::Relaxed)),
             opened_at_ms: AtomicU64::new(self.opened_at_ms.load(Ordering::Relaxed)),
             half_open_in_flight: AtomicBool::new(self.half_open_in_flight.load(Ordering::Relaxed)),
-            half_open_probe_sent_at_ms: AtomicU64::new(self.half_open_probe_sent_at_ms.load(Ordering::Relaxed)),
+            half_open_probe_sent_at_ms: AtomicU64::new(
+                self.half_open_probe_sent_at_ms.load(Ordering::Relaxed),
+            ),
             history: Arc::clone(&self.history),
         }
     }
@@ -553,8 +561,12 @@ mod tests {
         };
         let cb = CircuitBreaker::with_config(config);
 
-        for _ in 0..5 { cb.record_success(); }
-        for _ in 0..5 { cb.record_error(); }
+        for _ in 0..5 {
+            cb.record_success();
+        }
+        for _ in 0..5 {
+            cb.record_error();
+        }
         assert!(cb.allow_request());
 
         cb.record_success();
@@ -575,8 +587,12 @@ mod tests {
         };
         let cb = CircuitBreaker::with_config(config);
 
-        for _ in 0..5 { cb.record_success(); }
-        for _ in 0..5 { cb.record_error(); }
+        for _ in 0..5 {
+            cb.record_success();
+        }
+        for _ in 0..5 {
+            cb.record_error();
+        }
         assert!(cb.allow_request());
 
         cb.record_error();
@@ -593,8 +609,12 @@ mod tests {
         };
         let cb = CircuitBreaker::with_config(config);
 
-        for _ in 0..5 { cb.record_success(); }
-        for _ in 0..5 { cb.record_error(); }
+        for _ in 0..5 {
+            cb.record_success();
+        }
+        for _ in 0..5 {
+            cb.record_error();
+        }
         assert!(cb.allow_request());
 
         cb.record_success();
@@ -611,11 +631,21 @@ mod tests {
         };
         let cb = CircuitBreaker::with_config(config);
 
-        for _ in 0..5 { cb.record_success(); }
-        for _ in 0..5 { cb.record_error(); }
+        for _ in 0..5 {
+            cb.record_success();
+        }
+        for _ in 0..5 {
+            cb.record_error();
+        }
 
-        assert!(cb.allow_request(), "first half-open probe should be allowed");
-        assert!(!cb.allow_request(), "second half-open probe should be rejected until the first completes");
+        assert!(
+            cb.allow_request(),
+            "first half-open probe should be allowed"
+        );
+        assert!(
+            !cb.allow_request(),
+            "second half-open probe should be rejected until the first completes"
+        );
 
         cb.record_success();
         assert_eq!(cb.current_state(), CircuitState::Closed);
@@ -643,8 +673,12 @@ mod tests {
         };
         let cb = CircuitBreaker::with_config(config);
 
-        for _ in 0..5 { cb.record_success(); }
-        for _ in 0..5 { cb.record_error(); }
+        for _ in 0..5 {
+            cb.record_success();
+        }
+        for _ in 0..5 {
+            cb.record_error();
+        }
         assert!(cb.allow_request());
 
         cb.record_success();

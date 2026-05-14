@@ -10,8 +10,8 @@ use sentirum_lb::proxy::handler::SentirumProxy;
 use sentirum_lb::proxy::tcp::{TcpBackgroundService, TcpMode};
 use sentirum_lb::proxy::tls::{
     ClientAuthConfig, ClientAuthMode, ClientCaSource, DynamicCertStore, DynamicClientCaStore,
-    TlsMode, build_static_tls_settings, build_tls_settings, load_shareable_cert,
-    FileCertWatcherService, tls_listen_addr,
+    FileCertWatcherService, TlsMode, build_static_tls_settings, build_tls_settings,
+    load_shareable_cert, tls_listen_addr,
 };
 use sentirum_lb::route::parser::parse_route_commands;
 use sentirum_lb::route::registry::ManagedRouteTable;
@@ -296,7 +296,11 @@ struct AdminBackgroundService {
     tls_store: Option<Arc<DynamicCertStore>>,
     client_ca_store: Option<Arc<DynamicClientCaStore>>,
     log_buffer: Option<Arc<sentirum_lb::admin::logs::LogBuffer>>,
-    file_certs: Vec<(String, sentirum_lb::proxy::tls::SharedFileCert, sentirum_lb::proxy::tls::TlsCertConfig)>,
+    file_certs: Vec<(
+        String,
+        sentirum_lb::proxy::tls::SharedFileCert,
+        sentirum_lb::proxy::tls::TlsCertConfig,
+    )>,
 }
 
 struct HealthCheckBackgroundService {
@@ -494,8 +498,8 @@ fn main() {
         // to complete before the server exits. Pingora uses two phases:
         //   1. grace_period_seconds: stop accepting new connections, wait for active ones
         //   2. graceful_shutdown_timeout_seconds: hard deadline for tokio runtimes to exit
-        let drain_secs = sentirum_lb::config::Config::parse_duration(&config.server.drain_timeout)
-            .as_secs();
+        let drain_secs =
+            sentirum_lb::config::Config::parse_duration(&config.server.drain_timeout).as_secs();
         if config.consul.graceful_shutdown && drain_secs > 0 {
             server_conf.grace_period_seconds = Some(drain_secs);
             server_conf.graceful_shutdown_timeout_seconds = Some(5);
@@ -546,7 +550,11 @@ fn main() {
     let mut tls_background_services: Vec<ConsulTlsBackgroundService> = Vec::new();
     let mut client_ca_background_services: Vec<ConsulClientCaBackgroundService> = Vec::new();
     let mut file_cert_watchers: Vec<FileCertWatcherService> = Vec::new();
-    let mut file_cert_handles: Vec<(String, sentirum_lb::proxy::tls::SharedFileCert, sentirum_lb::proxy::tls::TlsCertConfig)> = Vec::new();
+    let mut file_cert_handles: Vec<(
+        String,
+        sentirum_lb::proxy::tls::SharedFileCert,
+        sentirum_lb::proxy::tls::TlsCertConfig,
+    )> = Vec::new();
     let mut tls_stores_for_admin: Vec<Arc<DynamicCertStore>> = Vec::new();
     let mut client_ca_stores_for_admin: Vec<Arc<DynamicClientCaStore>> = Vec::new();
     let mut https_fallback_ready = false;
@@ -554,18 +562,16 @@ fn main() {
     // Build the list of all TLS configs to process.
     // The legacy [tls] section is always the first (primary) listener.
     // [[tls_listeners]] entries are additional listeners.
-    let all_tls_configs: Vec<(String, &sentirum_lb::config::TlsConfig)> = std::iter::once((
-        "primary".to_string(),
-        &config.tls,
-    ))
-    .chain(
-        config
-            .tls_listeners
-            .iter()
-            .enumerate()
-            .map(|(i, tls_cfg)| (format!("tls_listeners[{i}]"), tls_cfg)),
-    )
-    .collect();
+    let all_tls_configs: Vec<(String, &sentirum_lb::config::TlsConfig)> =
+        std::iter::once(("primary".to_string(), &config.tls))
+            .chain(
+                config
+                    .tls_listeners
+                    .iter()
+                    .enumerate()
+                    .map(|(i, tls_cfg)| (format!("tls_listeners[{i}]"), tls_cfg)),
+            )
+            .collect();
 
     let primary_tls_listen = public_tls_listen.clone();
 
@@ -717,11 +723,7 @@ fn main() {
                                 std::time::Duration::from_secs(30),
                             ));
                             // Expose to admin API for manual reload
-                            file_cert_handles.push((
-                                label.clone(),
-                                cert,
-                                tls,
-                            ));
+                            file_cert_handles.push((label.clone(), cert, tls));
                         }
                         Err(e) => {
                             tracing::error!(listener = %label, error = %e, "Failed to configure file-based TLS listener");
@@ -853,7 +855,8 @@ fn main() {
 
     let service_config = Arc::new(config.clone());
     let shared_config = runtime_config.clone();
-    let consul_enabled = service_config.consul.service_discovery || service_config.consul.kv_watching;
+    let consul_enabled =
+        service_config.consul.service_discovery || service_config.consul.kv_watching;
 
     if consul_enabled {
         let mut consul_service = background_service(

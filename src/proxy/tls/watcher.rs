@@ -6,8 +6,8 @@
 //! New TLS handshakes immediately use the refreshed certificate.
 
 use crate::proxy::tls::{
-    TlsCertConfig, TlsError, LoadedCertificate, load_static_certificate,
-    certificate_subject_string_ref, first_subject_value, asn1_time_to_unix_seconds, now_unix,
+    LoadedCertificate, TlsCertConfig, TlsError, asn1_time_to_unix_seconds,
+    certificate_subject_string_ref, first_subject_value, load_static_certificate, now_unix,
 };
 use arc_swap::ArcSwap;
 use pingora::services::background::BackgroundService;
@@ -18,9 +18,7 @@ use std::time::{Duration, SystemTime};
 pub type SharedFileCert = Arc<ArcSwap<LoadedCertificate>>;
 
 /// Load a certificate from disk and wrap it in an atomically-swappable handle.
-pub fn load_shareable_cert(
-    config: &TlsCertConfig,
-) -> Result<SharedFileCert, TlsError> {
+pub fn load_shareable_cert(config: &TlsCertConfig) -> Result<SharedFileCert, TlsError> {
     let cert: Arc<LoadedCertificate> = load_static_certificate(config)?;
     // ArcSwap<LoadedCertificate> is actually ArcSwapAny<Arc<LoadedCertificate>>.
     // We give it the Arc directly.
@@ -37,9 +35,16 @@ struct FileMeta {
 
 impl FileMeta {
     fn read(cert_path: &str, key_path: &str) -> Self {
-        let cert_mtime = std::fs::metadata(cert_path).ok().and_then(|m| m.modified().ok());
-        let key_mtime = std::fs::metadata(key_path).ok().and_then(|m| m.modified().ok());
-        Self { cert_mtime, key_mtime }
+        let cert_mtime = std::fs::metadata(cert_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        let key_mtime = std::fs::metadata(key_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        Self {
+            cert_mtime,
+            key_mtime,
+        }
     }
 
     fn has_changed(&self, other: &Self) -> bool {
@@ -111,9 +116,11 @@ impl BackgroundService for FileCertWatcherService {
                 Ok(new_cert) => {
                     // Log certificate details
                     let subject = certificate_subject_string_ref(&new_cert.leaf);
-                    let cn = first_subject_value(&new_cert.leaf, pingora::tls::nid::Nid::COMMONNAME);
+                    let cn =
+                        first_subject_value(&new_cert.leaf, pingora::tls::nid::Nid::COMMONNAME);
                     let not_after_unix = asn1_time_to_unix_seconds(new_cert.leaf.not_after());
-                    let days = not_after_unix.map(|exp| ((exp as i64) - (now_unix() as i64)) / 86400);
+                    let days =
+                        not_after_unix.map(|exp| ((exp as i64) - (now_unix() as i64)) / 86400);
 
                     self.cert.store(new_cert);
                     last_meta = current_meta;

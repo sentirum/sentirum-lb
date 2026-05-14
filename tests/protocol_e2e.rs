@@ -374,9 +374,10 @@ async fn wait_for_ready(http_port: u16) {
             .get(format!("http://127.0.0.1:{http_port}/health"))
             .send()
             .await
-            && resp.status().is_success() {
-                return;
-            }
+            && resp.status().is_success()
+        {
+            return;
+        }
         sleep(Duration::from_millis(250)).await;
     }
     panic!("proxy did not become ready in time");

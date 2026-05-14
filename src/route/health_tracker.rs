@@ -1,7 +1,7 @@
 //! Per-target health tracker combining circuit breaker with active health check state.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 

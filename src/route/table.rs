@@ -258,7 +258,12 @@ impl Table {
     /// Lookup a route by host and path.
     /// Returns the matching route (with targets) for the given matcher strategy.
     /// Host is normalized to lowercase to match Fabio semantics (routes are stored lowercased).
-    pub fn lookup_route(&self, host: &str, path: &str, matcher: MatcherKind) -> Option<&Arc<Route>> {
+    pub fn lookup_route(
+        &self,
+        host: &str,
+        path: &str,
+        matcher: MatcherKind,
+    ) -> Option<&Arc<Route>> {
         // Normalize host to lowercase for case-insensitive matching.
         // Use Cow to avoid allocation when host is already lowercase.
         let host_key: Cow<'_, str> = if host.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -292,7 +297,9 @@ impl Table {
         for route in routes {
             let matches = match matcher {
                 MatcherKind::Prefix => path.starts_with(&route.path) || route.path == "/",
-                MatcherKind::CaseInsensitivePrefix => starts_with_ignore_ascii_case(path, &route.path) || route.path == "/",
+                MatcherKind::CaseInsensitivePrefix => {
+                    starts_with_ignore_ascii_case(path, &route.path) || route.path == "/"
+                }
                 MatcherKind::Glob => route
                     .glob
                     .as_ref()
@@ -647,10 +654,15 @@ impl Table {
 
     /// Iterate all (host, route, target) triples in the table.
     /// Used by admin API handlers to avoid duplicate iteration boilerplate.
-    pub fn iter_targets(&self) -> impl Iterator<Item = (&str, &Arc<Route>, &Arc<crate::route::target::Target>)> {
+    pub fn iter_targets(
+        &self,
+    ) -> impl Iterator<Item = (&str, &Arc<Route>, &Arc<crate::route::target::Target>)> {
         self.routes.iter().flat_map(|(host, routes)| {
             routes.iter().flat_map(move |route| {
-                route.targets.iter().map(move |target| (host.as_str(), route, target))
+                route
+                    .targets
+                    .iter()
+                    .map(move |target| (host.as_str(), route, target))
             })
         })
     }
@@ -821,12 +833,20 @@ mod tests {
         let table = Table::from_definitions(&defs);
         assert!(
             table
-                .lookup_route("example.com", "/api/users", MatcherKind::CaseInsensitivePrefix)
+                .lookup_route(
+                    "example.com",
+                    "/api/users",
+                    MatcherKind::CaseInsensitivePrefix
+                )
                 .is_some()
         );
         assert!(
             table
-                .lookup_route("example.com", "/API/users", MatcherKind::CaseInsensitivePrefix)
+                .lookup_route(
+                    "example.com",
+                    "/API/users",
+                    MatcherKind::CaseInsensitivePrefix
+                )
                 .is_some()
         );
     }
@@ -845,8 +865,16 @@ mod tests {
         }];
 
         let table = Table::from_definitions(&defs);
-        assert!(table.lookup_route("example.com", "/", MatcherKind::Prefix).is_some());
-        assert!(table.lookup_route("EXAMPLE.COM", "/", MatcherKind::Prefix).is_some());
+        assert!(
+            table
+                .lookup_route("example.com", "/", MatcherKind::Prefix)
+                .is_some()
+        );
+        assert!(
+            table
+                .lookup_route("EXAMPLE.COM", "/", MatcherKind::Prefix)
+                .is_some()
+        );
     }
 
     #[test]
@@ -945,7 +973,9 @@ mod tests {
         ];
 
         let table = Table::from_definitions(&defs);
-        let route = table.lookup_route("example.com", "/", MatcherKind::Prefix).unwrap();
+        let route = table
+            .lookup_route("example.com", "/", MatcherKind::Prefix)
+            .unwrap();
         assert_eq!(route.targets.len(), 1);
         assert_eq!(route.targets[0].service, "svc-b");
     }
@@ -1048,7 +1078,9 @@ mod tests {
         ];
 
         let table = Table::from_definitions(&defs);
-        let route = table.lookup_route("example.com", "/", MatcherKind::Prefix).unwrap();
+        let route = table
+            .lookup_route("example.com", "/", MatcherKind::Prefix)
+            .unwrap();
         assert_eq!(route.targets.len(), 2);
         assert!((route.targets[0].fixed_weight - 0.3).abs() < f64::EPSILON);
         assert!((route.targets[1].fixed_weight - 0.3).abs() < f64::EPSILON);
@@ -1113,7 +1145,9 @@ mod tests {
         );
 
         // `/z` must still match its own route
-        let route = table.lookup_route("example.com", "/z", MatcherKind::Prefix).unwrap();
+        let route = table
+            .lookup_route("example.com", "/z", MatcherKind::Prefix)
+            .unwrap();
         assert_eq!(route.targets[0].service, "svc-z", "/z should match svc-z");
     }
 }

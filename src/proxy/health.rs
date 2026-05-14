@@ -103,10 +103,7 @@ impl HealthChecker {
 
     /// Run a single health check probe against a target.
     /// Returns true if the probe succeeded.
-    pub async fn check_target(
-        &self,
-        target: &crate::route::target::Target,
-    ) -> bool {
+    pub async fn check_target(&self, target: &crate::route::target::Target) -> bool {
         let host = target.upstream_host();
         let port = target.upstream_port();
 
@@ -120,16 +117,16 @@ impl HealthChecker {
                     // HTTP failed — try TCP connect as fallback
                     match self.probe_tcp(host, port).await {
                         Ok(()) => Ok(()),
-                        Err(tcp_err) => {
-                            Err(format!("{http_err}; TCP fallback: {tcp_err}"))
-                        }
+                        Err(tcp_err) => Err(format!("{http_err}; TCP fallback: {tcp_err}")),
                     }
                 }
             }
         };
 
         let metrics = crate::metrics::prometheus::global();
-        metrics.health_check_probes_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        metrics
+            .health_check_probes_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         match result {
             Ok(()) => {
@@ -145,7 +142,9 @@ impl HealthChecker {
                 true
             }
             Err(err) => {
-                metrics.health_check_probe_failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                metrics
+                    .health_check_probe_failures_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::debug!(
                     host,
                     port,
@@ -170,10 +169,7 @@ impl HealthChecker {
 /// Run the background health check loop.
 /// Periodically probes all targets in the route table.
 /// Accepts an optional shutdown watcher for graceful termination.
-pub async fn run_health_checks(
-    route_table: Arc<ManagedRouteTable>,
-    config: SharedConfig,
-) {
+pub async fn run_health_checks(route_table: Arc<ManagedRouteTable>, config: SharedConfig) {
     run_health_checks_with_shutdown(route_table, config, None).await
 }
 
@@ -214,10 +210,11 @@ pub async fn run_health_checks_with_shutdown(
     loop {
         // Check shutdown signal before each round
         if let Some(rx) = &mut shutdown
-            && *rx.borrow() {
-                tracing::info!("Health checker shutting down");
-                return;
-            }
+            && *rx.borrow()
+        {
+            tracing::info!("Health checker shutting down");
+            return;
+        }
 
         // Wait for next tick, checking shutdown
         tokio::select! {

@@ -177,26 +177,26 @@ fn client_certificate_identity(session: &Session) -> Option<ClientCertIdentity> 
     // X.509 parsing + SHA-256 on the hot path.
     if !has_full_cache
         && let Some(stream) = session.stream()
-            && let Some(ssl) = stream.get_ssl()
-            && let Some(cert) = ssl.peer_certificate()
-        {
-            remember_verified_client_certificate(&cert);
-            identity.common_name = crate::proxy::tls::first_subject_value(&cert, Nid::COMMONNAME);
-            identity.organization =
-                crate::proxy::tls::first_subject_value(&cert, Nid::ORGANIZATIONNAME)
-                    .or(identity.organization);
-            identity.organizational_unit =
-                crate::proxy::tls::first_subject_value(&cert, Nid::ORGANIZATIONALUNITNAME);
-            identity.subject = Some(crate::proxy::tls::certificate_subject_string_ref(&cert));
-            identity.sha256 = cert
-                .digest(MessageDigest::sha256())
-                .ok()
-                .map(|bytes| hex_lower(bytes.as_ref()))
-                .or(identity.sha256);
-            // Authoritative: the OpenSSL verify result is the final word on
-            // whether the chain is valid, overriding heuristics from phases 1–2.
-            identity.verified = ssl.verify_result().as_raw() == pingora::tls::ssl_sys::X509_V_OK;
-        }
+        && let Some(ssl) = stream.get_ssl()
+        && let Some(cert) = ssl.peer_certificate()
+    {
+        remember_verified_client_certificate(&cert);
+        identity.common_name = crate::proxy::tls::first_subject_value(&cert, Nid::COMMONNAME);
+        identity.organization =
+            crate::proxy::tls::first_subject_value(&cert, Nid::ORGANIZATIONNAME)
+                .or(identity.organization);
+        identity.organizational_unit =
+            crate::proxy::tls::first_subject_value(&cert, Nid::ORGANIZATIONALUNITNAME);
+        identity.subject = Some(crate::proxy::tls::certificate_subject_string_ref(&cert));
+        identity.sha256 = cert
+            .digest(MessageDigest::sha256())
+            .ok()
+            .map(|bytes| hex_lower(bytes.as_ref()))
+            .or(identity.sha256);
+        // Authoritative: the OpenSSL verify result is the final word on
+        // whether the chain is valid, overriding heuristics from phases 1–2.
+        identity.verified = ssl.verify_result().as_raw() == pingora::tls::ssl_sys::X509_V_OK;
+    }
 
     Some(identity)
 }

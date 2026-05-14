@@ -124,10 +124,7 @@ impl OcspStapler {
 
     /// Refresh OCSP responses for all known certificates.
     /// This is intended to be called from a background task.
-    pub async fn refresh_all(
-        &self,
-        cert_entry_names: &[String],
-    ) {
+    pub async fn refresh_all(&self, cert_entry_names: &[String]) {
         if cert_entry_names.is_empty() {
             return;
         }

@@ -25,7 +25,10 @@ pub use config::{
     tls_listen_addr,
 };
 use helpers::*;
-pub(crate) use helpers::{asn1_time_to_unix_seconds, certificate_subject_string_ref, first_subject_value, now_unix, parse_certificate_chain};
+pub(crate) use helpers::{
+    asn1_time_to_unix_seconds, certificate_subject_string_ref, first_subject_value, now_unix,
+    parse_certificate_chain,
+};
 pub use selector::{build_static_tls_settings, build_tls_settings, load_static_certificate};
 pub use watcher::{FileCertWatcherService, SharedFileCert, load_shareable_cert};
 

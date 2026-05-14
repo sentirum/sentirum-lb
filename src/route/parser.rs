@@ -442,7 +442,8 @@ route add svc2 host2/ http://10.0.0.3:9090/
 
     #[test]
     fn test_parse_route_add_with_header_opts() {
-        let input = r#"route add canary api.example.com/ http://10.0.0.2:8080/ opts "header=x-version:v2""#;
+        let input =
+            r#"route add canary api.example.com/ http://10.0.0.2:8080/ opts "header=x-version:v2""#;
         let defs = parse_route_commands(input);
         assert_eq!(defs.len(), 1);
         let d = &defs[0];
@@ -456,7 +457,10 @@ route add svc2 host2/ http://10.0.0.3:9090/
         assert_eq!(defs.len(), 1);
         let d = &defs[0];
         assert_eq!(d.weight, 50.0);
-        assert_eq!(d.opts.get("header"), Some(&"x-version:v2,x-env:canary".to_string()));
+        assert_eq!(
+            d.opts.get("header"),
+            Some(&"x-version:v2,x-env:canary".to_string())
+        );
         assert_eq!(d.opts.get("strip"), Some(&"/api".to_string()));
     }
 }
