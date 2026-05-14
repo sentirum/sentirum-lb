@@ -135,6 +135,10 @@ tag_prefix = "urlprefix-"
 poll_interval = "3s"
 service_discovery = false
 kv_watching = false
+service_whitelist = []
+service_blacklist = []
+graceful_shutdown = true
+include_warning = false
 
 [proxy]
 strategy = "round-robin"
@@ -174,6 +178,10 @@ rate_limit_burst = 0
 dns_cache_ttl = 30
 dns_negative_cache_ttl = 10
 
+# Trusted proxy CIDRs for X-Forwarded-For / CF-Connecting-IP handling
+trusted_proxies = []
+# trusted_proxies = ["173.245.48.0/20", "103.21.244.0/22"]  # Cloudflare
+
 [logging]
 level = "info"
 format = "text"
@@ -191,6 +199,7 @@ client_ca_source = ""
 client_ca_path = ""
 client_ca_consul_prefix = ""
 client_ca_upgrade_cn = ""
+ocsp_stapling_enabled = false
 
 # Additional TLS listeners — each gets its own port, cert, and optional mTLS config
 # Useful for exposing mTLS endpoints alongside public HTTPS on the same LB instance
@@ -387,6 +396,7 @@ Runtime semantics:
 - `proxy.upstream_h2_ping_interval`: optional upstream H2 ping interval for long-lived gRPC streams.
 - `proxy.no_route_status`: status returned when no route matches.
 - `proxy.request_id_header`: header name for request ID generation (default: `X-Request-ID`).
+- `proxy.trusted_proxies`: list of CIDR ranges for trusted proxy IP handling (e.g., Cloudflare). Controls `X-Forwarded-For` and `CF-Connecting-IP` passthrough.
 
 #### Circuit breaker
 - `proxy.circuit_breaker_enabled`: enable circuit breaker for upstream failure protection (default: `true`).
@@ -416,6 +426,8 @@ Runtime semantics:
 - `consul.poll_interval`: blocking query wait duration for Consul watchers.
 - `consul.service_whitelist`: only discover routes for these service names (empty = all).
 - `consul.service_blacklist`: never discover routes for these service names.
+- `consul.graceful_shutdown`: enable graceful shutdown with Consul drain (default: `true`).
+- `consul.include_warning`: include services with "warning" health status in route discovery (default: `false`).
 
 #### TLS
 - `tls.source`: select `file` or `consul_kv` for downstream TLS.
@@ -427,6 +439,7 @@ Runtime semantics:
 - `tls.client_ca_path`: file or directory containing trusted client CA PEMs.
 - `tls.client_ca_consul_prefix`: Consul KV prefix containing trusted client CA PEM bundles.
 - `tls.client_ca_upgrade_cn`: Fabio-style CA upgrade compatibility knob.
+- `tls.ocsp_stapling_enabled`: enable OCSP stapling infrastructure (default: `false`).
 
 #### TCP
 - `tcp.mode`: choose `tcp`, `tcp+sni`, `https+tcp+sni`, or `tcp-dynamic`.
