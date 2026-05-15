@@ -224,6 +224,7 @@ impl ProxyHttp for SentirumProxy {
 
             let mut resp = ResponseHeader::build(200, None)?;
             resp.insert_header("Content-Type", "application/json")?;
+            resp.insert_header("Content-Length", body.len().to_string())?;
 
             session.write_response_header(Box::new(resp), false).await?;
             session
