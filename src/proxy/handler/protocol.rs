@@ -94,7 +94,6 @@ pub(super) async fn write_grpc_error_response(
     let mut resp =
         ResponseHeader::build(200, None).or_else(|_| ResponseHeader::build(500, None))?;
     resp.insert_header("Content-Type", "application/grpc")?;
-    resp.insert_header("X-Served-By", "sentirum-lb")?;
     resp.insert_header("grpc-status", grpc_status_for_http_status(http_status))?;
     resp.insert_header("grpc-message", sanitize_grpc_message(message))?;
     session.write_response_header(Box::new(resp), true).await?;

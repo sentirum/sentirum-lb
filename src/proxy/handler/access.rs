@@ -163,7 +163,6 @@ pub(super) async fn write_proxy_error(
                 }
             };
             resp.insert_header("Content-Type", content_type).ok();
-            resp.insert_header("X-Served-By", "sentirum-lb").ok();
 
             session
                 .write_response_header(Box::new(resp), false)
