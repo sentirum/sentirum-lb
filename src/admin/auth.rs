@@ -37,23 +37,39 @@ pub(super) async fn login_handler(
         });
     }
 
+    // Atomic rate-limit check & window management via DashMap entry API.
+    // This eliminates the TOCTOU gap between retain → get → entry that could
+    // allow 1–2 extra attempts under concurrent logins.
     let now = std::time::Instant::now();
+    let mut rate_limited = false;
+    state
+        .login_attempts
+        .entry(req.username.clone())
+        .and_modify(|(count, window_start)| {
+            if now.duration_since(*window_start).as_secs() >= LOGIN_WINDOW_SECS {
+                // Window expired — reset counter
+                *count = 0;
+                *window_start = now;
+            }
+            if *count >= LOGIN_MAX_ATTEMPTS {
+                rate_limited = true;
+            }
+        })
+        .or_insert((0, now));
+
+    if rate_limited {
+        return axum::Json(LoginResponse {
+            success: false,
+            message: "Too many login attempts".to_string(),
+            user: None,
+            token: None,
+        });
+    }
+
+    // Clean up expired entries for all users (best-effort, non-blocking)
     state.login_attempts.retain(|_, (_, window_start)| {
         now.duration_since(*window_start).as_secs() < LOGIN_WINDOW_SECS
     });
-    if let Some(pair) = state.login_attempts.get(&req.username) {
-        let (count, window_start) = pair.value();
-        if now.duration_since(*window_start).as_secs() < LOGIN_WINDOW_SECS
-            && *count >= LOGIN_MAX_ATTEMPTS
-        {
-            return axum::Json(LoginResponse {
-                success: false,
-                message: "Too many login attempts".to_string(),
-                user: None,
-                token: None,
-            });
-        }
-    }
 
     let config = state.config.load();
     let valid = config
@@ -88,6 +104,7 @@ pub(super) async fn login_handler(
             },
         );
         drop(sessions);
+        // Clear rate-limit counter on successful login
         state.login_attempts.remove(&req.username);
 
         axum::Json(LoginResponse {
@@ -260,18 +277,22 @@ pub(super) async fn admin_auth_middleware(
                         decoded
                     })
             })
-            .map(|token| {
-                let matches_admin = !expected.is_empty() && constant_time_eq(&token, &expected);
-                if matches_admin {
-                    return true;
-                }
-                if let Ok(sessions) = state.sessions.try_read() {
-                    sessions.get(&token).is_some()
-                } else {
-                    false
-                }
-            })
-            .unwrap_or(false)
+            .map(
+                |token| -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> {
+                    Box::pin(async move {
+                        let matches_admin =
+                            !expected.is_empty() && constant_time_eq(&token, &expected);
+                        if matches_admin {
+                            return true;
+                        }
+                        // Use read().await instead of try_read() to avoid false 401s
+                        // on SSE/dashboard streams during login/logout.
+                        state.sessions.read().await.get(&token).is_some()
+                    })
+                },
+            )
+            .unwrap_or(Box::pin(async { false }))
+            .await
     } else {
         false
     };

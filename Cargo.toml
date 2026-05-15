@@ -61,6 +61,9 @@ futures = "0.3"
 bytes = "1"
 base64 = "0.21"
 
+# Stack-allocated small vectors for hot-path route matching
+smallvec = "1"
+
 # Random number generation (for RandomPicker)
 rand = { version = "0.8", features = ["small_rng"] }
 

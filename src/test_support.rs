@@ -87,6 +87,7 @@ pub fn admin_test_state_with(
         login_attempts: Arc::new(dashmap::DashMap::new()),
         file_certs: Vec::new(),
         topology_flow_cache: Arc::new(TopologyFlowCache::new()),
+        metrics_stream_tx: Arc::new(RwLock::new(None)),
     }
 }
 

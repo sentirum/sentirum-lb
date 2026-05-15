@@ -376,8 +376,12 @@ pub(super) async fn config_update_handler(
     let new_cb_config = circuit_breaker_config_from_proxy(&temp_config.proxy);
     let dns_ttl = temp_config.proxy.dns_cache_ttl;
     let dns_negative_ttl = temp_config.proxy.dns_negative_cache_ttl;
-    state.config.store(Arc::new(temp_config));
+    // Apply DNS TTL *before* config store so that new requests immediately
+    // see consistent DNS+proxy settings. If config.store fails (Arc::new can't
+    // fail, but defensively), DNS TTL is still updated — this is acceptable
+    // because set_ttl only performs an atomic swap + cache clear.
     crate::route::target::global_dns_cache().set_ttl(dns_ttl, dns_negative_ttl);
+    state.config.store(Arc::new(temp_config));
 
     if old_cb_config != new_cb_config {
         state.route_table.reconfigure_circuit_breaker(new_cb_config);
@@ -418,8 +422,9 @@ pub(super) async fn config_reset_handler(
     let dns_ttl = new_config.proxy.dns_cache_ttl;
     let dns_negative_ttl = new_config.proxy.dns_negative_cache_ttl;
 
-    state.config.store(Arc::new(new_config));
+    // Apply DNS TTL *before* config store for consistency.
     crate::route::target::global_dns_cache().set_ttl(dns_ttl, dns_negative_ttl);
+    state.config.store(Arc::new(new_config));
 
     if old_cb_config != new_cb_config {
         state.route_table.reconfigure_circuit_breaker(new_cb_config);

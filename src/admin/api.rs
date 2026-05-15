@@ -56,6 +56,8 @@ pub struct AdminState {
     pub file_certs: Vec<(String, SharedFileCert, TlsCertConfig)>,
     /// Cached short-window flow metrics for topology rendering.
     pub topology_flow_cache: Arc<TopologyFlowCache>,
+    /// Metrics SSE stream sender — lazily initialized, stopped when no receivers.
+    pub metrics_stream_tx: Arc<RwLock<Option<tokio::sync::watch::Sender<Arc<String>>>>>,
 }
 
 /// Health check response
@@ -110,7 +112,15 @@ pub fn build_router(state: AdminState) -> Router {
             "/admin/assets/dashboard.js",
             get(super::dashboard_assets::dashboard_js),
         )
-        .route("/favicon.ico", get(|| async { axum::response::Response::builder().status(204).body(axum::body::Body::empty()).unwrap() }))
+        .route(
+            "/favicon.ico",
+            get(|| async {
+                axum::response::Response::builder()
+                    .status(204)
+                    .body(axum::body::Body::empty())
+                    .unwrap()
+            }),
+        )
         .route("/admin/login", post(super::auth::login_handler))
         .route("/admin/logout", post(super::auth::logout_handler))
         .route("/admin/me", get(super::auth::me_handler));
@@ -287,6 +297,7 @@ pub async fn run_admin_server(
         login_attempts: Arc::new(dashmap::DashMap::new()),
         file_certs,
         topology_flow_cache: Arc::new(TopologyFlowCache::new()),
+        metrics_stream_tx: Arc::new(RwLock::new(None)),
     };
 
     let cleanup_sessions = state.sessions.clone();

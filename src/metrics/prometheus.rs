@@ -76,7 +76,7 @@ const RENDER_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Escape a string for safe use as a Prometheus label value.
 /// Per the exposition format spec, backslashes, double quotes, and newlines must be escaped.
-fn escape_prometheus_label(s: &str) -> String {
+pub fn escape_prometheus_label(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

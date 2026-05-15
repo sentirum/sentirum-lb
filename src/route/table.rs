@@ -2,8 +2,9 @@ use crate::route::definition::{RouteCmd, RouteDef};
 use crate::route::target::{Target, TargetStatsRegistry};
 use arc_swap::ArcSwap;
 use glob::Pattern;
+use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 /// Compiled matcher strategy — avoids string comparisons on the hot path.
@@ -40,8 +41,8 @@ pub struct Route {
     pub targets: Vec<Arc<Target>>,
     /// Weighted targets (pre-distributed for fast selection, Arc refs for zero-copy pick)
     pub w_targets: Vec<Arc<Target>>,
-    /// Counter for round-robin selection
-    pub rr_counter: std::sync::atomic::AtomicU64,
+    /// Counter for round-robin selection (Arc-shared so clones preserve state across route table rebuilds)
+    pub rr_counter: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Clone for Route {
@@ -52,9 +53,7 @@ impl Clone for Route {
             glob: self.glob.clone(),
             targets: self.targets.clone(), // Vec<Arc<Target>> clones cheaply
             w_targets: self.w_targets.clone(),
-            rr_counter: std::sync::atomic::AtomicU64::new(
-                self.rr_counter.load(std::sync::atomic::Ordering::Relaxed),
-            ),
+            rr_counter: Arc::clone(&self.rr_counter),
         }
     }
 }
@@ -73,7 +72,7 @@ impl Route {
             glob,
             targets: Vec::new(),
             w_targets: Vec::new(),
-            rr_counter: std::sync::atomic::AtomicU64::new(0),
+            rr_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -295,6 +294,8 @@ pub struct Table {
     stats_registry: Option<Arc<TargetStatsRegistry>>,
     /// Circuit breaker config for new targets
     cb_config: Option<crate::route::target::CircuitBreakerConfig>,
+    /// Pre-computed unique targets for health checking (populated in finalize)
+    all_targets_cache: Vec<Arc<Target>>,
 }
 
 impl Default for Table {
@@ -309,6 +310,7 @@ impl Table {
             routes: HashMap::new(),
             stats_registry: None,
             cb_config: None,
+            all_targets_cache: Vec::new(),
         }
     }
 
@@ -317,6 +319,7 @@ impl Table {
             routes: HashMap::new(),
             stats_registry: Some(stats_registry),
             cb_config: None,
+            all_targets_cache: Vec::new(),
         }
     }
 
@@ -357,6 +360,61 @@ impl Table {
         }
 
         None
+    }
+
+    /// Returns all routes matching host+path in specificity order.
+    /// Used when the first match might fail (e.g., header constraints)
+    /// and fallback to less-specific routes is needed.
+    pub fn matching_routes(
+        &self,
+        host: &str,
+        path: &str,
+        matcher: MatcherKind,
+    ) -> SmallVec<[&Arc<Route>; 4]> {
+        let host_key: Cow<'_, str> = if host.bytes().any(|b| b.is_ascii_uppercase()) {
+            Cow::Owned(host.to_ascii_lowercase())
+        } else {
+            Cow::Borrowed(host)
+        };
+
+        let mut results = SmallVec::new();
+
+        if let Some(routes) = self.routes.get(host_key.as_ref()) {
+            Self::collect_matching_routes(routes, path, matcher, &mut results);
+        }
+
+        if !host_key.is_empty()
+            && let Some(routes) = self.routes.get("")
+        {
+            Self::collect_matching_routes(routes, path, matcher, &mut results);
+        }
+
+        results
+    }
+
+    #[inline]
+    fn collect_matching_routes<'a>(
+        routes: &'a [Arc<Route>],
+        path: &str,
+        matcher: MatcherKind,
+        results: &mut SmallVec<[&'a Arc<Route>; 4]>,
+    ) {
+        for route in routes {
+            let matches = match matcher {
+                MatcherKind::Prefix => path.starts_with(&route.path) || route.path == "/",
+                MatcherKind::CaseInsensitivePrefix => {
+                    starts_with_ignore_ascii_case(path, &route.path) || route.path == "/"
+                }
+                MatcherKind::Glob => route
+                    .glob
+                    .as_ref()
+                    .map(|g| g.matches(path))
+                    .unwrap_or(false),
+            };
+            if matches && !route.targets.is_empty() {
+                results.push(route);
+            }
+        }
     }
 
     fn find_matching_route<'a>(
@@ -401,7 +459,10 @@ impl Table {
             format!("/{}", def.src_path())
         };
 
-        let edge_stats_key = format!("{host}\u{001f}{path}\u{001f}{}\u{001f}{}", def.service, def.dst);
+        let edge_stats_key = format!(
+            "{host}\u{001f}{path}\u{001f}{}\u{001f}{}",
+            def.service, def.dst
+        );
         let mut target = Target {
             service: def.service.clone(),
             url: def.dst.clone(),
@@ -570,6 +631,20 @@ impl Table {
                     .then_with(|| b.path.cmp(&a.path))
             });
         }
+        // Pre-compute unique targets for health checking
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut targets = Vec::new();
+        for target in self
+            .routes
+            .values()
+            .flat_map(|r| r.iter())
+            .flat_map(|route| &route.targets)
+        {
+            if seen.insert(&target.url) {
+                targets.push(Arc::clone(target));
+            }
+        }
+        self.all_targets_cache = targets;
     }
 
     /// Build a new table from a list of route definitions.
@@ -591,6 +666,7 @@ impl Table {
             routes: HashMap::new(),
             stats_registry: Some(stats_registry),
             cb_config,
+            all_targets_cache: Vec::new(),
         };
         for def in defs {
             table.apply(def);
@@ -650,17 +726,9 @@ impl Table {
 
     /// Get all unique targets across all routes (for health checking).
     /// Deduplicates by target URL to avoid probing the same backend twice.
-    pub fn all_targets(&self) -> Vec<Arc<crate::route::target::Target>> {
-        let mut seen = std::collections::HashSet::new();
-        let mut targets = Vec::new();
-        for route in self.routes.values().flat_map(|r| r.iter()) {
-            for target in &route.targets {
-                if seen.insert(target.url.clone()) {
-                    targets.push(Arc::clone(target));
-                }
-            }
-        }
-        targets
+    /// Returns pre-computed cache populated during finalize().
+    pub fn all_targets(&self) -> &[Arc<Target>] {
+        &self.all_targets_cache
     }
 
     pub fn lookup_tcp_route(&self, listen_port: u16) -> Option<&Arc<Route>> {
@@ -1228,5 +1296,160 @@ mod tests {
             .lookup_route("example.com", "/z", MatcherKind::Prefix)
             .unwrap();
         assert_eq!(route.targets[0].service, "svc-z", "/z should match svc-z");
+    }
+
+    #[test]
+    fn test_matching_routes_returns_all_in_specificity_order() {
+        use crate::route::definition::{RouteCmd, RouteSource};
+        let defs = vec![
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-specific".to_string(),
+                src: "example.com/api/v2".to_string(),
+                dst: "http://specific:8080".to_string(),
+                weight: 1.0,
+                tags: vec![],
+                opts: HashMap::new(),
+                source: RouteSource::Static,
+            },
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-broad".to_string(),
+                src: "example.com/api".to_string(),
+                dst: "http://broad:8080".to_string(),
+                weight: 1.0,
+                tags: vec![],
+                opts: HashMap::new(),
+                source: RouteSource::Static,
+            },
+        ];
+
+        let table = Table::from_definitions(&defs);
+        let routes = table.matching_routes("example.com", "/api/v2/users", MatcherKind::Prefix);
+
+        assert_eq!(routes.len(), 2, "Should find both matching routes");
+        assert_eq!(
+            routes[0].targets[0].service, "svc-specific",
+            "Most specific first"
+        );
+        assert_eq!(
+            routes[1].targets[0].service, "svc-broad",
+            "Less specific second"
+        );
+    }
+
+    #[test]
+    fn test_matching_routes_includes_catch_all() {
+        use crate::route::definition::{RouteCmd, RouteSource};
+        let defs = vec![
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-host".to_string(),
+                src: "example.com/api".to_string(),
+                dst: "http://host:8080".to_string(),
+                weight: 1.0,
+                tags: vec![],
+                opts: HashMap::new(),
+                source: RouteSource::Static,
+            },
+            // Catch-all route (empty host + "/" path)
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-catchall".to_string(),
+                src: "/".to_string(),
+                dst: "http://catchall:8080".to_string(),
+                weight: 1.0,
+                tags: vec![],
+                opts: HashMap::new(),
+                source: RouteSource::Static,
+            },
+        ];
+
+        let table = Table::from_definitions(&defs);
+        let routes = table.matching_routes("example.com", "/api", MatcherKind::Prefix);
+
+        // Should include both host-specific and catch-all routes
+        let services: Vec<&str> = routes
+            .iter()
+            .map(|r| r.targets[0].service.as_str())
+            .collect();
+        assert!(
+            services.contains(&"svc-host"),
+            "Should find host-specific route"
+        );
+        assert!(
+            services.contains(&"svc-catchall"),
+            "Should find catch-all route"
+        );
+    }
+
+    #[test]
+    fn test_rr_counter_preserved_across_clone() {
+        let mut route = Route::new("example.com".to_string(), "/".to_string());
+        route.add_target(make_target("svc1", "http://1.0.0.1:80", 1.0, 1.0));
+        route.compute_weights();
+
+        // Increment counter on original
+        route
+            .rr_counter
+            .fetch_add(42, std::sync::atomic::Ordering::Relaxed);
+
+        // Clone and verify counter is shared
+        let cloned = route.clone();
+        let val = cloned.rr_counter.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(val, 42, "Cloned route should share the same rr_counter");
+
+        // Increment on clone and verify original sees it
+        cloned
+            .rr_counter
+            .fetch_add(8, std::sync::atomic::Ordering::Relaxed);
+        let val = route.rr_counter.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(val, 50, "Original should see increments from clone");
+    }
+
+    #[test]
+    fn test_all_targets_cache_populated_on_finalize() {
+        use crate::route::definition::{RouteCmd, RouteSource};
+        let defs = vec![
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-a".to_string(),
+                src: "host1.com/".to_string(),
+                dst: "http://10.0.0.1:80".to_string(),
+                weight: 1.0,
+                tags: vec![],
+                opts: HashMap::new(),
+                source: RouteSource::Static,
+            },
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-b".to_string(),
+                src: "host2.com/".to_string(),
+                dst: "http://10.0.0.2:80".to_string(),
+                weight: 1.0,
+                tags: vec![],
+                opts: HashMap::new(),
+                source: RouteSource::Static,
+            },
+            // Same URL as svc-a — should be deduplicated in cache
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-a-dupe".to_string(),
+                src: "host3.com/".to_string(),
+                dst: "http://10.0.0.1:80".to_string(),
+                weight: 1.0,
+                tags: vec![],
+                opts: HashMap::new(),
+                source: RouteSource::Static,
+            },
+        ];
+
+        let table = Table::from_definitions(&defs);
+        let targets = table.all_targets();
+
+        assert_eq!(targets.len(), 2, "Duplicate URLs should be deduplicated");
+        let urls: Vec<&str> = targets.iter().map(|t| t.url.as_str()).collect();
+        assert!(urls.contains(&"http://10.0.0.1:80"));
+        assert!(urls.contains(&"http://10.0.0.2:80"));
     }
 }
