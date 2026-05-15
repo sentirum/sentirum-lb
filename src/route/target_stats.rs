@@ -19,6 +19,7 @@ const REGISTRY_PRUNE_THRESHOLD: usize = 512;
 pub struct TargetStatsRegistry {
     active_connections: Mutex<HashMap<String, Weak<AtomicU64>>>,
     stats: Mutex<HashMap<String, Weak<TargetStats>>>,
+    edge_stats: Mutex<HashMap<String, Weak<TargetStats>>>,
     health_trackers: Mutex<HashMap<String, Weak<TargetHealthTracker>>>,
 }
 
@@ -49,6 +50,25 @@ impl TargetStatsRegistry {
     pub fn stats_for(&self, key: &str) -> Arc<TargetStats> {
         let mut entries = self.stats.lock().unwrap_or_else(|e| {
             tracing::warn!("Target stats registry lock was poisoned; recovering");
+            e.into_inner()
+        });
+
+        if let Some(stats) = entries.get(key).and_then(Weak::upgrade) {
+            return stats;
+        }
+
+        if entries.len() > REGISTRY_PRUNE_THRESHOLD {
+            prune_dead(&mut entries);
+        }
+
+        let stats = Arc::new(TargetStats::default());
+        entries.insert(key.to_string(), Arc::downgrade(&stats));
+        stats
+    }
+
+    pub fn edge_stats_for(&self, key: &str) -> Arc<TargetStats> {
+        let mut entries = self.edge_stats.lock().unwrap_or_else(|e| {
+            tracing::warn!("Target edge stats registry lock was poisoned; recovering");
             e.into_inner()
         });
 

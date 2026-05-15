@@ -13,6 +13,7 @@
 //! - `GET /admin/logs` — Recent log entries (JSON)
 //! - `GET /admin/logs/stream` — Live log stream (SSE)
 
+use crate::admin::topology_flow::TopologyFlowCache;
 use crate::config::{Config, SharedConfig};
 use crate::proxy::tls::{DynamicCertStore, DynamicClientCaStore, SharedFileCert, TlsCertConfig};
 use crate::route::registry::ManagedRouteTable;
@@ -53,6 +54,10 @@ pub struct AdminState {
     pub login_attempts: Arc<dashmap::DashMap<String, (u32, std::time::Instant)>>,
     /// File-based TLS certificates that support manual hot-reload.
     pub file_certs: Vec<(String, SharedFileCert, TlsCertConfig)>,
+    /// Cached short-window flow metrics for topology rendering.
+    pub topology_flow_cache: Arc<TopologyFlowCache>,
+    /// Metrics SSE stream sender — lazily initialized, stopped when no receivers.
+    pub metrics_stream_tx: Arc<RwLock<Option<tokio::sync::watch::Sender<Arc<String>>>>>,
 }
 
 /// Health check response
@@ -94,8 +99,28 @@ pub fn build_router(state: AdminState) -> Router {
             "/admin",
             get(|| async { axum::response::Redirect::permanent("/admin/") }),
         )
-        .route("/admin/", get(dashboard_handler))
-        .route("/admin/dashboard", get(dashboard_handler))
+        .route("/admin/", get(super::dashboard_assets::dashboard_html))
+        .route(
+            "/admin/dashboard",
+            get(super::dashboard_assets::dashboard_html),
+        )
+        .route(
+            "/admin/assets/dashboard.css",
+            get(super::dashboard_assets::dashboard_css),
+        )
+        .route(
+            "/admin/assets/dashboard.js",
+            get(super::dashboard_assets::dashboard_js),
+        )
+        .route(
+            "/favicon.ico",
+            get(|| async {
+                axum::response::Response::builder()
+                    .status(204)
+                    .body(axum::body::Body::empty())
+                    .unwrap()
+            }),
+        )
         .route("/admin/login", post(super::auth::login_handler))
         .route("/admin/logout", post(super::auth::logout_handler))
         .route("/admin/me", get(super::auth::me_handler));
@@ -176,10 +201,6 @@ pub fn build_router(state: AdminState) -> Router {
 // ---------------------------------------------------------------------------
 // Inline handlers (small enough to keep here)
 // ---------------------------------------------------------------------------
-
-async fn dashboard_handler() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("dashboard.html"))
-}
 
 async fn health_handler() -> axum::Json<HealthResponse> {
     axum::Json(HealthResponse {
@@ -275,6 +296,8 @@ pub async fn run_admin_server(
         sessions: Arc::new(RwLock::new(HashMap::new())),
         login_attempts: Arc::new(dashmap::DashMap::new()),
         file_certs,
+        topology_flow_cache: Arc::new(TopologyFlowCache::new()),
+        metrics_stream_tx: Arc::new(RwLock::new(None)),
     };
 
     let cleanup_sessions = state.sessions.clone();
@@ -302,103 +325,20 @@ pub async fn run_admin_server(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::*;
+    use crate::config::AdminUser;
+    use crate::test_support::{admin_test_state, admin_test_state_with, with_admin_auth};
     use axum::body::{Body, to_bytes};
     use http::Request;
     use tower::ServiceExt;
 
-    fn make_test_config() -> SharedConfig {
-        crate::config::shared_config(Config {
-            server: ServerConfig {
-                listen: ":9999".to_string(),
-                admin_listen: "127.0.0.1:9998".to_string(),
-                admin_token: String::new(),
-                admin_users: vec![],
-                workers: 0,
-                drain_timeout: "30s".to_string(),
-            },
-            consul: ConsulConfig {
-                address: "127.0.0.1:8500".to_string(),
-                scheme: "http".to_string(),
-                token: String::new(),
-                kv_prefix: "/sentirum-lb/routes".to_string(),
-                tag_prefix: "urlprefix-".to_string(),
-                poll_interval: "0s".to_string(),
-                service_discovery: false,
-                kv_watching: false,
-                service_whitelist: Vec::new(),
-                service_blacklist: Vec::new(),
-                graceful_shutdown: true,
-                include_warning: false,
-            },
-            proxy: ProxyConfig::default(),
-            logging: LoggingConfig::default(),
-            tls: TlsConfig::default(),
-            tls_listeners: Vec::new(),
-            tcp: TcpConfig::default(),
-            parsed_timeouts: Default::default(),
-        })
-    }
-
     fn make_test_state() -> AdminState {
-        let config = make_test_config();
-        let startup_config = Arc::clone(&config.load());
-        AdminState {
-            config,
-            startup_config,
-            route_table: Arc::new(ManagedRouteTable::new()),
-            tls_store: None,
-            client_ca_store: None,
-            log_buffer: None,
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            login_attempts: Arc::new(dashmap::DashMap::new()),
-            file_certs: Vec::new(),
-        }
+        admin_test_state(Arc::new(ManagedRouteTable::new()))
     }
 
     fn make_authed_test_state(admin_token: &str, admin_users: Vec<AdminUser>) -> AdminState {
-        let config = crate::config::shared_config(Config {
-            server: ServerConfig {
-                listen: ":9999".to_string(),
-                admin_listen: "127.0.0.1:9998".to_string(),
-                admin_token: admin_token.to_string(),
-                admin_users,
-                workers: 0,
-                drain_timeout: "30s".to_string(),
-            },
-            consul: ConsulConfig {
-                address: "127.0.0.1:8500".to_string(),
-                scheme: "http".to_string(),
-                token: String::new(),
-                kv_prefix: "/sentirum-lb/routes".to_string(),
-                tag_prefix: "urlprefix-".to_string(),
-                poll_interval: "0s".to_string(),
-                service_discovery: false,
-                kv_watching: false,
-                service_whitelist: Vec::new(),
-                service_blacklist: Vec::new(),
-                graceful_shutdown: true,
-                include_warning: false,
-            },
-            proxy: ProxyConfig::default(),
-            logging: LoggingConfig::default(),
-            tls: TlsConfig::default(),
-            tls_listeners: Vec::new(),
-            parsed_timeouts: Default::default(),
-            tcp: TcpConfig::default(),
-        });
-        let startup_config = Arc::clone(&config.load());
-        AdminState {
-            config,
-            startup_config,
-            route_table: Arc::new(ManagedRouteTable::new()),
-            tls_store: None,
-            client_ca_store: None,
-            log_buffer: None,
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            login_attempts: Arc::new(dashmap::DashMap::new()),
-            file_certs: Vec::new(),
-        }
+        admin_test_state_with(Arc::new(ManagedRouteTable::new()), |config| {
+            with_admin_auth(config, admin_token, admin_users);
+        })
     }
 
     #[tokio::test]
@@ -687,6 +627,51 @@ mod tests {
         assert!(html.contains("sentirum"));
         assert!(html.contains("status-matcher"));
         assert!(html.contains("overview-title"));
+        assert!(html.contains("/admin/assets/dashboard.css"));
+        assert!(html.contains("/admin/assets/dashboard.js"));
+    }
+
+    #[tokio::test]
+    async fn test_admin_dashboard_assets() {
+        let state = make_test_state();
+        let app = build_router(state);
+
+        let css_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/assets/dashboard.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(css_response.status(), 200);
+        assert_eq!(
+            css_response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/css; charset=utf-8")
+        );
+
+        let js_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/assets/dashboard.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(js_response.status(), 200);
+        assert_eq!(
+            js_response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/javascript; charset=utf-8")
+        );
     }
 
     #[tokio::test]

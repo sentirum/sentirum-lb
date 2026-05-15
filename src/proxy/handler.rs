@@ -1,10 +1,7 @@
 #[cfg(test)]
 use crate::config::Config;
 use crate::config::SharedConfig;
-use crate::route::picker::pick_target_by_strategy;
 use crate::route::registry::ManagedRouteTable;
-use crate::route::table::MatcherKind;
-use crate::route::table::Table;
 use async_trait::async_trait;
 use pingora::http::ResponseHeader;
 use pingora::modules::http::{
@@ -19,11 +16,16 @@ use pingora::upstreams::peer::HttpPeer;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+mod access;
 mod client_cert;
 mod forwarded;
 mod protocol;
 mod rewrite;
+mod upstream;
 
+use access::*;
+#[doc(hidden)]
+pub use access::{client_ip_from_socket_addr, request_id_header_value};
 pub(crate) use client_cert::remember_verified_client_certificate;
 use client_cert::*;
 use forwarded::*;
@@ -149,116 +151,6 @@ impl SentirumProxy {
             trusted_proxies,
         }
     }
-
-    fn lookup_target(
-        &self,
-        host: &str,
-        path: &str,
-        matcher: MatcherKind,
-        strategy: &str,
-        cb_enabled: bool,
-        headers: &http::HeaderMap,
-    ) -> Option<std::sync::Arc<crate::route::target::Target>> {
-        let table = self.route_table.get();
-        let table: &Table = &table;
-
-        // Use Table's consolidated lookup (no duplication)
-        if let Some(route) = table.lookup_route(host, path, matcher)
-            && !route.w_targets.is_empty()
-        {
-            // Header-based target filtering:
-            // Fast path: if no target has header constraints, skip filtering entirely.
-            let any_header_constraint = route.targets.iter().any(|t| t.opts.contains_key("header"));
-
-            let (header_matching_targets, header_matching_w) = if any_header_constraint {
-                let matching: Vec<Arc<crate::route::target::Target>> = route
-                    .targets
-                    .iter()
-                    .filter(|t| t.matches_headers(headers))
-                    .cloned()
-                    .collect();
-
-                if matching.is_empty() {
-                    tracing::debug!(host, path, "No targets matched header constraints");
-                    return None;
-                }
-
-                let matching_w: Vec<Arc<crate::route::target::Target>> = route
-                    .w_targets
-                    .iter()
-                    .filter(|t| t.matches_headers(headers))
-                    .cloned()
-                    .collect();
-                (matching, matching_w)
-            } else {
-                // Fast path: no header constraints, use all targets directly
-                (route.targets.clone(), route.w_targets.clone())
-            };
-
-            let w_list = if header_matching_w.is_empty() {
-                &header_matching_targets
-            } else {
-                &header_matching_w
-            };
-
-            if let Some(target) = pick_target_by_strategy(
-                strategy,
-                &header_matching_targets,
-                w_list,
-                &route.rr_counter,
-            ) {
-                // Active health check: skip targets marked unhealthy by probing
-                if !target.health_tracker.is_probe_healthy() {
-                    tracing::debug!(
-                        host,
-                        path,
-                        target_url = %target.url,
-                        "Skipping unhealthy target (active health check)"
-                    );
-                    // Fall through to try fallback targets below
-                } else if !cb_enabled
-                    || target.health_tracker.circuit_breaker().can_accept_request()
-                {
-                    return Some(target);
-                }
-
-                let best_fallback = {
-                    let healthy_fallbacks: Vec<Arc<crate::route::target::Target>> =
-                        header_matching_targets
-                            .iter()
-                            .filter(|t| {
-                                t.url != target.url
-                                    && t.health_tracker.is_probe_healthy()
-                                    && t.health_tracker.circuit_breaker().can_accept_request()
-                            })
-                            .cloned()
-                            .collect();
-                    if !healthy_fallbacks.is_empty() {
-                        pick_target_by_strategy(
-                            strategy,
-                            &healthy_fallbacks,
-                            &healthy_fallbacks,
-                            &route.rr_counter,
-                        )
-                    } else {
-                        None
-                    }
-                };
-                if let Some(fallback) = &best_fallback {
-                    tracing::debug!(
-                        host,
-                        path,
-                        skipped_url = %target.url,
-                        fallback_url = %fallback.url,
-                        "Circuit breaker open on picked target; using fallback"
-                    );
-                }
-                return best_fallback.or(Some(target));
-            }
-        }
-
-        None
-    }
 }
 
 #[async_trait]
@@ -349,106 +241,7 @@ impl ProxyHttp for SentirumProxy {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> pingora::Result<Box<HttpPeer>> {
-        let (host, path) = extract_host_path(session);
-        let headers = session.req_header().headers.clone();
-
-        tracing::debug!(host, path, "Looking up route");
-
-        let config = self.config.load();
-        let target = self
-            .lookup_target(
-                host,
-                path,
-                MatcherKind::from_config(&config.proxy.matcher),
-                &config.proxy.strategy,
-                config.proxy.circuit_breaker_enabled,
-                &headers,
-            )
-            .ok_or_else(|| {
-                tracing::warn!(host, path, "No route found");
-                Error::new(ErrorType::HTTPStatus(config.proxy.no_route_status))
-            })?;
-
-        tracing::debug!(host, path, target_url = %target.url, "Route found");
-
-        // Rate limit check — return 429 if over limit
-        if !target.try_acquire_rate_limit(
-            config.proxy.rate_limit_per_target,
-            config.proxy.rate_limit_burst,
-        ) {
-            tracing::warn!(
-                host,
-                path,
-                target_url = %target.url,
-                rate_limit = config.proxy.rate_limit_per_target,
-                burst = config.proxy.rate_limit_burst,
-                "Rate limit exceeded"
-            );
-            crate::metrics::prometheus::global()
-                .rate_limit_rejected_total
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return Err(Error::new(ErrorType::HTTPStatus(429)));
-        }
-
-        // Circuit breaker check — fail fast if circuit is open
-        // Checked BEFORE acquiring connection slot to avoid unnecessary acquire/release cycles
-        if config.proxy.circuit_breaker_enabled
-            && !target.health_tracker.circuit_breaker().allow_request()
-        {
-            tracing::warn!(
-                host,
-                path,
-                target_url = %target.url,
-                service = %target.service,
-                state = ?target.health_tracker.circuit_breaker().current_state(),
-                "Circuit breaker OPEN — failing fast with 503"
-            );
-            crate::metrics::prometheus::global()
-                .circuit_breaker_fastfail_total
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return Err(Error::new(ErrorType::HTTPStatus(503)));
-        }
-
-        // Store target in context for upstream_request_filter (avoids double lookup)
-        if !target.try_acquire_connection_slot(config.proxy.max_connections as u64) {
-            tracing::warn!(
-                host,
-                path,
-                target_url = %target.url,
-                max_connections = config.proxy.max_connections,
-                "Upstream concurrency limit reached"
-            );
-            return Err(Error::new(ErrorType::HTTPStatus(503)));
-        }
-
-        ctx.picked_target = Some(target.clone());
-
-        let host = target.upstream_host();
-        let port = target.upstream_port();
-        let resolved_addr = match target.resolve_upstream_addr().await {
-            Ok(addr) => addr,
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                tracing::warn!(
-                    host,
-                    port,
-                    service = %target.service,
-                    source = ?target.source,
-                    error = %error,
-                    "Blocked upstream target during resolution (SSRF protection)"
-                );
-                return Err(Error::new(ErrorType::HTTPStatus(403)));
-            }
-            Err(error) => {
-                tracing::warn!(host, port, error = %error, "DNS resolution failed");
-                return Err(Error::new(ErrorType::ConnectNoRoute));
-            }
-        };
-
-        // Use pre-parsed URL fields (no per-request URL parsing!)
-        let mut peer = HttpPeer::new(resolved_addr, target.upstream_tls(), host.to_string());
-        configure_peer_options(&mut peer, &target, config.as_ref());
-
-        Ok(Box::new(peer))
+        self.select_upstream_peer(session, ctx).await
     }
 
     /// Log every completed request (access log) and record metrics
@@ -458,84 +251,7 @@ impl ProxyHttp for SentirumProxy {
         e: Option<&pingora::Error>,
         ctx: &mut Self::CTX,
     ) {
-        let header = session.req_header();
-        let method = header.method.as_str();
-        let path = header
-            .uri
-            .path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or(header.uri.path());
-        let host = header
-            .headers
-            .get("host")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("-");
-        let target_url = ctx
-            .picked_target
-            .as_ref()
-            .map(|t| t.url.as_str())
-            .unwrap_or("-");
-
-        // Determine status: use stored response_status, or infer from error
-        let status = if ctx.response_status > 0 {
-            ctx.response_status
-        } else if let Some(err) = e {
-            match err.etype() {
-                ErrorType::HTTPStatus(code) => *code,
-                ErrorType::ConnectTimedout => 504,
-                ErrorType::ConnectRefused => 502,
-                ErrorType::ConnectNoRoute => 502,
-                ErrorType::InvalidHTTPHeader => 502,
-                _ => 502,
-            }
-        } else {
-            200
-        };
-
-        // Record Prometheus metrics
-        let latency_us = ctx
-            .request_start
-            .map(|s| s.elapsed().as_micros() as u64)
-            .unwrap_or(0);
-        let metrics = crate::metrics::prometheus::global();
-        metrics.record_protocol_request(ctx.is_grpc, ctx.is_grpc_web, ctx.is_websocket);
-        metrics.record_request(status, latency_us);
-        metrics.record_bytes(ctx.upstream_response_bytes);
-        metrics.disconnect();
-
-        if let Some(target) = &ctx.picked_target {
-            target.release_connection_slot();
-
-            let is_error = status >= 500
-                || matches!(e, Some(err) if err.etype() == &ErrorType::ConnectTimedout)
-                || matches!(e, Some(err) if err.etype() == &ErrorType::ConnectRefused)
-                || matches!(e, Some(err) if err.etype() == &ErrorType::ConnectNoRoute);
-            target
-                .stats
-                .record_request(latency_us, ctx.upstream_response_bytes, is_error);
-
-            let config = self.config.load();
-            if config.proxy.circuit_breaker_enabled {
-                if is_error {
-                    target.health_tracker.circuit_breaker().record_error();
-                } else {
-                    target.health_tracker.circuit_breaker().record_success();
-                }
-            }
-        }
-
-        tracing::info!(
-            method,
-            host,
-            path,
-            status,
-            latency_us,
-            upstream = target_url,
-            grpc = ctx.is_grpc,
-            grpc_web = ctx.is_grpc_web,
-            websocket = ctx.is_websocket,
-            "access"
-        );
+        record_access_log(self, session, e, ctx).await;
     }
 
     async fn upstream_request_filter(
@@ -547,54 +263,7 @@ impl ProxyHttp for SentirumProxy {
     where
         Self::CTX: Send + Sync,
     {
-        let config = self.config.load();
-
-        // Add request ID header (only if configured)
-        if !config.proxy.request_id_header.is_empty() {
-            let id = uuid::Uuid::new_v4().to_string();
-            upstream_request.insert_header(config.proxy.request_id_header.clone(), id)?;
-        }
-
-        let downstream = session.req_header();
-        let downstream_is_tls = session
-            .digest()
-            .and_then(|digest| digest.ssl_digest.as_ref())
-            .is_some();
-        let peer_addr = session.client_addr().map(|a| {
-            let s = a.to_string();
-            // Strip port from "ip:port" or "[ipv6]:port"
-            if s.starts_with('[') {
-                s.split(']')
-                    .next()
-                    .unwrap_or(&s)
-                    .trim_start_matches('[')
-                    .to_string()
-            } else if let Some(pos) = s.rfind(':') {
-                s[..pos].to_string()
-            } else {
-                s
-            }
-        });
-        append_forwarded_headers(
-            downstream,
-            upstream_request,
-            downstream_is_tls,
-            peer_addr.as_deref(),
-            &self.trusted_proxies,
-        )?;
-        append_client_certificate_headers(session, upstream_request)?;
-
-        // Use stored target from upstream_peer (no double lookup!)
-        if let Some(target) = &ctx.picked_target {
-            if let Some(uri) = rewrite_upstream_uri(&upstream_request.uri, target) {
-                upstream_request.set_uri(uri);
-            }
-            if target.requires_http2() || target.host_override().is_some() {
-                upstream_request.insert_header("Host", target.upstream_authority())?;
-            }
-        }
-
-        Ok(())
+        self.prepare_upstream_request(session, upstream_request, ctx, &self.trusted_proxies)
     }
 
     async fn response_filter(
@@ -653,25 +322,7 @@ impl ProxyHttp for SentirumProxy {
         _ctx: &mut Self::CTX,
         e: Box<Error>,
     ) -> Box<Error> {
-        // Map connection errors to appropriate HTTP status codes
-        match e.etype() {
-            ErrorType::ConnectTimedout => {
-                tracing::warn!(error = %e, "Upstream connection timeout (504)");
-            }
-            ErrorType::ConnectRefused | ErrorType::ConnectNoRoute => {
-                tracing::warn!(error = %e, "Upstream refused/unreachable (502)");
-            }
-            ErrorType::InvalidHTTPHeader => {
-                tracing::warn!(error = %e, "Upstream invalid HTTP (502)");
-            }
-            ErrorType::HTTPStatus(code) => {
-                tracing::warn!(status = code, error = %e, "Upstream HTTP error");
-            }
-            _ => {
-                tracing::error!(error = %e, "Upstream connection failed");
-            }
-        }
-        e
+        log_connect_failure(e)
     }
 
     /// Handle proxy error — generate proper error response and return status
@@ -684,69 +335,7 @@ impl ProxyHttp for SentirumProxy {
     where
         Self::CTX: Send + Sync,
     {
-        let (status, message) = match e.etype() {
-            ErrorType::HTTPStatus(code) => (*code, status_message(*code)),
-            ErrorType::ConnectTimedout => (504, "Gateway Timeout"),
-            ErrorType::ConnectRefused => (502, "Bad Gateway: upstream refused connection"),
-            ErrorType::ConnectNoRoute => (502, "Bad Gateway: no route to upstream"),
-            ErrorType::InvalidHTTPHeader => (502, "Bad Gateway: invalid response from upstream"),
-            _ => (502, "Internal Server Error"),
-        };
-
-        if status > 0 {
-            let write_result = if ctx.is_grpc {
-                write_grpc_error_response(session, status, message).await
-            } else {
-                let body = if ctx.is_websocket {
-                    message.to_string()
-                } else {
-                    format!("{{\"error\":\"{}\",\"status\":{}}}", message, status)
-                };
-                let content_type = if ctx.is_websocket {
-                    "text/plain; charset=utf-8"
-                } else {
-                    "application/json"
-                };
-
-                let mut resp = match ResponseHeader::build(status, None)
-                    .or_else(|_| ResponseHeader::build(500, None))
-                {
-                    Ok(resp) => resp,
-                    Err(build_err) => {
-                        tracing::error!(error = %build_err, "Failed to build error response header");
-                        return pingora::proxy::FailToProxy {
-                            error_code: 500,
-                            can_reuse_downstream: false,
-                        };
-                    }
-                };
-                resp.insert_header("Content-Type", content_type).ok();
-                resp.insert_header("X-Served-By", "sentirum-lb").ok();
-
-                session
-                    .write_response_header(Box::new(resp), false)
-                    .await
-                    .map(|_| body)
-            };
-
-            match write_result {
-                Ok(body) => {
-                    if !body.is_empty() {
-                        let _ = session
-                            .write_response_body(Some(bytes::Bytes::from(body)), true)
-                            .await;
-                    }
-                }
-                Err(write_err) => {
-                    tracing::error!(error = %write_err, "Failed to write error response");
-                }
-            }
-        }
-
-        pingora::proxy::FailToProxy {
-            error_code: status,
-            can_reuse_downstream: false,
-        }
+        write_proxy_error(session, e, ctx).await
     }
 }
 

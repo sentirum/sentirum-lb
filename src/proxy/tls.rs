@@ -77,6 +77,26 @@ pub struct DynamicCertStore {
 
 const MAX_CONSUL_CERT_ENTRY_BYTES: usize = 1 << 20;
 
+fn rwlock_read_or_recover<'a, T>(
+    lock: &'a RwLock<T>,
+    label: &'static str,
+) -> std::sync::RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|e| {
+        tracing::warn!(lock = label, "RWLock poisoned; recovering read access");
+        e.into_inner()
+    })
+}
+
+fn rwlock_write_or_recover<'a, T>(
+    lock: &'a RwLock<T>,
+    label: &'static str,
+) -> std::sync::RwLockWriteGuard<'a, T> {
+    lock.write().unwrap_or_else(|e| {
+        tracing::warn!(lock = label, "RWLock poisoned; recovering write access");
+        e.into_inner()
+    })
+}
+
 impl DynamicCertStore {
     pub fn new(strict_sni: bool) -> Self {
         Self {
@@ -87,7 +107,7 @@ impl DynamicCertStore {
     }
 
     pub fn status(&self) -> DynamicTlsStatus {
-        self.status.read().expect("tls status poisoned").clone()
+        rwlock_read_or_recover(&self.status, "tls status").clone()
     }
 
     pub async fn refresh_from_consul(
@@ -109,7 +129,7 @@ impl DynamicCertStore {
             let metrics = crate::metrics::prometheus::global();
             metrics.record_cert_reload_error();
             metrics.record_cert_reload_skipped("empty");
-            let mut status = self.status.write().expect("tls status poisoned");
+            let mut status = rwlock_write_or_recover(&self.status, "tls status");
             status.last_consul_index = consul_index;
             status.last_error = Some(
                 "received empty certificate snapshot from Consul; keeping last known good store"
@@ -129,7 +149,7 @@ impl DynamicCertStore {
             let metrics = crate::metrics::prometheus::global();
             metrics.record_cert_reload_error();
             record_warning_metrics(metrics, &warnings);
-            let mut status = self.status.write().expect("tls status poisoned");
+            let mut status = rwlock_write_or_recover(&self.status, "tls status");
             status.last_consul_index = consul_index;
             status.last_error = Some(
                 warnings.first().cloned().unwrap_or_else(|| {
@@ -170,7 +190,7 @@ impl DynamicCertStore {
                 .collect(),
         );
 
-        let mut status = self.status.write().expect("tls status poisoned");
+        let mut status = rwlock_write_or_recover(&self.status, "tls status");
         status.loaded_certificates = loaded_certificates.clone();
         status.certificates = certificate_statuses;
         status.default_certificate = default_certificate.clone();
@@ -224,10 +244,7 @@ impl DynamicClientCaStore {
     }
 
     pub fn status(&self) -> DynamicClientCaStatus {
-        self.status
-            .read()
-            .expect("client ca status poisoned")
-            .clone()
+        rwlock_read_or_recover(&self.status, "client ca status").clone()
     }
 
     pub async fn refresh_from_consul(
@@ -262,7 +279,7 @@ impl DynamicClientCaStore {
 
     fn apply_snapshot(&self, entries: BTreeMap<String, Vec<u8>>, consul_index: u64) {
         if entries.is_empty() {
-            let mut status = self.status.write().expect("client ca status poisoned");
+            let mut status = rwlock_write_or_recover(&self.status, "client ca status");
             status.last_consul_index = consul_index;
             status.last_error = Some(
                 "received empty client CA snapshot; keeping last known good store".to_string(),
@@ -277,7 +294,7 @@ impl DynamicClientCaStore {
         match ClientCaSnapshot::from_entries(&entries, &self.ca_upgrade_cn) {
             Ok((next_snapshot, warnings)) => {
                 if next_snapshot.store.is_none() {
-                    let mut status = self.status.write().expect("client ca status poisoned");
+                    let mut status = rwlock_write_or_recover(&self.status, "client ca status");
                     status.last_consul_index = consul_index;
                     status.last_error = Some(
                         warnings.first().cloned().unwrap_or_else(|| {
@@ -295,7 +312,7 @@ impl DynamicClientCaStore {
                 let certificates = next_snapshot.certificates.clone();
                 self.snapshot.store(Arc::new(next_snapshot));
 
-                let mut status = self.status.write().expect("client ca status poisoned");
+                let mut status = rwlock_write_or_recover(&self.status, "client ca status");
                 status.loaded_entries = loaded_entries.clone();
                 status.certificates = certificates;
                 status.last_consul_index = consul_index;
@@ -317,7 +334,7 @@ impl DynamicClientCaStore {
                 }
             }
             Err(error) => {
-                let mut status = self.status.write().expect("client ca status poisoned");
+                let mut status = rwlock_write_or_recover(&self.status, "client ca status");
                 status.last_consul_index = consul_index;
                 status.last_error = Some(error.to_string());
                 tracing::error!(consul_index, error = %error, "Failed to apply client CA snapshot; keeping last known good store");

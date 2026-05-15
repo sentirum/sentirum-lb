@@ -169,12 +169,15 @@ impl CircuitBreaker {
                     // for longer than recovery_timeout, the upstream callback was
                     // likely lost (DNS failure, connection drop without logging).
                     // Reset the flag so a new probe can be dispatched.
+                    //
+                    // Minimum 100ms guard prevents race conditions where another
+                    // thread sees the flag set in the same millisecond and resets it.
                     if self.half_open_in_flight.load(Ordering::Acquire) {
                         let probe_sent = self.half_open_probe_sent_at_ms.load(Ordering::Relaxed);
                         let recovery_ms = self.recovery_timeout_secs.load(Ordering::Relaxed) * 1000;
-                        if probe_sent > 0
-                            && monotonic_elapsed_ms().saturating_sub(probe_sent) > recovery_ms
-                        {
+                        let reset_threshold_ms = (recovery_ms).max(100);
+                        let elapsed = monotonic_elapsed_ms().saturating_sub(probe_sent);
+                        if probe_sent > 0 && elapsed >= reset_threshold_ms {
                             tracing::warn!(
                                 probe_sent_ago_ms =
                                     monotonic_elapsed_ms().saturating_sub(probe_sent),
@@ -498,6 +501,8 @@ impl Default for CircuitBreaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     #[test]
     fn test_circuit_breaker_default_state_is_closed() {
@@ -685,5 +690,98 @@ mod tests {
         let state_byte = cb.state_atomic.load(Ordering::Acquire);
         let probe_count = ((state_byte >> 2) & 0x3F) as usize;
         assert_eq!(probe_count, 1);
+    }
+
+    #[test]
+    fn test_circuit_breaker_allows_only_one_concurrent_half_open_probe() {
+        let cb = Arc::new(CircuitBreaker::with_config(CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 10,
+            recovery_timeout_secs: 0,
+            half_open_max_requests: 3,
+        }));
+        for _ in 0..5 {
+            cb.record_success();
+        }
+        for _ in 0..5 {
+            cb.record_error();
+        }
+        assert_eq!(cb.current_state(), CircuitState::Open);
+
+        let threads = 12;
+        let barrier = Arc::new(Barrier::new(threads));
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                let cb = Arc::clone(&cb);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    cb.allow_request()
+                })
+            })
+            .collect();
+
+        let allowed = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("thread should join"))
+            .filter(|allowed| *allowed)
+            .count();
+        assert_eq!(allowed, 1, "only one probe should be in flight at once");
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+        assert!(cb.half_open_in_flight.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_circuit_breaker_auto_resets_stuck_half_open_probe() {
+        let cb = CircuitBreaker::with_config(CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 10,
+            recovery_timeout_secs: 0,
+            half_open_max_requests: 2,
+        });
+        cb.state_atomic.store(STATE_HALF_OPEN, Ordering::Release);
+        cb.half_open_in_flight.store(true, Ordering::Release);
+        cb.half_open_probe_sent_at_ms.store(1, Ordering::Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        assert!(
+            cb.allow_request(),
+            "stuck probe should be reset and retried"
+        );
+        assert!(cb.half_open_in_flight.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_circuit_breaker_concurrent_half_open_errors_reopen_cleanly() {
+        let cb = Arc::new(CircuitBreaker::with_config(CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 10,
+            recovery_timeout_secs: 1,
+            half_open_max_requests: 2,
+        }));
+        cb.state_atomic.store(STATE_HALF_OPEN, Ordering::Release);
+
+        let barrier = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let cb = Arc::clone(&cb);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    cb.record_error();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("thread should join");
+        }
+
+        assert_eq!(cb.current_state(), CircuitState::Open);
+        assert!(!cb.half_open_in_flight.load(Ordering::Acquire));
+        assert!(
+            cb.transition_history()
+                .iter()
+                .any(|t| t.from == CircuitState::HalfOpen && t.to == CircuitState::Open)
+        );
     }
 }

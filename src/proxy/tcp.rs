@@ -804,45 +804,14 @@ fn parse_listener_port(value: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{
-        ConsulConfig, LoggingConfig, ProxyConfig, ServerConfig, TcpConfig, TlsConfig,
-    };
     use crate::route::definition::{RouteCmd, RouteDef, RouteSource};
+    use crate::test_support::tcp_shared_test_config;
     use std::collections::HashMap;
 
     const CLIENT_HELLO_WITH_SNI_HEX: &str = "0100014803032657cacce41598fa82e5b75061050bc31c5affdba106b8e743185224af0fa1aa000098cc14cc13cc15c030c02cc028c024c014c00a00a3009f006b006a00390038ff8500c400c3008800870081c032c02ec02ac026c00fc005009d003d003500c00084c02fc02bc027c023c013c00900a2009e006700400033003200be00bd00450044c031c02dc029c025c00ec004009c003c002f00ba0041c011c007c00cc00200050004c012c00800160013c00dc003000a00150012000900ff010000870000000f000d00000a676f6f676c652e636f6d000b000403000102000a003a0038000e000d0019001c000b000c001b00180009000a001a00160017000800060007001400150004000500120013000100020003000f0010001100230000000d00260024060106020603efef050105020503040104020403eeeeeded030103020303020102020203";
 
     fn config() -> SharedConfig {
-        crate::config::shared_config(Config {
-            server: ServerConfig {
-                listen: ":9999".to_string(),
-                admin_listen: "127.0.0.1:9998".to_string(),
-                admin_token: String::new(),
-                admin_users: vec![],
-                workers: 0,
-                drain_timeout: String::new(),
-            },
-            consul: ConsulConfig {
-                address: "127.0.0.1:8500".to_string(),
-                scheme: "http".to_string(),
-                token: String::new(),
-                kv_prefix: "/sentirum-lb/routes".to_string(),
-                tag_prefix: "urlprefix-".to_string(),
-                poll_interval: "0s".to_string(),
-                service_discovery: true,
-                kv_watching: true,
-                service_whitelist: Vec::new(),
-                service_blacklist: Vec::new(),
-                graceful_shutdown: true,
-                include_warning: false,
-            },
-            proxy: ProxyConfig::default(),
-            logging: LoggingConfig::default(),
-            tls: TlsConfig::default(),
-            tls_listeners: Vec::new(),
-            tcp: TcpConfig::default(),
-            parsed_timeouts: Default::default(),
-        })
+        tcp_shared_test_config()
     }
 
     fn decode_hex(input: &str) -> Vec<u8> {

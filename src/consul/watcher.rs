@@ -48,6 +48,16 @@ impl ServiceMonitor {
                 match self.client.get_health_checks(last_index).await {
                     Ok((checks, new_index)) => {
                         metrics.set_consul_watcher_last_index("services", new_index);
+                        // Consul restart resets the index to a value lower than
+                        // our last_index. Detect this and reset to avoid a tight
+                        // loop of instant responses.
+                        if new_index < last_index && last_index > 0 {
+                            tracing::info!(
+                                old_index = last_index,
+                                new_index,
+                                "Consul index reset detected (server restart?); resetting watcher state"
+                            );
+                        }
                         (checks, new_index)
                     }
                     Err(e) => {
@@ -62,17 +72,23 @@ impl ServiceMonitor {
                 }
             };
 
+            // Index unchanged means blocking query timed out — loop immediately.
+            // Index reset (new_index < last_index) should NOT be treated as
+            // "unchanged": we must reprocess with the new index.
             if new_index == last_index {
                 backoff_secs = 1;
                 metrics.set_consul_watcher_backoff_seconds("services", 0);
                 continue;
             }
 
+            // Update last_index regardless of whether new_index went up or reset.
+            // This prevents tight-looping on Consul restart.
+            last_index = new_index;
+
             match self.process_checks(&checks, &tag_prefix).await {
                 Ok(route_defs) => {
                     backoff_secs = 1;
                     metrics.set_consul_watcher_backoff_seconds("services", 0);
-                    last_index = new_index;
                     if updates
                         .send(RouteUpdate::Services(route_defs))
                         .await
@@ -402,6 +418,13 @@ impl KVWatcher {
                     backoff_secs = 1;
                     metrics.set_consul_watcher_backoff_seconds("kv", 0);
                     metrics.set_consul_watcher_last_index("kv", new_index);
+                    if new_index < last_index && last_index > 0 {
+                        tracing::info!(
+                            old_index = last_index,
+                            new_index,
+                            "Consul KV index reset detected (server restart?); resetting"
+                        );
+                    }
                     if new_index != last_index {
                         last_index = new_index;
                         let update = RouteUpdate::Manual(value.unwrap_or_default());

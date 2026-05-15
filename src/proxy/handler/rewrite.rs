@@ -1,7 +1,6 @@
 use crate::config::Config;
 use crate::proxy::handler::protocol::sni_hostname;
 use pingora::upstreams::peer::HttpPeer;
-use std::borrow::Cow;
 
 pub(super) fn configure_peer_options(
     peer: &mut HttpPeer,
@@ -33,25 +32,37 @@ pub(super) fn rewrite_upstream_uri(
     uri: &http::Uri,
     target: &crate::route::target::Target,
 ) -> Option<http::Uri> {
-    let mut path = uri.path().to_string();
+    let original_path = uri.path();
+    let mut rewritten_path: Option<String> = None;
 
     if let Some(strip) = target.strip_path()
-        && let Some(new_path) = strip_path_prefix(&path, strip)
+        && let Some(new_path) = original_path.strip_prefix(strip)
     {
-        path = new_path.into_owned();
+        let new_path = if new_path.is_empty() {
+            "/".to_string()
+        } else if new_path.starts_with('/') {
+            new_path.to_string()
+        } else {
+            format!("/{}", new_path)
+        };
+        rewritten_path = Some(new_path);
     }
 
     if let Some(prepend) = target.prepend_path() {
-        path = prepend_path_prefix(prepend, &path);
+        let current = rewritten_path.as_deref().unwrap_or(original_path);
+        rewritten_path = Some(prepend_path_prefix(prepend, current));
     }
 
-    if target.is_grpc() && !is_valid_grpc_path(&path) {
+    // No rewrite happened
+    let final_path = rewritten_path?;
+
+    if target.is_grpc() && !is_valid_grpc_path(&final_path) {
         return Some(uri.clone());
     }
 
     let rewritten = match uri.query() {
-        Some(query) => format!("{path}?{query}"),
-        None => path,
+        Some(query) => format!("{}?{}", final_path, query),
+        None => final_path,
     };
 
     rewritten.parse().ok()
@@ -63,17 +74,6 @@ fn is_valid_grpc_path(path: &str) -> bool {
         (parts.next(), parts.next(), parts.next()),
         (Some(service), Some(method), None) if !service.is_empty() && !method.is_empty()
     )
-}
-
-fn strip_path_prefix<'a>(path: &'a str, strip: &str) -> Option<Cow<'a, str>> {
-    let stripped = path.strip_prefix(strip)?;
-    if stripped.is_empty() {
-        Some(Cow::Borrowed("/"))
-    } else if stripped.starts_with('/') {
-        Some(Cow::Borrowed(stripped))
-    } else {
-        Some(Cow::Owned(format!("/{}", stripped)))
-    }
 }
 
 fn prepend_path_prefix(prefix: &str, path: &str) -> String {
