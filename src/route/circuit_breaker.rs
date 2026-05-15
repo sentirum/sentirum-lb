@@ -169,12 +169,15 @@ impl CircuitBreaker {
                     // for longer than recovery_timeout, the upstream callback was
                     // likely lost (DNS failure, connection drop without logging).
                     // Reset the flag so a new probe can be dispatched.
+                    //
+                    // Minimum 100ms guard prevents race conditions where another
+                    // thread sees the flag set in the same millisecond and resets it.
                     if self.half_open_in_flight.load(Ordering::Acquire) {
                         let probe_sent = self.half_open_probe_sent_at_ms.load(Ordering::Relaxed);
                         let recovery_ms = self.recovery_timeout_secs.load(Ordering::Relaxed) * 1000;
-                        if probe_sent > 0
-                            && monotonic_elapsed_ms().saturating_sub(probe_sent) > recovery_ms
-                        {
+                        let reset_threshold_ms = (recovery_ms).max(100);
+                        let elapsed = monotonic_elapsed_ms().saturating_sub(probe_sent);
+                        if probe_sent > 0 && elapsed >= reset_threshold_ms {
                             tracing::warn!(
                                 probe_sent_ago_ms =
                                     monotonic_elapsed_ms().saturating_sub(probe_sent),

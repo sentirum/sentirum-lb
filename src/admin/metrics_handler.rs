@@ -65,7 +65,8 @@ pub(super) async fn metrics_stream_handler(
                 for route in routes.iter() {
                     for target in route.targets.iter() {
                         let stats = target.stats.as_ref();
-                        let flow_key = topology_target_key(host, &route.path, &target.service, &target.url);
+                        let flow_key =
+                            topology_target_key(host, &route.path, &target.service, &target.url);
                         targets.push(TargetMetrics {
                             host: host.to_string(),
                             path: route.path.clone(),
@@ -82,7 +83,11 @@ pub(super) async fn metrics_stream_handler(
                             errors: stats.errors_total.load(Ordering::Relaxed),
                             avg_latency_us: stats.avg_latency_us(),
                             bytes_total: stats.bytes_total.load(Ordering::Relaxed),
-                            flow: flow_snapshot.edges.get(&flow_key).cloned().unwrap_or_default(),
+                            flow: flow_snapshot
+                                .edges
+                                .get(&flow_key)
+                                .cloned()
+                                .unwrap_or_default(),
                         });
                     }
                 }
@@ -103,14 +108,23 @@ pub(super) async fn metrics_stream_handler(
         }
     }
 
-    static METRICS_TX: std::sync::OnceLock<tokio::sync::watch::Sender<Arc<String>>> =
-        std::sync::OnceLock::new();
+    // Per-state channel avoids the OnceLock global-static pitfall where the
+    // spawned task captures the first AdminState forever.
+    // Each SSE client subscribes to the same channel; the background task
+    // stops when all receivers are dropped (stream disconnect).
     let rx = {
-        let (_tx, rx) = match METRICS_TX.get() {
-            Some(tx) => (tx, tx.subscribe()),
-            None => {
-                let (_tx, rx) = tokio::sync::watch::channel(Arc::new(String::from("{}")));
-                let _ = METRICS_TX.set(_tx);
+        let guard = state.metrics_stream_tx.read().await;
+        if let Some(tx) = guard.as_ref() {
+            tx.subscribe()
+        } else {
+            drop(guard);
+            let mut guard = state.metrics_stream_tx.write().await;
+            // Double-check after acquiring write lock
+            if let Some(tx) = guard.as_ref() {
+                tx.subscribe()
+            } else {
+                let (tx, rx) = tokio::sync::watch::channel(Arc::new(String::from("{}")));
+                let _ = guard.insert(tx);
                 let state_clone = state.clone();
                 tokio::spawn(async move {
                     let mut timer = interval(Duration::from_secs(1));
@@ -120,13 +134,33 @@ pub(super) async fn metrics_stream_handler(
                         let json = Arc::new(
                             serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".into()),
                         );
-                        let _ = METRICS_TX.get().unwrap().send(json);
+                        // If all receivers are gone, stop the task
+                        if state_clone
+                            .metrics_stream_tx
+                            .read()
+                            .await
+                            .as_ref()
+                            .is_none_or(|tx| tx.receiver_count() == 0)
+                        {
+                            let mut guard = state_clone.metrics_stream_tx.write().await;
+                            // Only clear if no new receivers appeared
+                            if guard.as_ref().is_some_and(|tx| tx.receiver_count() == 0) {
+                                guard.take();
+                                tracing::debug!("Metrics stream task stopped: no receivers");
+                                return;
+                            }
+                        }
+                        let _ = state_clone
+                            .metrics_stream_tx
+                            .read()
+                            .await
+                            .as_ref()
+                            .map(|tx| tx.send(json));
                     }
                 });
-                (METRICS_TX.get().unwrap(), rx)
+                rx
             }
-        };
-        rx
+        }
     };
 
     let stream = async_stream::stream! {
@@ -144,17 +178,9 @@ pub(super) async fn metrics_stream_handler(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+/// Delegate to the canonical implementation in the metrics module.
 pub fn escape_prometheus_label(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            _ => out.push(c),
-        }
-    }
-    out
+    crate::metrics::prometheus::escape_prometheus_label(s)
 }
 
 pub(super) async fn targets_metrics_handler(
