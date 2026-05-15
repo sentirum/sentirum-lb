@@ -126,10 +126,10 @@ pub fn build_router(state: AdminState) -> Router {
         )
         .route("/admin/login", post(super::auth::login_handler))
         .route("/admin/logout", post(super::auth::logout_handler))
-        .route("/admin/me", get(super::auth::me_handler));
+        .route("/admin/me", get(super::auth::me_handler))
+        .route("/admin/health", get(health_handler));
 
     let protected = Router::new()
-        .route("/admin/health", get(health_handler))
         .route("/admin/routes", get(super::routes_handler::routes_handler))
         .route(
             "/admin/routes",
@@ -749,10 +749,12 @@ mod tests {
         config.server.admin_token = "secret".to_string();
         state.config.store(Arc::new(config));
         let app = build_router(state);
+        // /admin/health is public (unauthenticated) for health probes;
+        // test auth enforcement on /admin/routes instead.
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/admin/health")
+                    .uri("/admin/routes")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -785,10 +787,11 @@ mod tests {
     async fn test_admin_rejects_empty_bearer_when_token_set() {
         let state = make_authed_test_state("secret", vec![]);
         let app = build_router(state);
+        // /admin/health is public; test auth rejection on /admin/routes.
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/admin/health")
+                    .uri("/admin/routes")
                     .header("Authorization", "Bearer ")
                     .body(Body::empty())
                     .unwrap(),
@@ -857,10 +860,11 @@ mod tests {
             }],
         );
         let app = build_router(state);
+        // /admin/health is public; test auth rejection on /admin/routes.
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/admin/health")
+                    .uri("/admin/routes")
                     .header("Authorization", "Bearer ")
                     .body(Body::empty())
                     .unwrap(),
