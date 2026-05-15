@@ -712,14 +712,16 @@ fn main() {
                     };
                     match build_static_tls_settings(cert.clone(), client_auth_state.clone()) {
                         Ok(mut settings) => {
-                            settings.enable_h2();
+                            if tls_cfg.http2 {
+                                settings.enable_h2();
+                            }
                             lb_service.add_tls_with_settings(&tls_listen, None, settings);
                             tracing::info!(
                                 listener = %label,
                                 addr = %tls_listen,
                                 source = "file",
                                 client_auth = client_auth_config.as_ref().map(|cfg| format!("{:?}", cfg.mode).to_lowercase()).unwrap_or_else(|| "off".to_string()),
-                                h2_enabled = true,
+                                h2_enabled = tls_cfg.http2,
                                 "Proxy listening (HTTPS/TLS)"
                             );
                             if is_primary {
@@ -817,7 +819,9 @@ fn main() {
 
                 match build_tls_settings(tls_store.clone(), client_auth_state.clone()) {
                     Ok(mut settings) => {
-                        settings.enable_h2();
+                        if tls_cfg.http2 {
+                            settings.enable_h2();
+                        }
                         lb_service.add_tls_with_settings(&tls_listen, None, settings);
                         tracing::info!(
                             listener = %label,
@@ -826,7 +830,7 @@ fn main() {
                             prefix = %consul_tls.cert_prefix,
                             strict_sni = consul_tls.strict_sni,
                             client_auth = client_auth_config.as_ref().map(|cfg| format!("{:?}", cfg.mode).to_lowercase()).unwrap_or_else(|| "off".to_string()),
-                            h2_enabled = true,
+                            h2_enabled = tls_cfg.http2,
                             "Proxy listening (HTTPS/TLS)"
                         );
                         if is_primary {

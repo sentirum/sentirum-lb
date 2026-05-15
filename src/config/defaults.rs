@@ -203,6 +203,7 @@ impl Default for TlsConfig {
             client_ca_consul_prefix: String::new(),
             client_ca_upgrade_cn: String::new(),
             ocsp_stapling_enabled: false,
+            http2: true,
         }
     }
 }

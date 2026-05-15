@@ -282,4 +282,15 @@ pub struct TlsConfig {
     /// Note: actual TLS stapling depends on Pingora exposing the SSL callback.
     #[serde(default)]
     pub ocsp_stapling_enabled: bool,
+    /// Advertise HTTP/2 in TLS ALPN (default: true).
+    /// Set to false when downstream WebSocket clients are broken by Pingora's
+    /// lack of RFC 8441 (Extended CONNECT) support — browsers will fall back to
+    /// HTTP/1.1 and WS upgrade works reliably.
+    /// See Issue #19 / sentirum-lb-prod-deployed anchor for context.
+    #[serde(default = "default_tls_http2")]
+    pub http2: bool,
+}
+
+fn default_tls_http2() -> bool {
+    true
 }
