@@ -281,9 +281,9 @@ impl CircuitBreaker {
         let state = self.state_atomic.load(Ordering::Acquire);
         match state & STATE_MASK {
             STATE_CLOSED => {
-                self.error_count.fetch_add(1, Ordering::Relaxed);
-                let window_len = {
+                let (window_len, errors) = {
                     let mut window = self.window.lock();
+                    self.error_count.fetch_add(1, Ordering::Relaxed);
                     if window.len() >= self.window_size
                         && let Some(was_error) = window.pop_front()
                         && was_error
@@ -291,7 +291,11 @@ impl CircuitBreaker {
                         self.error_count.fetch_sub(1, Ordering::Relaxed);
                     }
                     window.push_back(true);
-                    window.len()
+                    // Read error_count inside the lock to prevent a concurrent
+                    // pop_front + fetch_sub from making our count stale (Issue #17 #1).
+                    let len = window.len();
+                    let errs = self.error_count.load(Ordering::Relaxed);
+                    (len, errs)
                 };
                 // O(1) threshold check using the maintained error counter.
                 // Open the circuit when BOTH conditions are met:
@@ -299,11 +303,6 @@ impl CircuitBreaker {
                 //   2. At least min_samples requests observed
                 // min_samples = max(window_size / 4, 5) to avoid triggering on
                 // tiny samples while still protecting against 100% failure rates.
-                //
-                // Re-read error_count after releasing the window lock to avoid
-                // using a stale value — another thread may have popped an error
-                // entry and decremented the counter between our fetch_add and here.
-                let errors = self.error_count.load(Ordering::Relaxed);
                 let threshold = self.window_size * self.error_threshold as usize / 100;
                 let min_samples = (self.window_size / 4).max(5).min(self.window_size);
                 if errors >= threshold as u64 && window_len >= min_samples {
@@ -323,9 +322,13 @@ impl CircuitBreaker {
                 self.transition_to_open();
                 tracing::warn!("Circuit breaker REOPENED — probe failed");
             }
+            // STATE_OPEN: Do NOT reset opened_at_ms here.
+            // Previously this bumped opened_at_ms on every call, preventing
+            // recovery_elapsed() from ever returning true and permanently
+            // locking the circuit in Open state (Issue #17 #2).
             STATE_OPEN => {
-                self.opened_at_ms
-                    .store(monotonic_elapsed_ms(), Ordering::Relaxed);
+                // No-op: opened_at_ms is set once in transition_to_open()
+                // and must not be overwritten while the circuit remains Open.
             }
             _ => {}
         }
@@ -402,6 +405,11 @@ impl CircuitBreaker {
             CircuitState::HalfOpen => {
                 metrics
                     .circuit_breaker_reopen_total
+                    .fetch_add(1, Ordering::Relaxed);
+                // Also increment open_total so it reflects all transitions to Open
+                // (Issue #17 #16 — previously only Closed→Open was counted).
+                metrics
+                    .circuit_breaker_open_total
                     .fetch_add(1, Ordering::Relaxed);
             }
             CircuitState::Closed => {
@@ -783,5 +791,48 @@ mod tests {
                 .iter()
                 .any(|t| t.from == CircuitState::HalfOpen && t.to == CircuitState::Open)
         );
+    }
+
+    /// Regression test for Issue #17 #2:
+    /// Previously, record_error in Open state would keep bumping opened_at_ms,
+    /// preventing recovery_elapsed() from ever returning true and permanently
+    /// locking the circuit breaker in Open state.
+    #[test]
+    fn test_circuit_breaker_open_state_does_not_bump_opened_at() {
+        let config = CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 10,
+            recovery_timeout_secs: 0, // immediate recovery for test
+            half_open_max_requests: 1,
+        };
+        let cb = CircuitBreaker::with_config(config);
+
+        // Fill window to trigger Open
+        for _ in 0..5 {
+            cb.record_success();
+        }
+        for _ in 0..5 {
+            cb.record_error();
+        }
+        assert_eq!(cb.current_state(), CircuitState::Open);
+
+        let opened_at = cb.opened_at_ms.load(Ordering::Relaxed);
+
+        // Simulate additional errors arriving while Open
+        for _ in 0..10 {
+            cb.record_error();
+        }
+
+        // opened_at_ms must NOT have been bumped
+        let opened_at_after = cb.opened_at_ms.load(Ordering::Relaxed);
+        assert_eq!(
+            opened_at, opened_at_after,
+            "opened_at_ms should not change while circuit remains Open"
+        );
+
+        // With recovery_timeout_secs=0, the circuit should still be able to
+        // transition to HalfOpen (recovery_elapsed() returns true immediately).
+        assert_eq!(cb.current_state(), CircuitState::Open);
+        assert!(cb.recovery_elapsed(), "recovery should be possible after errors in Open state");
     }
 }

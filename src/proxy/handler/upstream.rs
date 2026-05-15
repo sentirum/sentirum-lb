@@ -151,7 +151,7 @@ impl SentirumProxy {
         ctx: &mut ProxyCtx,
     ) -> pingora::Result<Box<HttpPeer>> {
         let (host, path) = extract_host_path(session);
-        let headers = session.req_header().headers.clone();
+        let headers = &session.req_header().headers;
 
         tracing::debug!(host, path, "Looking up route");
 
@@ -172,24 +172,9 @@ impl SentirumProxy {
 
         tracing::debug!(host, path, target_url = %target.url, "Route found");
 
-        if !target.try_acquire_rate_limit(
-            config.proxy.rate_limit_per_target,
-            config.proxy.rate_limit_burst,
-        ) {
-            tracing::warn!(
-                host,
-                path,
-                target_url = %target.url,
-                rate_limit = config.proxy.rate_limit_per_target,
-                burst = config.proxy.rate_limit_burst,
-                "Rate limit exceeded"
-            );
-            crate::metrics::prometheus::global()
-                .rate_limit_rejected_total
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return Err(Error::new(ErrorType::HTTPStatus(429)));
-        }
-
+        // Order: CB check first, then rate-limit, then connection slot.
+        // This avoids rate-limit token leak when CB rejects and falls back
+        // to a different target (Issue #17 #5).
         if config.proxy.circuit_breaker_enabled
             && !target.health_tracker.circuit_breaker().allow_request()
         {
@@ -246,6 +231,25 @@ impl SentirumProxy {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Err(Error::new(ErrorType::HTTPStatus(503)));
             }
+        }
+
+        // Rate-limit check comes after CB, so CB fast-fail (503) doesn't leak tokens.
+        if !target.try_acquire_rate_limit(
+            config.proxy.rate_limit_per_target,
+            config.proxy.rate_limit_burst,
+        ) {
+            tracing::warn!(
+                host,
+                path,
+                target_url = %target.url,
+                rate_limit = config.proxy.rate_limit_per_target,
+                burst = config.proxy.rate_limit_burst,
+                "Rate limit exceeded"
+            );
+            crate::metrics::prometheus::global()
+                .rate_limit_rejected_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Err(Error::new(ErrorType::HTTPStatus(429)));
         }
 
         if !target.try_acquire_connection_slot(config.proxy.max_connections as u64) {

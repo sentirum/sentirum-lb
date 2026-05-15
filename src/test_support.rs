@@ -6,6 +6,7 @@ use crate::config::{
     TcpConfig, TlsConfig, shared_config,
 };
 use crate::route::registry::ManagedRouteTable;
+use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -86,6 +87,7 @@ pub fn admin_test_state_with(
         sessions: Arc::new(RwLock::new(HashMap::new())),
         login_attempts: Arc::new(dashmap::DashMap::new()),
         file_certs: Vec::new(),
+        trusted_proxies: Arc::new(ArcSwap::from_pointee(Vec::<crate::proxy::handler::CidrRange>::new())),
         topology_flow_cache: Arc::new(TopologyFlowCache::new()),
         metrics_stream_tx: Arc::new(RwLock::new(None)),
     }

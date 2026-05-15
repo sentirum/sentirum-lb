@@ -260,21 +260,24 @@ pub(super) async fn admin_auth_middleware(
                     .filter_map(|pair| pair.split_once('='))
                     .find(|(k, _)| *k == "token")
                     .map(|(_, v)| {
-                        let mut decoded = String::with_capacity(v.len());
+                        // Percent-decode into a byte buffer first, then
+                        // convert to UTF-8. Values 0x80-0xFF are not valid
+                        // single-byte UTF-8 chars — decoding bytes first avoids
+                        // Latin-1 mis-interpretation (Issue #17 #12).
+                        let mut buf = Vec::with_capacity(v.len());
                         let mut bytes = v.bytes();
                         while let Some(b) = bytes.next() {
                             if b == b'%' {
                                 let hi = bytes.next().unwrap_or(b'0');
                                 let lo = bytes.next().unwrap_or(b'0');
-                                let val = hex_val(hi) << 4 | hex_val(lo);
-                                decoded.push(val as char);
+                                buf.push(hex_val(hi) << 4 | hex_val(lo));
                             } else if b == b'+' {
-                                decoded.push(' ');
+                                buf.push(b' ');
                             } else {
-                                decoded.push(b as char);
+                                buf.push(b);
                             }
                         }
-                        decoded
+                        String::from_utf8_lossy(&buf).into_owned()
                     })
             })
             .map(

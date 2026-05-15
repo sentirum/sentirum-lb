@@ -107,9 +107,6 @@ fn unsupported_runtime_updates(update: &ConfigUpdateRequest) -> Vec<&'static str
         if proxy.pool_size.is_some() {
             unsupported.push("proxy.pool_size");
         }
-        if proxy.trusted_proxies.is_some() {
-            unsupported.push("proxy.trusted_proxies");
-        }
     }
     unsupported
 }
@@ -131,7 +128,7 @@ fn runtime_config_capabilities() -> serde_json::Value {
         "logging_format": true,
         "pool_size": false,
         "enable_h2c": false,
-        "trusted_proxies": false,
+        "trusted_proxies": true,
     })
 }
 
@@ -342,6 +339,9 @@ pub(super) async fn config_update_handler(
         if let Some(v) = proxy.rate_limit_burst {
             new_proxy.rate_limit_burst = v;
         }
+        if let Some(v) = &proxy.trusted_proxies {
+            new_proxy.trusted_proxies = v.clone();
+        }
     }
 
     if let Some(logging) = &update.logging {
@@ -382,6 +382,21 @@ pub(super) async fn config_update_handler(
     // because set_ttl only performs an atomic swap + cache clear.
     crate::route::target::global_dns_cache().set_ttl(dns_ttl, dns_negative_ttl);
     state.config.store(Arc::new(temp_config));
+
+    // Hot-reload trusted proxy CIDR ranges (Issue #17 #9).
+    if let Some(proxy) = &update.proxy {
+        if proxy.trusted_proxies.is_some() {
+            let new_config = state.config.load();
+            let parsed: Vec<crate::proxy::handler::CidrRange> = new_config
+                .proxy
+                .trusted_proxies
+                .iter()
+                .filter_map(|s| crate::proxy::handler::CidrRange::parse(s))
+                .collect();
+            drop(new_config);
+            state.trusted_proxies.store(Arc::new(parsed));
+        }
+    }
 
     if old_cb_config != new_cb_config {
         state.route_table.reconfigure_circuit_breaker(new_cb_config);
@@ -425,6 +440,17 @@ pub(super) async fn config_reset_handler(
     // Apply DNS TTL *before* config store for consistency.
     crate::route::target::global_dns_cache().set_ttl(dns_ttl, dns_negative_ttl);
     state.config.store(Arc::new(new_config));
+
+    // Reload trusted proxy CIDR ranges from the reset config.
+    let reset_config = state.config.load();
+    let parsed: Vec<crate::proxy::handler::CidrRange> = reset_config
+        .proxy
+        .trusted_proxies
+        .iter()
+        .filter_map(|s| crate::proxy::handler::CidrRange::parse(s))
+        .collect();
+    drop(reset_config);
+    state.trusted_proxies.store(Arc::new(parsed));
 
     if old_cb_config != new_cb_config {
         state.route_table.reconfigure_circuit_breaker(new_cb_config);

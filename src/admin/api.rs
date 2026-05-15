@@ -17,6 +17,7 @@ use crate::admin::topology_flow::TopologyFlowCache;
 use crate::config::{Config, SharedConfig};
 use crate::proxy::tls::{DynamicCertStore, DynamicClientCaStore, SharedFileCert, TlsCertConfig};
 use crate::route::registry::ManagedRouteTable;
+use arc_swap::ArcSwap;
 use axum::Router;
 use axum::extract::{Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -54,6 +55,8 @@ pub struct AdminState {
     pub login_attempts: Arc<dashmap::DashMap<String, (u32, std::time::Instant)>>,
     /// File-based TLS certificates that support manual hot-reload.
     pub file_certs: Vec<(String, SharedFileCert, TlsCertConfig)>,
+    /// Hot-reloadable trusted proxy CIDR ranges (shared with proxy handler).
+    pub trusted_proxies: Arc<ArcSwap<Vec<crate::proxy::handler::CidrRange>>>,
     /// Cached short-window flow metrics for topology rendering.
     pub topology_flow_cache: Arc<TopologyFlowCache>,
     /// Metrics SSE stream sender — lazily initialized, stopped when no receivers.
@@ -271,6 +274,7 @@ pub async fn run_admin_server(
     client_ca_store: Option<Arc<DynamicClientCaStore>>,
     log_buffer: Option<Arc<crate::admin::logs::LogBuffer>>,
     file_certs: Vec<(String, SharedFileCert, TlsCertConfig)>,
+    trusted_proxies: Arc<ArcSwap<Vec<crate::proxy::handler::CidrRange>>>,
 ) {
     let config_snapshot = config.load();
     let addr = config_snapshot.server.admin_listen.clone();
@@ -296,6 +300,7 @@ pub async fn run_admin_server(
         sessions: Arc::new(RwLock::new(HashMap::new())),
         login_attempts: Arc::new(dashmap::DashMap::new()),
         file_certs,
+        trusted_proxies,
         topology_flow_cache: Arc::new(TopologyFlowCache::new()),
         metrics_stream_tx: Arc::new(RwLock::new(None)),
     };

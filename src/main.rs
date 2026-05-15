@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use arc_swap::ArcSwap;
 use clap::Parser;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -301,6 +302,7 @@ struct AdminBackgroundService {
         sentirum_lb::proxy::tls::SharedFileCert,
         sentirum_lb::proxy::tls::TlsCertConfig,
     )>,
+    trusted_proxies: Arc<ArcSwap<Vec<sentirum_lb::proxy::handler::CidrRange>>>,
 }
 
 struct HealthCheckBackgroundService {
@@ -319,6 +321,7 @@ impl BackgroundService for AdminBackgroundService {
                 self.client_ca_store.clone(),
                 self.log_buffer.clone(),
                 self.file_certs.clone(),
+                self.trusted_proxies.clone(),
             ) => {}
             _ = shutdown.changed() => {
                 tracing::info!("Admin background service shutting down");
@@ -524,7 +527,8 @@ fn main() {
 
     // Create proxy service
     let runtime_config = sentirum_lb::config::shared_config(config.clone());
-    let proxy_handler = SentirumProxy::new(managed_table.clone(), runtime_config.clone());
+    let trusted_proxies_arc = sentirum_lb::proxy::handler::parse_trusted_proxies(&runtime_config.load().proxy.trusted_proxies);
+    let proxy_handler = SentirumProxy::new(managed_table.clone(), runtime_config.clone(), trusted_proxies_arc.clone());
     let mut lb_service = pingora::proxy::http_proxy_service(&server.configuration, proxy_handler);
     if config.server.workers > 0 {
         lb_service.threads = Some(config.server.workers);
@@ -918,6 +922,7 @@ fn main() {
             client_ca_store: client_ca_stores_for_admin.first().cloned(),
             log_buffer: Some(sentirum_lb::admin::logs::global_log_buffer()),
             file_certs: file_cert_handles.clone(),
+            trusted_proxies: trusted_proxies_arc,
         },
     );
     admin_service.threads = Some(1);
