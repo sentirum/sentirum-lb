@@ -384,18 +384,18 @@ pub(super) async fn config_update_handler(
     state.config.store(Arc::new(temp_config));
 
     // Hot-reload trusted proxy CIDR ranges (Issue #17 #9).
-    if let Some(proxy) = &update.proxy {
-        if proxy.trusted_proxies.is_some() {
-            let new_config = state.config.load();
-            let parsed: Vec<crate::proxy::handler::CidrRange> = new_config
-                .proxy
-                .trusted_proxies
-                .iter()
-                .filter_map(|s| crate::proxy::handler::CidrRange::parse(s))
-                .collect();
-            drop(new_config);
-            state.trusted_proxies.store(Arc::new(parsed));
-        }
+    if let Some(proxy) = &update.proxy
+        && proxy.trusted_proxies.is_some()
+    {
+        let new_config = state.config.load();
+        let parsed: Vec<crate::proxy::handler::CidrRange> = new_config
+            .proxy
+            .trusted_proxies
+            .iter()
+            .filter_map(|s| crate::proxy::handler::CidrRange::parse(s))
+            .collect();
+        drop(new_config);
+        state.trusted_proxies.store(Arc::new(parsed));
     }
 
     if old_cb_config != new_cb_config {

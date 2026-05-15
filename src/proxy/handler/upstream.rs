@@ -163,7 +163,7 @@ impl SentirumProxy {
                 MatcherKind::from_config(&config.proxy.matcher),
                 &config.proxy.strategy,
                 config.proxy.circuit_breaker_enabled,
-                &headers,
+                headers,
             )
             .ok_or_else(|| {
                 tracing::warn!(host, path, "No route found");
@@ -198,7 +198,7 @@ impl SentirumProxy {
                     .find(|t| {
                         t.url != target.url
                             && t.health_tracker.is_probe_healthy()
-                            && (!any_header_constraint || t.matches_headers(&headers))
+                            && (!any_header_constraint || t.matches_headers(headers))
                             && t.health_tracker.circuit_breaker().allow_request()
                     })
                     .cloned();
