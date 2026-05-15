@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use arc_swap::ArcSwap;
+use async_trait::async_trait;
 use clap::Parser;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -527,8 +527,14 @@ fn main() {
 
     // Create proxy service
     let runtime_config = sentirum_lb::config::shared_config(config.clone());
-    let trusted_proxies_arc = sentirum_lb::proxy::handler::parse_trusted_proxies(&runtime_config.load().proxy.trusted_proxies);
-    let proxy_handler = SentirumProxy::new(managed_table.clone(), runtime_config.clone(), trusted_proxies_arc.clone());
+    let trusted_proxies_arc = sentirum_lb::proxy::handler::parse_trusted_proxies(
+        &runtime_config.load().proxy.trusted_proxies,
+    );
+    let proxy_handler = SentirumProxy::new(
+        managed_table.clone(),
+        runtime_config.clone(),
+        trusted_proxies_arc.clone(),
+    );
     let mut lb_service = pingora::proxy::http_proxy_service(&server.configuration, proxy_handler);
     if config.server.workers > 0 {
         lb_service.threads = Some(config.server.workers);

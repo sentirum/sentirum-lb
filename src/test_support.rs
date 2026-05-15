@@ -87,7 +87,9 @@ pub fn admin_test_state_with(
         sessions: Arc::new(RwLock::new(HashMap::new())),
         login_attempts: Arc::new(dashmap::DashMap::new()),
         file_certs: Vec::new(),
-        trusted_proxies: Arc::new(ArcSwap::from_pointee(Vec::<crate::proxy::handler::CidrRange>::new())),
+        trusted_proxies: Arc::new(ArcSwap::from_pointee(
+            Vec::<crate::proxy::handler::CidrRange>::new(),
+        )),
         topology_flow_cache: Arc::new(TopologyFlowCache::new()),
         metrics_stream_tx: Arc::new(RwLock::new(None)),
     }

@@ -653,7 +653,7 @@ mod tests {
     fn test_ssrf_blocks_ipv4_mapped_ipv6_private() {
         let ip = std::net::IpAddr::V6("::ffff:10.0.0.1".parse().unwrap());
         assert!(!is_ip_always_blocked(&ip)); // 10.x is RFC1918, not "always blocked"
-        assert!(is_ip_private(&ip));         // but it IS private
+        assert!(is_ip_private(&ip)); // but it IS private
     }
 
     #[test]

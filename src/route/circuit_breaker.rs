@@ -833,6 +833,9 @@ mod tests {
         // With recovery_timeout_secs=0, the circuit should still be able to
         // transition to HalfOpen (recovery_elapsed() returns true immediately).
         assert_eq!(cb.current_state(), CircuitState::Open);
-        assert!(cb.recovery_elapsed(), "recovery should be possible after errors in Open state");
+        assert!(
+            cb.recovery_elapsed(),
+            "recovery should be possible after errors in Open state"
+        );
     }
 }

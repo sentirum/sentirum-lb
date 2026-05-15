@@ -146,7 +146,11 @@ pub fn parse_trusted_proxies(raw: &[String]) -> Arc<ArcSwap<Vec<CidrRange>>> {
 }
 
 impl SentirumProxy {
-    pub fn new(route_table: Arc<ManagedRouteTable>, config: SharedConfig, trusted_proxies: Arc<ArcSwap<Vec<CidrRange>>>) -> Self {
+    pub fn new(
+        route_table: Arc<ManagedRouteTable>,
+        config: SharedConfig,
+        trusted_proxies: Arc<ArcSwap<Vec<CidrRange>>>,
+    ) -> Self {
         Self {
             route_table,
             config,
