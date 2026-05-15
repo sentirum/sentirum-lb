@@ -224,7 +224,6 @@ impl ProxyHttp for SentirumProxy {
 
             let mut resp = ResponseHeader::build(200, None)?;
             resp.insert_header("Content-Type", "application/json")?;
-            resp.insert_header("X-Served-By", "sentirum-lb")?;
 
             session.write_response_header(Box::new(resp), false).await?;
             session
@@ -284,7 +283,6 @@ impl ProxyHttp for SentirumProxy {
     {
         // Store response status for access logging
         ctx.response_status = upstream_response.status.as_u16();
-        upstream_response.insert_header("X-Served-By", "sentirum-lb")?;
         Ok(())
     }
 
