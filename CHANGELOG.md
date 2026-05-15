@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-05-15
+
+### Fixed
+
+- **Hot-path clone elimination (PERF-HOT-1)** — `lookup_target()` no longer clones the full target list on every request. Non-header-constrained routes borrow directly from the ArcSwap snapshot via a `Borrowed`/`Owned` enum, eliminating N×Arc clones and 2 Vec allocations per request
+- **Login rate limit TOCTOU** — replaced `retain()`→`get()`→`entry()` flow with atomic `DashMap::entry()` + `and_modify`/`or_insert` to prevent concurrent logins exceeding the rate limit
+- **Query-token auth false 401s** — changed `try_read()` to `read().await` in SSE/dashboard auth path to prevent false 401 responses during login/logout write-lock contention
+- **Metrics stream state coupling** — replaced `OnceLock` global static with per-state `RwLock<Option<watch::Sender>>` + lazy init + auto-stop when all receivers disconnect; fixes wrong-state-publish in test and multi-instance scenarios
+- **Consul watcher index reset** — explicit detection and logging when Consul server restart causes index reset (`new_index < last_index`); prevents tight query loops on both service and KV watchers
+- **Config update atomicity** — moved `dns_cache.set_ttl()` before `config.store()` in both update and reset handlers to eliminate micro-window of inconsistent DNS + proxy settings
+
+### Changed
+
+- **`matching_routes()` stack allocation** — `Vec` → `SmallVec<[&Arc<Route>; 4]>` for zero-heap-allocation on typical match counts ≤ 4
+- **`all_targets` clone elimination** — `HashSet<String>` → `HashSet<&str>` during route table finalization
+- **`escape_prometheus_label` DRY** — canonical implementation made `pub` in `prometheus.rs`; duplicate in `metrics_handler` replaced with delegate call
+- **Clippy compliance** — resolved `map_or`→`is_none_or`, `match`→`?`, `filter().next()`→`find()`, `filter().cloned().next()`→`find().cloned()`
+
 ## [1.3.0] - 2026-05-13
 
 ### Added
