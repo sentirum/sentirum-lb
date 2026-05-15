@@ -439,18 +439,18 @@ flowchart LR
     classDef data fill:#ecfdf5,stroke:#059669,color:#111827;
     classDef state fill:#fef3c7,stroke:#d97706,color:#111827;
 
-    C[Clients\nHTTP · HTTPS · gRPC · gRPC-Web · WS/WSS]
-    L[Listeners\nPingora HTTP + TLS]
-    H[Handler\nproxy/handler.rs]
-    X[Process\nprotocol + rewrite + forwarded + client_cert]
-    T[Table Lookup\nmatching_routes()]
-    P[Picker\nstrategy + header filters]
-    G[Guards\nprobe -> rate limit -> CB -> max_conn]
-    D[DNS / SSRF\nresolve + validate]
-    U[Upstream\nHTTP/1.1 or HTTP/2]
-    M[Metrics / Logs\naccess.rs + prometheus.rs]
-    RT[Route Table\nArcSwap<Table>]
-    CFG[Config\nArcSwap<Config>]
+    C["Clients<br/>HTTP · HTTPS · gRPC · gRPC-Web · WS/WSS"]
+    L["Listeners<br/>Pingora HTTP + TLS"]
+    H["Handler<br/>proxy/handler.rs"]
+    X["Process<br/>protocol + rewrite + forwarded + client_cert"]
+    T["Table Lookup<br/>matching_routes()"]
+    P["Picker<br/>strategy + header filters"]
+    G["Guards<br/>probe -> rate limit -> CB -> max_conn"]
+    D["DNS / SSRF<br/>resolve + validate"]
+    U["Upstream<br/>HTTP/1.1 or HTTP/2"]
+    M["Metrics / Logs<br/>access.rs + prometheus.rs"]
+    RT["Route Table<br/>ArcSwap<Table>"]
+    CFG["Config<br/>ArcSwap<Config>"]
 
     C --> L --> H --> X --> T --> P --> G --> D --> U --> M
     RT -. snapshot read .-> T
@@ -470,14 +470,14 @@ flowchart LR
     classDef data fill:#ecfdf5,stroke:#059669,color:#111827;
     classDef state fill:#fef3c7,stroke:#d97706,color:#111827;
 
-    C[TCP Clients\nTCP · TCP+SNI · HTTPS+TCP+SNI]
-    L[TCP Listeners\nstatic or dynamic]
-    R[TCP Route Lookup\nport / SNI]
-    D[DNS / SSRF\nresolve + validate]
-    U[Raw TCP Upstream]
-    M[Metrics / Stats]
-    RT[Route Table\nArcSwap<Table>]
-    CFG[Config\nTCP mode / refresh]
+    C["TCP Clients<br/>TCP · TCP+SNI · HTTPS+TCP+SNI"]
+    L["TCP Listeners<br/>static or dynamic"]
+    R["TCP Route Lookup<br/>port / SNI"]
+    D["DNS / SSRF<br/>resolve + validate"]
+    U["Raw TCP Upstream"]
+    M["Metrics / Stats"]
+    RT["Route Table<br/>ArcSwap<Table>"]
+    CFG["Config<br/>TCP mode / refresh"]
 
     C --> L --> R --> D --> U --> M
     RT -. tcp routes .-> R
@@ -496,16 +496,16 @@ flowchart LR
     classDef ctrl fill:#fff7ed,stroke:#ea580c,color:#111827;
     classDef store fill:#fef3c7,stroke:#d97706,color:#111827;
 
-    F[Static Routes File]
-    K[Consul KV]
-    S[Consul Services + Tags]
-    A[Admin API\n/admin/routes + /admin/config]
-    R[Route Registry\nmerge static + KV + service routes]
-    T[Route Table\nArcSwap<Table>]
-    C[SharedConfig\nArcSwap<Config>]
-    H[Health Checker\nprobe loop]
-    W[TLS Watchers\nfile / Consul cert reload]
-    O[Dashboard / Metrics / Logs / Topology]
+    F["Static Routes File"]
+    K["Consul KV"]
+    S["Consul Services + Tags"]
+    A["Admin API<br/>/admin/routes + /admin/config"]
+    R["Route Registry<br/>merge static + KV + service routes"]
+    T["Route Table<br/>ArcSwap<Table>"]
+    C["SharedConfig<br/>ArcSwap<Config>"]
+    H["Health Checker<br/>probe loop"]
+    W["TLS Watchers<br/>file / Consul cert reload"]
+    O["Dashboard / Metrics / Logs / Topology"]
 
     F --> R
     K --> R
