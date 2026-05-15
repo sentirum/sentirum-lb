@@ -2,6 +2,7 @@
 use crate::config::Config;
 use crate::config::SharedConfig;
 use crate::route::registry::ManagedRouteTable;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use pingora::http::ResponseHeader;
 use pingora::modules::http::{
@@ -122,29 +123,34 @@ pub struct SentirumProxy {
     /// Managed routing table with atomic snapshots
     pub route_table: Arc<ManagedRouteTable>,
     pub config: SharedConfig,
-    /// Parsed trusted proxy CIDR ranges
-    pub trusted_proxies: Vec<CidrRange>,
+    /// Parsed trusted proxy CIDR ranges — hot-reloadable via ArcSwap
+    pub trusted_proxies: Arc<ArcSwap<Vec<CidrRange>>>,
+}
+
+/// Parse trusted proxy CIDR strings into CidrRange structs.
+pub fn parse_trusted_proxies(raw: &[String]) -> Arc<ArcSwap<Vec<CidrRange>>> {
+    let parsed: Vec<CidrRange> = raw
+        .iter()
+        .filter_map(|s| {
+            let parsed = CidrRange::parse(s);
+            if parsed.is_none() {
+                tracing::warn!(cidr = %s, "Invalid trusted_proxies CIDR; skipping");
+            }
+            parsed
+        })
+        .collect();
+    if !parsed.is_empty() {
+        tracing::info!(count = parsed.len(), "Loaded trusted proxy ranges");
+    }
+    Arc::new(ArcSwap::from_pointee(parsed))
 }
 
 impl SentirumProxy {
-    pub fn new(route_table: Arc<ManagedRouteTable>, config: SharedConfig) -> Self {
-        let config_snapshot = config.load();
-        let trusted_proxies: Vec<CidrRange> = config_snapshot
-            .proxy
-            .trusted_proxies
-            .iter()
-            .filter_map(|s| {
-                let parsed = CidrRange::parse(s);
-                if parsed.is_none() {
-                    tracing::warn!(cidr = %s, "Invalid trusted_proxies CIDR; skipping");
-                }
-                parsed
-            })
-            .collect();
-        if !trusted_proxies.is_empty() {
-            tracing::info!(count = trusted_proxies.len(), "Loaded trusted proxy ranges");
-        }
-        drop(config_snapshot);
+    pub fn new(
+        route_table: Arc<ManagedRouteTable>,
+        config: SharedConfig,
+        trusted_proxies: Arc<ArcSwap<Vec<CidrRange>>>,
+    ) -> Self {
         Self {
             route_table,
             config,
@@ -263,7 +269,8 @@ impl ProxyHttp for SentirumProxy {
     where
         Self::CTX: Send + Sync,
     {
-        self.prepare_upstream_request(session, upstream_request, ctx, &self.trusted_proxies)
+        let trusted = self.trusted_proxies.load();
+        self.prepare_upstream_request(session, upstream_request, ctx, &trusted)
     }
 
     async fn response_filter(

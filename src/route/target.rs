@@ -537,7 +537,16 @@ pub fn is_ip_private(ip: &std::net::IpAddr) -> bool {
 pub fn is_ip_rfc1918(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => v4.is_private(),
-        std::net::IpAddr::V6(v6) => is_ipv6_unique_local(v6),
+        std::net::IpAddr::V6(v6) => {
+            if is_ipv6_unique_local(v6) {
+                return true;
+            }
+            // IPv4-mapped/compatible IPv6 bypass prevention
+            if let Some(v4) = v6.to_ipv4_mapped().or_else(|| v6.to_ipv4()) {
+                return v4.is_private();
+            }
+            false
+        }
     }
 }
 
@@ -561,10 +570,22 @@ pub fn is_ip_always_blocked(ip: &std::net::IpAddr) -> bool {
             is_cgnat || is_documentation
         }
         std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()
+            // Check native IPv6 restrictions
+            if v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_unicast_link_local()
                 || v6.is_multicast()
+            {
+                return true;
+            }
+            // IPv4-mapped IPv6 bypass prevention (Issue #17 #13).
+            // ::ffff:127.0.0.1 would bypass v6.is_loopback() since only
+            // ::1 is recognized as IPv6 loopback. Recurse into IPv4 checks.
+            // Also covers IPv4-compatible addresses (::127.0.0.1) via to_ipv4().
+            if let Some(v4) = v6.to_ipv4_mapped().or_else(|| v6.to_ipv4()) {
+                return is_ip_always_blocked(&std::net::IpAddr::V4(v4));
+            }
+            false
         }
     }
 }
@@ -597,6 +618,49 @@ mod tests {
         assert!(t.is_host_safe());
         let t = Target::new("svc".into(), "http://1.2.3.4:80/".into());
         assert!(t.is_host_safe());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_ipv4_mapped_ipv6_loopback() {
+        // ::ffff:127.0.0.1 must be blocked — IPv6 is_loopback only catches ::1
+        let ip = std::net::IpAddr::V6("::ffff:127.0.0.1".parse().unwrap());
+        assert!(is_ip_always_blocked(&ip));
+        assert!(is_ip_private(&ip));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_ipv4_compatible_ipv6_loopback() {
+        // ::127.0.0.1 (IPv4-compatible) must also be blocked.
+        // to_ipv4_mapped() doesn't catch this; to_ipv4() does.
+        let ip = std::net::IpAddr::V6("::127.0.0.1".parse().unwrap());
+        assert!(is_ip_always_blocked(&ip));
+        assert!(is_ip_private(&ip));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_ipv4_compatible_ipv6_link_local() {
+        let ip = std::net::IpAddr::V6("::169.254.169.254".parse().unwrap());
+        assert!(is_ip_always_blocked(&ip));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_ipv4_mapped_ipv6_link_local() {
+        let ip = std::net::IpAddr::V6("::ffff:169.254.169.254".parse().unwrap());
+        assert!(is_ip_always_blocked(&ip));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_ipv4_mapped_ipv6_private() {
+        let ip = std::net::IpAddr::V6("::ffff:10.0.0.1".parse().unwrap());
+        assert!(!is_ip_always_blocked(&ip)); // 10.x is RFC1918, not "always blocked"
+        assert!(is_ip_private(&ip)); // but it IS private
+    }
+
+    #[test]
+    fn test_ssrf_allows_ipv4_mapped_ipv6_public() {
+        let ip = std::net::IpAddr::V6("::ffff:8.8.8.8".parse().unwrap());
+        assert!(!is_ip_always_blocked(&ip));
+        assert!(!is_ip_private(&ip));
     }
 
     #[test]

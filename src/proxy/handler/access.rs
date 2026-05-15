@@ -63,6 +63,9 @@ pub(super) async fn record_access_log(
     metrics.disconnect();
 
     if let Some(target) = &ctx.picked_target {
+        // Note: CB fast-fail (503) and rate-limit reject (429) return early
+        // from select_upstream_peer before picked_target is set, so they
+        // never feed back into the circuit breaker (no feedback loop).
         target.release_connection_slot();
 
         let is_error = should_record_target_error(status, error);
