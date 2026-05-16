@@ -186,7 +186,10 @@ impl SentirumProxy {
             // half_open_in_flight=true to reserve a probe slot. Since we're
             // discarding this target in favor of a fallback, release the slot
             // so the target isn't stuck waiting for a callback that will never come.
-            target.health_tracker.circuit_breaker().release_half_open_slot();
+            target
+                .health_tracker
+                .circuit_breaker()
+                .release_half_open_slot();
             let table = self.route_table.get();
             let matcher = MatcherKind::from_config(&config.proxy.matcher);
             let candidate_routes = table.matching_routes(host, path, matcher);

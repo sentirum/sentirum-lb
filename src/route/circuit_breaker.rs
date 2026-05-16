@@ -772,7 +772,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
         let probe_sent = monotonic_elapsed_ms().saturating_sub(200);
-        cb.half_open_probe_sent_at_ms.store(probe_sent, Ordering::Relaxed);
+        cb.half_open_probe_sent_at_ms
+            .store(probe_sent, Ordering::Relaxed);
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         assert!(
