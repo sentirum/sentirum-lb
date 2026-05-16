@@ -243,6 +243,14 @@ impl CircuitBreaker {
         }
     }
 
+    /// Release a half-open probe slot that was reserved by `allow_request()`.
+    /// Call this when the target is discarded (e.g., fallback to another target)
+    /// before any request is actually sent to upstream.
+    #[inline]
+    pub fn release_half_open_slot(&self) {
+        self.half_open_in_flight.store(false, Ordering::Release);
+    }
+
     /// Record a successful request
     pub fn record_success(&self) {
         let state = self.state_atomic.load(Ordering::Acquire);
@@ -749,8 +757,23 @@ mod tests {
         });
         cb.state_atomic.store(STATE_HALF_OPEN, Ordering::Release);
         cb.half_open_in_flight.store(true, Ordering::Release);
-        cb.half_open_probe_sent_at_ms.store(1, Ordering::Relaxed);
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        // Set probe_sent to a time far enough in the past that the auto-reset
+        // logic (reset_threshold = max(recovery_ms, 100) = 100ms) will trigger.
+        // Use a small positive value to satisfy the `probe_sent > 0` guard.
+        let now = monotonic_elapsed_ms();
+        // Ensure probe_sent is positive and far enough in the past.
+        // If now < 200, just wait until monotonic clock advances past 200.
+        if now < 200 {
+            std::thread::sleep(std::time::Duration::from_millis(200 - now + 1));
+        }
+        let probe_sent = monotonic_elapsed_ms().saturating_sub(200);
+        // Guard: probe_sent must be > 0 for the auto-reset to trigger.
+        if probe_sent == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        let probe_sent = monotonic_elapsed_ms().saturating_sub(200);
+        cb.half_open_probe_sent_at_ms.store(probe_sent, Ordering::Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(10));
 
         assert!(
             cb.allow_request(),

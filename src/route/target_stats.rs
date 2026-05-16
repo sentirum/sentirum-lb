@@ -8,6 +8,8 @@ use super::circuit_breaker::monotonic_secs;
 use super::health_tracker::TargetHealthTracker;
 use super::target::CircuitBreakerConfig;
 
+use crate::proxy::ratelimit::TokenBucket;
+
 /// Prune dead Weak entries from a HashMap when it exceeds a threshold.
 fn prune_dead<T>(map: &mut HashMap<String, Weak<T>>) {
     map.retain(|_, weak| weak.strong_count() > 0);
@@ -21,6 +23,7 @@ pub struct TargetStatsRegistry {
     stats: Mutex<HashMap<String, Weak<TargetStats>>>,
     edge_stats: Mutex<HashMap<String, Weak<TargetStats>>>,
     health_trackers: Mutex<HashMap<String, Weak<TargetHealthTracker>>>,
+    rate_limiters: Mutex<HashMap<String, Weak<TokenBucket>>>,
 }
 
 impl TargetStatsRegistry {
@@ -111,6 +114,25 @@ impl TargetStatsRegistry {
         );
         entries.insert(key.to_string(), Arc::downgrade(&tracker));
         tracker
+    }
+
+    pub fn rate_limiter_for(&self, key: &str) -> Arc<TokenBucket> {
+        let mut entries = self.rate_limiters.lock().unwrap_or_else(|e| {
+            tracing::warn!("Target rate limiter registry lock was poisoned; recovering");
+            e.into_inner()
+        });
+
+        if let Some(limiter) = entries.get(key).and_then(Weak::upgrade) {
+            return limiter;
+        }
+
+        if entries.len() > REGISTRY_PRUNE_THRESHOLD {
+            prune_dead(&mut entries);
+        }
+
+        let limiter = Arc::new(TokenBucket::new());
+        entries.insert(key.to_string(), Arc::downgrade(&limiter));
+        limiter
     }
 
     pub fn clear_health_trackers(&self) {

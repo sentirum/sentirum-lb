@@ -181,6 +181,12 @@ impl SentirumProxy {
             // CB rejected after lookup — try inline fallback before failing.
             // This handles the TOCTOU race where can_accept_request() returned true
             // during lookup_target but allow_request() fails here.
+            //
+            // If the target was in half-open state, allow_request() just set
+            // half_open_in_flight=true to reserve a probe slot. Since we're
+            // discarding this target in favor of a fallback, release the slot
+            // so the target isn't stuck waiting for a callback that will never come.
+            target.health_tracker.circuit_breaker().release_half_open_slot();
             let table = self.route_table.get();
             let matcher = MatcherKind::from_config(&config.proxy.matcher);
             let candidate_routes = table.matching_routes(host, path, matcher);

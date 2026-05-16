@@ -479,7 +479,7 @@ impl Table {
             health_tracker: self.health_tracker_for(&def.dst),
             stats: self.stats_for(&def.dst),
             edge_stats: self.edge_stats_for(&edge_stats_key),
-            rate_limiter: Arc::new(crate::proxy::ratelimit::TokenBucket::new()),
+            rate_limiter: self.rate_limiter_for(&def.dst),
         };
         target.pre_parse();
 
@@ -708,6 +708,13 @@ impl Table {
                         .unwrap_or_default(),
                 )
             })
+    }
+
+    fn rate_limiter_for(&self, key: &str) -> Arc<crate::proxy::ratelimit::TokenBucket> {
+        self.stats_registry
+            .as_ref()
+            .map(|registry| registry.rate_limiter_for(key))
+            .unwrap_or_else(|| Arc::new(crate::proxy::ratelimit::TokenBucket::new()))
     }
 
     /// Get the number of routes in the table.
