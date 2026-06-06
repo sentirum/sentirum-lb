@@ -6,13 +6,23 @@ pub(super) fn configure_peer_options(
     peer: &mut HttpPeer,
     target: &crate::route::target::Target,
     config: &Config,
+    is_streaming: bool,
 ) {
     let timeouts = config.parsed_timeouts();
     peer.options.connection_timeout = Some(timeouts.connect);
-    peer.options.read_timeout = Some(timeouts.read);
+    peer.options.read_timeout = Some(resolve_read_timeout(target, config, is_streaming));
     peer.options.write_timeout = Some(timeouts.write);
     peer.options.idle_timeout = Some(timeouts.idle);
     peer.options.alpn = target.preferred_alpn();
+
+    // TCP keepalive on pooled upstream connections (Issue #22). Without this,
+    // a silently-dead pooled connection keeps being handed out as healthy and
+    // a non-idempotent (POST/PUT/PATCH) request written into it black-holes
+    // until `read_timeout`. `user_timeout` (TCP_USER_TIMEOUT, Linux only)
+    // bounds unacknowledged writes so such a write fails fast instead.
+    if let Some(ka) = config.upstream_keepalive() {
+        peer.options.tcp_keepalive = Some(crate::proxy::keepalive::to_pingora(&ka));
+    }
 
     if target.requires_http2() {
         peer.options.max_h2_streams = config.proxy.upstream_h2_max_streams.max(1);
@@ -26,6 +36,35 @@ pub(super) fn configure_peer_options(
             peer.options.verify_cert = false;
         }
     }
+}
+
+/// Resolve the effective upstream read timeout for a request (Issue #22).
+///
+/// Precedence (highest first):
+/// 1. Per-route `readtimeout=` target option (Fabio-style escape hatch).
+/// 2. Streaming requests (WebSocket/SSE/long-poll) → `stream_read_timeout`
+///    when configured, otherwise fall back to `read_timeout`.
+/// 3. Non-streaming requests → `read_timeout`.
+///
+/// `read_timeout` is an idle-between-reads timeout, so a shorter non-streaming
+/// default lets the LB fail fast on a black-holed upstream instead of waiting
+/// for the downstream (e.g. Cloudflare's 100s origin timeout) to give up.
+pub(super) fn resolve_read_timeout(
+    target: &crate::route::target::Target,
+    config: &Config,
+    is_streaming: bool,
+) -> std::time::Duration {
+    let timeouts = config.parsed_timeouts();
+
+    if let Some(raw) = target.read_timeout_override() {
+        return Config::parse_duration(raw);
+    }
+
+    if is_streaming {
+        return timeouts.stream_read.unwrap_or(timeouts.read);
+    }
+
+    timeouts.read
 }
 
 pub(super) fn rewrite_upstream_uri(

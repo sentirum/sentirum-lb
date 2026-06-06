@@ -47,6 +47,32 @@ pub(super) fn is_websocket_upgrade(header: &pingora_http::RequestHeader) -> bool
         .unwrap_or(false)
 }
 
+/// Detect a Server-Sent Events request via `Accept: text/event-stream`.
+///
+/// SSE responses are long-lived sparse streams; they must use the streaming
+/// read timeout rather than the short non-streaming default (Issue #22).
+///
+/// Only the request `Accept` header is inspected — not the response
+/// `Content-Type: text/event-stream`. The upstream read timeout is fixed at
+/// peer-construction time (`upstream_peer`), before any response header exists,
+/// so response-side detection is architecturally impossible here. Standard SSE
+/// clients always send `Accept: text/event-stream`, so this covers the common
+/// case. Non-standard SSE backends (server-push without a client `Accept`) and
+/// long-polling endpoints (which have no deterministic header signal) must use
+/// the per-route `readtimeout=` target option as the escape hatch.
+pub(super) fn is_sse_request(header: &pingora_http::RequestHeader) -> bool {
+    header
+        .headers
+        .get(http::header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .map(|accept| {
+            accept
+                .split(',')
+                .any(|media| content_type_matches(media, "text/event-stream"))
+        })
+        .unwrap_or(false)
+}
+
 /// Check if content_type matches the given media type prefix, but only if
 /// followed by a parameter delimiter (`;`, space, tab), media type suffix (`+`),
 /// or end-of-string.

@@ -83,9 +83,13 @@ These config values are live and should stay wired unless intentionally redesign
 - `proxy.request_id_header`
 - `proxy.no_route_status`
 - `proxy.connect_timeout`
-- `proxy.read_timeout`
+- `proxy.read_timeout` (non-streaming default; see `stream_read_timeout`)
 - `proxy.write_timeout`
 - `proxy.idle_timeout`
+- `proxy.stream_read_timeout` (read timeout for WebSocket/SSE/long-poll streams)
+- `proxy.upstream_tcp_keepalive` (pooled LB→backend keepalive `"idle,interval,count"`; empty disables)
+- `proxy.downstream_tcp_keepalive` (accepted CDN→LB keepalive; applies to plaintext + all TLS listeners)
+- `proxy.upstream_user_timeout` (`TCP_USER_TIMEOUT`, Linux only; bounds unacked upstream writes)
 - `proxy.enable_h2c`
 - `proxy.upstream_h2_max_streams`
 - `proxy.upstream_h2_ping_interval`
@@ -130,6 +134,7 @@ If you introduce a new config field, wire it into runtime behavior and cover it 
 - `strip` happens before `prepend`
 - Query strings must survive rewrites
 - `host=` route option overrides upstream Host header and TLS SNI
+- `readtimeout=` route option overrides the upstream read timeout for that target (Fabio-style escape hatch, Issue #22); takes precedence over both `read_timeout` and `stream_read_timeout`
 - `grpc` / `grpcs` targets must stay on HTTP/2-capable upstream paths
 - gRPC-Web requests are bridged to native gRPC upstreams in the proxy layer
 - WebSocket support relies on Pingora’s upgrade path; keep upgrade semantics intact
@@ -193,6 +198,8 @@ If you change user-facing behavior, also update:
 - **File-based TLS cert hot-reload**: `FileCertWatcherService` in `src/proxy/tls/watcher.rs` polls cert+key file mtime every 30s and atomically swaps via `ArcSwap<LoadedCertificate>`; new TLS handshakes immediately use refreshed cert; manual reload via `POST /admin/certs/reload`
 - **Dynamic route management**: `POST /admin/routes` for live Fabio-style route addition; `DELETE /admin/routes/static` to clear static routes; routes appear in dashboard immediately
 - **OCSP stapling infrastructure**: `src/proxy/ocsp.rs`; fetcher, cache, and config wiring implemented; actual TLS handshake stapling depends on Pingora exposing `SSL_set_ocsp_resp` callback
+- **TCP keepalive on pooled connections (Issue #22)**: `src/proxy/keepalive.rs` converts the parsed `"idle,interval,count"` config into Pingora's `TcpKeepalive` cross-platform (`user_timeout`/`TCP_USER_TIMEOUT` is Linux-gated). Upstream keepalive is set in `configure_peer_options()` (`src/proxy/handler/rewrite.rs`); downstream keepalive is applied to the plaintext listener (`add_tcp_with_settings`) and every TLS listener (`add_tls_with_settings(..., Some(sock_opts), ...)`) in `src/main.rs`. Detects/evicts silently-dead pooled connections so non-idempotent (POST/PUT/PATCH) requests are not black-holed. **Not covered**: the Fabio-style raw TCP proxy mode (`src/proxy/tcp.rs`) uses its own non-pooled tokio connections and is out of scope.
+- **Streaming-aware read timeout (Issue #22)**: `resolve_read_timeout()` in `src/proxy/handler/rewrite.rs` applies `proxy.read_timeout` to non-streaming requests and `proxy.stream_read_timeout` to streaming ones. Streaming = WebSocket upgrade OR SSE (`Accept: text/event-stream`). Detection is **request-side only**: the upstream read timeout is fixed at peer construction (`upstream_peer`), before any response header exists, so response `Content-Type: text/event-stream` cannot be inspected. Long-polling and non-standard SSE backends (server-push without a client `Accept`) have no deterministic request signal and must use the per-route `readtimeout=` opt, which overrides both defaults.
 
 ## Runtime hot-reloadable settings (via `PUT /admin/config`)
 
@@ -201,7 +208,8 @@ These settings can be changed at runtime without restart:
 - `proxy.matcher` (prefix, iprefix, glob, exact)
 - `proxy.request_id_header`
 - `proxy.no_route_status`
-- `proxy.*_timeout` (connect, read, write, idle)
+- `proxy.*_timeout` (connect, read, write, idle, stream_read)
+- `proxy.upstream_tcp_keepalive`, `proxy.upstream_user_timeout` (take effect on newly-created upstream connections)
 - `proxy.max_connections`
 - `proxy.dns_cache_ttl`, `proxy.dns_negative_cache_ttl`
 - `proxy.circuit_breaker_*` (enabled, error_threshold, window_size, recovery_timeout, half_open_max)
@@ -210,7 +218,7 @@ These settings can be changed at runtime without restart:
 - `proxy.rate_limit_per_target`, `proxy.rate_limit_burst`
 - `logging.level`, `logging.format`
 
-Not hot-reloadable (require restart): `pool_size`, `enable_h2c`, `trusted_proxies`
+Not hot-reloadable (require restart): `pool_size`, `enable_h2c`, `trusted_proxies`, `downstream_tcp_keepalive` (listener socket options are set at bind time; `PUT /admin/config` rejects this field).
 
 ## Commit hygiene
 

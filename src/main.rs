@@ -544,7 +544,16 @@ fn main() {
         server_options.h2c = config.proxy.enable_h2c;
         app.server_options = Some(server_options);
     }
-    lb_service.add_tcp(&config.server.listen);
+    // Downstream (edge/CDN → LB) TCP keepalive on accepted connections (Issue
+    // #22). Applied to the plaintext listener and, below, to every TLS
+    // listener so silently-dead downstream connections are probed/closed
+    // instead of lingering as corpses.
+    let downstream_sock_opts =
+        sentirum_lb::proxy::keepalive::downstream_socket_options(&config);
+    match downstream_sock_opts.as_ref() {
+        Some(opts) => lb_service.add_tcp_with_settings(&config.server.listen, opts.clone()),
+        None => lb_service.add_tcp(&config.server.listen),
+    }
 
     tracing::info!(
         addr = %config.server.listen,
@@ -552,6 +561,7 @@ fn main() {
         pool_size = config.proxy.pool_size,
         max_connections = config.proxy.max_connections,
         h2c_enabled = config.proxy.enable_h2c,
+        downstream_keepalive = downstream_sock_opts.is_some(),
         "Proxy listening (HTTP)"
     );
 
@@ -715,11 +725,16 @@ fn main() {
                             if tls_cfg.http2 {
                                 settings.enable_h2();
                             }
-                            lb_service.add_tls_with_settings(&tls_listen, None, settings);
+                            lb_service.add_tls_with_settings(
+                                &tls_listen,
+                                downstream_sock_opts.clone(),
+                                settings,
+                            );
                             tracing::info!(
                                 listener = %label,
                                 addr = %tls_listen,
                                 source = "file",
+                                downstream_keepalive = downstream_sock_opts.is_some(),
                                 client_auth = client_auth_config.as_ref().map(|cfg| format!("{:?}", cfg.mode).to_lowercase()).unwrap_or_else(|| "off".to_string()),
                                 h2_enabled = tls_cfg.http2,
                                 "Proxy listening (HTTPS/TLS)"
@@ -822,11 +837,16 @@ fn main() {
                         if tls_cfg.http2 {
                             settings.enable_h2();
                         }
-                        lb_service.add_tls_with_settings(&tls_listen, None, settings);
+                        lb_service.add_tls_with_settings(
+                            &tls_listen,
+                            downstream_sock_opts.clone(),
+                            settings,
+                        );
                         tracing::info!(
                             listener = %label,
                             addr = %tls_listen,
                             source = "consul_kv",
+                            downstream_keepalive = downstream_sock_opts.is_some(),
                             prefix = %consul_tls.cert_prefix,
                             strict_sni = consul_tls.strict_sni,
                             client_auth = client_auth_config.as_ref().map(|cfg| format!("{:?}", cfg.mode).to_lowercase()).unwrap_or_else(|| "off".to_string()),

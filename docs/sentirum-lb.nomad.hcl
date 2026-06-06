@@ -77,7 +77,11 @@ matcher = "prefix"
 request_id_header = "X-Request-ID"
 no_route_status = 404
 connect_timeout = "30s"
-read_timeout = "3600s"
+# Issue #22: read_timeout is now the *non-streaming* default. Keep it well
+# below the CDN/edge origin timeout (Cloudflare ~100s) so the LB fails fast on
+# a dead upstream instead of black-holing a POST until the edge gives up (524).
+# Long-lived streams use stream_read_timeout below.
+read_timeout = "60s"
 write_timeout = "3600s"
 idle_timeout = "90s"
 enable_h2c = true
@@ -85,6 +89,19 @@ upstream_h2_max_streams = 128
 upstream_h2_ping_interval = ""
 pool_size = 128
 max_connections = 10000
+
+# TCP keepalive on pooled connections (Issue #22). Detects/evicts silently-dead
+# pooled connections before a non-idempotent request is written into them.
+# Format: "idle,interval,count". Empty disables.
+upstream_tcp_keepalive = "15s,5s,3"
+downstream_tcp_keepalive = "15s,5s,3"
+# TCP_USER_TIMEOUT (Linux): bounds unacked writes so a black-holed POST fails
+# in ~30s instead of waiting on read_timeout. Empty/0 = system default.
+upstream_user_timeout = "30s"
+# Streaming responses (WebSocket / SSE `text/event-stream` / long-poll) keep a
+# long read timeout; non-streaming requests use read_timeout above. Per-route
+# override available via the `readtimeout=` target option.
+stream_read_timeout = "3600s"
 
 # Circuit breaker
 circuit_breaker_enabled = true

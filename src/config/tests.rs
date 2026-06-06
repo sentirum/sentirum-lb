@@ -344,3 +344,199 @@ client_ca_path = "/some/ca.pem"
     assert_eq!(config.tls_listeners[0].listen, ":9444");
     assert_eq!(config.tls_listeners[0].client_auth, "required");
 }
+
+// ── Issue #22: TCP keepalive + streaming-aware read timeout ────────────────
+
+#[test]
+fn keepalive_defaults_are_enabled_with_issue22_values() {
+    let proxy = ProxyConfig::default();
+    assert_eq!(proxy.upstream_tcp_keepalive, "15s,5s,3");
+    assert_eq!(proxy.downstream_tcp_keepalive, "15s,5s,3");
+    assert_eq!(proxy.upstream_user_timeout, "30s");
+    assert_eq!(proxy.stream_read_timeout, "3600s");
+}
+
+#[test]
+fn parse_keepalive_parses_valid_spec() {
+    let ka = ParsedKeepalive::parse("15s,5s,3", "30s").expect("valid spec");
+    assert_eq!(ka.idle, Duration::from_secs(15));
+    assert_eq!(ka.interval, Duration::from_secs(5));
+    assert_eq!(ka.count, 3);
+    assert_eq!(ka.user_timeout, Duration::from_secs(30));
+}
+
+#[test]
+fn parse_keepalive_empty_disables() {
+    assert_eq!(ParsedKeepalive::parse("", "30s"), None);
+    assert_eq!(ParsedKeepalive::parse("   ", ""), None);
+}
+
+#[test]
+fn parse_keepalive_empty_user_timeout_means_zero() {
+    let ka = ParsedKeepalive::parse("15s,5s,3", "").expect("valid spec");
+    assert_eq!(ka.user_timeout, Duration::ZERO);
+}
+
+#[test]
+fn parse_keepalive_malformed_disables_gracefully() {
+    // Wrong arity, bad duration, zero/non-numeric count all degrade to None.
+    assert_eq!(ParsedKeepalive::parse("15s,5s", "30s"), None);
+    assert_eq!(ParsedKeepalive::parse("abc,5s,3", "30s"), None);
+    assert_eq!(ParsedKeepalive::parse("15s,5s,0", "30s"), None);
+    assert_eq!(ParsedKeepalive::parse("15s,5s,x", "30s"), None);
+}
+
+#[test]
+fn config_keepalive_accessors_use_proxy_fields() {
+    let proxy = ProxyConfig {
+        upstream_tcp_keepalive: "10s,2s,4".to_string(),
+        upstream_user_timeout: "20s".to_string(),
+        downstream_tcp_keepalive: String::new(),
+        ..ProxyConfig::default()
+    };
+    let config = Config {
+        server: ServerConfig {
+            listen: ":9999".to_string(),
+            admin_listen: "127.0.0.1:9998".to_string(),
+            admin_users: Vec::new(),
+            admin_token: String::new(),
+            workers: 0,
+            drain_timeout: "30s".to_string(),
+        },
+        consul: ConsulConfig {
+            address: "127.0.0.1:8500".to_string(),
+            scheme: "http".to_string(),
+            token: String::new(),
+            kv_prefix: "/sentirum-lb/routes".to_string(),
+            tag_prefix: "urlprefix-".to_string(),
+            poll_interval: "0s".to_string(),
+            service_discovery: true,
+            kv_watching: true,
+            service_whitelist: Vec::new(),
+            service_blacklist: Vec::new(),
+            graceful_shutdown: true,
+            include_warning: false,
+        },
+        proxy,
+        logging: LoggingConfig::default(),
+        tls: TlsConfig::default(),
+        tls_listeners: Vec::new(),
+        parsed_timeouts: Default::default(),
+        tcp: TcpConfig::default(),
+    };
+
+    let up = config.upstream_keepalive().expect("upstream enabled");
+    assert_eq!(up.idle, Duration::from_secs(10));
+    assert_eq!(up.interval, Duration::from_secs(2));
+    assert_eq!(up.count, 4);
+    assert_eq!(up.user_timeout, Duration::from_secs(20));
+
+    // Empty downstream spec disables keepalive.
+    assert_eq!(config.downstream_keepalive(), None);
+}
+
+#[test]
+fn validate_rejects_malformed_keepalive() {
+    let proxy = ProxyConfig {
+        upstream_tcp_keepalive: "15s,5s".to_string(),
+        ..ProxyConfig::default()
+    };
+    let config = Config {
+        server: ServerConfig {
+            listen: ":9999".to_string(),
+            admin_listen: "127.0.0.1:9998".to_string(),
+            admin_users: Vec::new(),
+            admin_token: String::new(),
+            workers: 0,
+            drain_timeout: "30s".to_string(),
+        },
+        consul: ConsulConfig {
+            address: "127.0.0.1:8500".to_string(),
+            scheme: "http".to_string(),
+            token: String::new(),
+            kv_prefix: "/sentirum-lb/routes".to_string(),
+            tag_prefix: "urlprefix-".to_string(),
+            poll_interval: "0s".to_string(),
+            service_discovery: true,
+            kv_watching: true,
+            service_whitelist: Vec::new(),
+            service_blacklist: Vec::new(),
+            graceful_shutdown: true,
+            include_warning: false,
+        },
+        proxy,
+        logging: LoggingConfig::default(),
+        tls: TlsConfig::default(),
+        tls_listeners: Vec::new(),
+        parsed_timeouts: Default::default(),
+        tcp: TcpConfig::default(),
+    };
+    let error = config.validate().expect("malformed keepalive should fail");
+    assert!(error.contains("proxy.upstream_tcp_keepalive"));
+}
+
+#[test]
+fn validate_accepts_empty_keepalive_as_disabled() {
+    let proxy = ProxyConfig {
+        upstream_tcp_keepalive: String::new(),
+        downstream_tcp_keepalive: String::new(),
+        upstream_user_timeout: String::new(),
+        stream_read_timeout: String::new(),
+        ..ProxyConfig::default()
+    };
+    let config = Config {
+        server: ServerConfig {
+            listen: ":9999".to_string(),
+            admin_listen: "127.0.0.1:9998".to_string(),
+            admin_users: Vec::new(),
+            admin_token: String::new(),
+            workers: 0,
+            drain_timeout: "30s".to_string(),
+        },
+        consul: ConsulConfig {
+            address: "127.0.0.1:8500".to_string(),
+            scheme: "http".to_string(),
+            token: String::new(),
+            kv_prefix: "/sentirum-lb/routes".to_string(),
+            tag_prefix: "urlprefix-".to_string(),
+            poll_interval: "0s".to_string(),
+            service_discovery: true,
+            kv_watching: true,
+            service_whitelist: Vec::new(),
+            service_blacklist: Vec::new(),
+            graceful_shutdown: true,
+            include_warning: false,
+        },
+        proxy,
+        logging: LoggingConfig::default(),
+        tls: TlsConfig::default(),
+        tls_listeners: Vec::new(),
+        parsed_timeouts: Default::default(),
+        tcp: TcpConfig::default(),
+    };
+    assert!(config.validate().is_none(), "empty keepalive should be valid");
+}
+
+#[test]
+fn parsed_timeouts_includes_stream_read() {
+    let proxy = ProxyConfig::default();
+    let parsed = ParsedProxyTimeouts::from_proxy_config(&proxy);
+    assert_eq!(parsed.stream_read, Some(Duration::from_secs(3600)));
+}
+
+#[test]
+fn parsed_timeouts_caches_keepalive() {
+    // Keepalive specs are parsed once into ParsedProxyTimeouts (F1: no
+    // per-request parse/alloc), not re-parsed on every accessor call.
+    let proxy = ProxyConfig::default();
+    let parsed = ParsedProxyTimeouts::from_proxy_config(&proxy);
+    let up = parsed.upstream_keepalive.expect("default enables upstream");
+    assert_eq!(up.idle, Duration::from_secs(15));
+    assert_eq!(up.interval, Duration::from_secs(5));
+    assert_eq!(up.count, 3);
+    assert_eq!(up.user_timeout, Duration::from_secs(30));
+    let down = parsed.downstream_keepalive.expect("default enables downstream");
+    assert_eq!(down.idle, Duration::from_secs(15));
+    // Downstream has no user_timeout (listener sockets); ZERO = system default.
+    assert_eq!(down.user_timeout, Duration::ZERO);
+}

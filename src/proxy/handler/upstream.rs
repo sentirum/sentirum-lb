@@ -286,8 +286,12 @@ impl SentirumProxy {
             }
         };
 
+        // Streaming responses (WebSocket/SSE) keep the long read timeout;
+        // everything else uses the shorter non-streaming default so a dead
+        // upstream fails fast instead of black-holing (Issue #22).
+        let is_streaming = ctx.is_websocket || ctx.is_sse;
         let mut peer = HttpPeer::new(resolved_addr, target.upstream_tls(), host.to_string());
-        configure_peer_options(&mut peer, &target, config.as_ref());
+        configure_peer_options(&mut peer, &target, config.as_ref(), is_streaming);
 
         Ok(Box::new(peer))
     }

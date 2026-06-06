@@ -62,6 +62,36 @@ impl Config {
         );
         validate_duration_field(&mut errors, "tcp.refresh", &self.tcp.refresh, true);
 
+        // Streaming read timeout is optional; validate only when set.
+        if !self.proxy.stream_read_timeout.trim().is_empty() {
+            validate_duration_field(
+                &mut errors,
+                "proxy.stream_read_timeout",
+                &self.proxy.stream_read_timeout,
+                true,
+            );
+        }
+        // upstream_user_timeout is optional (empty/0 = system default).
+        if !self.proxy.upstream_user_timeout.trim().is_empty() {
+            validate_duration_field(
+                &mut errors,
+                "proxy.upstream_user_timeout",
+                &self.proxy.upstream_user_timeout,
+                true,
+            );
+        }
+        // TCP keepalive specs: empty disables; otherwise must be 'idle,interval,count'.
+        validate_keepalive_field(
+            &mut errors,
+            "proxy.upstream_tcp_keepalive",
+            &self.proxy.upstream_tcp_keepalive,
+        );
+        validate_keepalive_field(
+            &mut errors,
+            "proxy.downstream_tcp_keepalive",
+            &self.proxy.downstream_tcp_keepalive,
+        );
+
         // Validate circuit breaker threshold (0-100)
         if self.proxy.circuit_breaker_error_threshold > 100 {
             errors.push(format!(
@@ -230,6 +260,38 @@ impl Config {
         } else {
             Some(errors.join("; "))
         }
+    }
+}
+
+/// Validate a TCP keepalive spec. Empty/blank disables keepalive (valid).
+/// Otherwise must be `idle,interval,count` with valid durations and a positive
+/// integer count.
+fn validate_keepalive_field(errors: &mut Vec<String>, name: &str, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let parts: Vec<&str> = trimmed.split(',').map(str::trim).collect();
+    if parts.len() != 3 {
+        errors.push(format!(
+            "{name} must be 'idle,interval,count' (e.g. '15s,5s,3') or empty, got '{trimmed}'"
+        ));
+        return;
+    }
+    if Config::parse_optional_duration(parts[0]).is_none_or(|d| d.is_zero()) {
+        errors.push(format!("{name} idle must be a positive duration, got '{}'", parts[0]));
+    }
+    if Config::parse_optional_duration(parts[1]).is_none_or(|d| d.is_zero()) {
+        errors.push(format!(
+            "{name} interval must be a positive duration, got '{}'",
+            parts[1]
+        ));
+    }
+    if parts[2].parse::<usize>().ok().filter(|c| *c > 0).is_none() {
+        errors.push(format!(
+            "{name} count must be a positive integer, got '{}'",
+            parts[2]
+        ));
     }
 }
 

@@ -34,6 +34,14 @@ pub struct ProxyConfigUpdate {
     #[serde(default)]
     pub idle_timeout: Option<String>,
     #[serde(default)]
+    pub stream_read_timeout: Option<String>,
+    #[serde(default)]
+    pub upstream_tcp_keepalive: Option<String>,
+    #[serde(default)]
+    pub upstream_user_timeout: Option<String>,
+    #[serde(default)]
+    pub downstream_tcp_keepalive: Option<String>,
+    #[serde(default)]
     pub enable_h2c: Option<bool>,
     #[serde(default)]
     pub upstream_h2_max_streams: Option<usize>,
@@ -107,6 +115,11 @@ fn unsupported_runtime_updates(update: &ConfigUpdateRequest) -> Vec<&'static str
         if proxy.pool_size.is_some() {
             unsupported.push("proxy.pool_size");
         }
+        // Listener socket options are set at bind time; downstream keepalive
+        // cannot be changed without restarting the listeners (Issue #22).
+        if proxy.downstream_tcp_keepalive.is_some() {
+            unsupported.push("proxy.downstream_tcp_keepalive");
+        }
     }
     unsupported
 }
@@ -129,6 +142,10 @@ fn runtime_config_capabilities() -> serde_json::Value {
         "pool_size": false,
         "enable_h2c": false,
         "trusted_proxies": true,
+        "stream_read_timeout": true,
+        "upstream_tcp_keepalive": true,
+        "upstream_user_timeout": true,
+        "downstream_tcp_keepalive": false,
     })
 }
 
@@ -159,6 +176,10 @@ fn public_config_json(config: &Config) -> serde_json::Value {
             "no_route_status": config.proxy.no_route_status,
             "connect_timeout": config.proxy.connect_timeout.clone(),
             "read_timeout": config.proxy.read_timeout.clone(),
+            "stream_read_timeout": config.proxy.stream_read_timeout.clone(),
+            "upstream_tcp_keepalive": config.proxy.upstream_tcp_keepalive.clone(),
+            "upstream_user_timeout": config.proxy.upstream_user_timeout.clone(),
+            "downstream_tcp_keepalive": config.proxy.downstream_tcp_keepalive.clone(),
             "write_timeout": config.proxy.write_timeout.clone(),
             "idle_timeout": config.proxy.idle_timeout.clone(),
             "enable_h2c": config.proxy.enable_h2c,
@@ -284,6 +305,15 @@ pub(super) async fn config_update_handler(
         }
         if let Some(v) = &proxy.idle_timeout {
             new_proxy.idle_timeout = v.clone();
+        }
+        if let Some(v) = &proxy.stream_read_timeout {
+            new_proxy.stream_read_timeout = v.clone();
+        }
+        if let Some(v) = &proxy.upstream_tcp_keepalive {
+            new_proxy.upstream_tcp_keepalive = v.clone();
+        }
+        if let Some(v) = &proxy.upstream_user_timeout {
+            new_proxy.upstream_user_timeout = v.clone();
         }
         if let Some(v) = proxy.upstream_h2_max_streams {
             new_proxy.upstream_h2_max_streams = v;

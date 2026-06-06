@@ -5,7 +5,7 @@ mod validation;
 #[cfg(test)]
 mod tests;
 
-pub use parse::ParsedProxyTimeouts;
+pub use parse::{ParsedKeepalive, ParsedProxyTimeouts};
 
 use defaults::*;
 use serde::Deserialize;
@@ -211,6 +211,29 @@ pub struct ProxyConfig {
     /// internal health checks where TLS verification is not possible.
     #[serde(default)]
     pub health_check_tls_skip_verify: bool,
+    /// TCP keepalive for pooled upstream (LB → backend) connections.
+    /// Format: `"idle,interval,count"` e.g. `"15s,5s,3"`. Empty disables.
+    /// Detects/evicts silently-dead pooled connections before a request is
+    /// written into them (Issue #22).
+    #[serde(default = "default_upstream_tcp_keepalive")]
+    pub upstream_tcp_keepalive: String,
+    /// `TCP_USER_TIMEOUT` for upstream connections (Linux only). Bounds the time
+    /// transmitted data may remain unacknowledged before the connection is
+    /// forcibly closed — converts a black-holed write into a fast failure
+    /// instead of waiting on `read_timeout`. Empty/0 uses system default.
+    #[serde(default = "default_upstream_user_timeout")]
+    pub upstream_user_timeout: String,
+    /// TCP keepalive for accepted downstream (edge/CDN → LB) connections.
+    /// Format: `"idle,interval,count"` e.g. `"15s,5s,3"`. Empty disables.
+    /// Applies to both the plaintext and all TLS listeners.
+    #[serde(default = "default_downstream_tcp_keepalive")]
+    pub downstream_tcp_keepalive: String,
+    /// Read timeout applied to streaming responses (WebSocket upgrades, SSE,
+    /// long-polling). Non-streaming requests use `read_timeout`. This lets the
+    /// LB fail fast on dead non-streaming upstreams while keeping long-lived
+    /// streams alive. Empty falls back to `read_timeout` for all requests.
+    #[serde(default = "default_stream_read_timeout")]
+    pub stream_read_timeout: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]

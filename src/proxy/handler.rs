@@ -113,6 +113,9 @@ pub struct ProxyCtx {
     pub is_grpc_web: bool,
     /// Whether downstream request is a WebSocket upgrade.
     pub is_websocket: bool,
+    /// Whether downstream request is a Server-Sent Events stream
+    /// (`Accept: text/event-stream`). Used to apply the streaming read timeout.
+    pub is_sse: bool,
     /// Approximate number of response bytes received from upstream.
     /// (Tracked via upstream_response_body_filter; downstream bytes are not
     /// directly observable in Pingora's ProxyHttp trait.)
@@ -172,6 +175,7 @@ impl ProxyHttp for SentirumProxy {
             is_grpc: false,
             is_grpc_web: false,
             is_websocket: false,
+            is_sse: false,
             upstream_response_bytes: 0,
         }
     }
@@ -192,6 +196,7 @@ impl ProxyHttp for SentirumProxy {
         ctx.is_grpc_web = is_grpc_web_request(header);
         ctx.is_grpc = ctx.is_grpc_web || is_grpc_request(header);
         ctx.is_websocket = is_websocket_upgrade(header);
+        ctx.is_sse = is_sse_request(header);
 
         if ctx.is_grpc_web {
             let grpc = session
@@ -716,7 +721,7 @@ mod tests {
             crate::route::target::Target::new("svc".into(), "grpcs://example.com/service".into());
         let mut peer = HttpPeer::new("127.0.0.1:443", true, "example.com".into());
 
-        configure_peer_options(&mut peer, &target, &config);
+        configure_peer_options(&mut peer, &target, &config, false);
 
         assert_eq!(peer.options.alpn.get_min_http_version(), 2);
         assert_eq!(peer.options.max_h2_streams, 64);
@@ -725,6 +730,62 @@ mod tests {
             Some(std::time::Duration::from_secs(15))
         );
         assert_eq!(peer.sni, "example.com");
+        // Issue #22: pooled upstream connections get TCP keepalive by default.
+        let ka = peer
+            .options
+            .tcp_keepalive
+            .as_ref()
+            .expect("default config enables upstream keepalive");
+        assert_eq!(ka.idle, std::time::Duration::from_secs(15));
+        assert_eq!(ka.interval, std::time::Duration::from_secs(5));
+        assert_eq!(ka.count, 3);
+    }
+
+    #[test]
+    fn test_configure_peer_options_disables_keepalive_when_empty() {
+        let config = Arc::new(Config {
+            server: crate::config::ServerConfig {
+                listen: ":9999".into(),
+                admin_listen: "127.0.0.1:9998".into(),
+                admin_token: String::new(),
+                admin_users: vec![],
+                workers: 0,
+                drain_timeout: String::new(),
+            },
+            consul: crate::config::ConsulConfig {
+                address: "127.0.0.1:8500".into(),
+                scheme: "http".into(),
+                token: String::new(),
+                kv_prefix: "/sentirum-lb/routes".into(),
+                tag_prefix: "urlprefix-".into(),
+                poll_interval: "0s".into(),
+                service_discovery: true,
+                kv_watching: true,
+                service_whitelist: Vec::new(),
+                service_blacklist: Vec::new(),
+                graceful_shutdown: true,
+                include_warning: false,
+            },
+            proxy: crate::config::ProxyConfig {
+                upstream_tcp_keepalive: String::new(),
+                ..crate::config::ProxyConfig::default()
+            },
+            logging: crate::config::LoggingConfig::default(),
+            tls: crate::config::TlsConfig::default(),
+            tls_listeners: Vec::new(),
+            tcp: crate::config::TcpConfig::default(),
+            parsed_timeouts: Default::default(),
+        });
+        let target =
+            crate::route::target::Target::new("svc".into(), "http://example.com".into());
+        let mut peer = HttpPeer::new("127.0.0.1:80", false, "example.com".into());
+
+        configure_peer_options(&mut peer, &target, &config, false);
+
+        assert!(
+            peer.options.tcp_keepalive.is_none(),
+            "empty upstream_tcp_keepalive should disable keepalive"
+        );
     }
 
     #[test]
@@ -767,7 +828,7 @@ mod tests {
         target.pre_parse();
         let mut peer = HttpPeer::new("127.0.0.1:443", true, "example.com".into());
 
-        configure_peer_options(&mut peer, &target, &config);
+        configure_peer_options(&mut peer, &target, &config, false);
 
         assert_eq!(peer.sni, "override.example.com");
         assert_eq!(peer.options.alpn.get_min_http_version(), 1);
@@ -813,7 +874,7 @@ mod tests {
         target.pre_parse();
         let mut peer = HttpPeer::new("127.0.0.1:443", true, "example.com".into());
 
-        configure_peer_options(&mut peer, &target, &config);
+        configure_peer_options(&mut peer, &target, &config, false);
 
         assert_eq!(peer.sni, "override.example.com");
     }
@@ -843,6 +904,128 @@ mod tests {
         let mut header = pingora_http::RequestHeader::build("GET", b"/socket", None).unwrap();
         header.insert_header("Upgrade", "websocket").unwrap();
         assert!(is_websocket_upgrade(&header));
+    }
+
+    #[test]
+    fn test_sse_request_detection() {
+        let mut header = pingora_http::RequestHeader::build("GET", b"/events", None).unwrap();
+        header.insert_header("Accept", "text/event-stream").unwrap();
+        assert!(is_sse_request(&header));
+
+        // Mixed Accept list still matches.
+        let mut header2 = pingora_http::RequestHeader::build("GET", b"/events", None).unwrap();
+        header2
+            .insert_header("Accept", "text/html, text/event-stream;q=0.9")
+            .unwrap();
+        assert!(is_sse_request(&header2));
+
+        // Plain JSON request is not SSE.
+        let mut header3 = pingora_http::RequestHeader::build("POST", b"/api", None).unwrap();
+        header3.insert_header("Accept", "application/json").unwrap();
+        assert!(!is_sse_request(&header3));
+    }
+
+    #[test]
+    fn test_resolve_read_timeout_streaming_vs_non_streaming() {
+        use crate::proxy::handler::rewrite::resolve_read_timeout;
+        let config = Arc::new(Config {
+            server: crate::config::ServerConfig {
+                listen: ":9999".into(),
+                admin_listen: "127.0.0.1:9998".into(),
+                admin_token: String::new(),
+                admin_users: vec![],
+                workers: 0,
+                drain_timeout: String::new(),
+            },
+            consul: crate::config::ConsulConfig {
+                address: "127.0.0.1:8500".into(),
+                scheme: "http".into(),
+                token: String::new(),
+                kv_prefix: "/sentirum-lb/routes".into(),
+                tag_prefix: "urlprefix-".into(),
+                poll_interval: "0s".into(),
+                service_discovery: true,
+                kv_watching: true,
+                service_whitelist: Vec::new(),
+                service_blacklist: Vec::new(),
+                graceful_shutdown: true,
+                include_warning: false,
+            },
+            proxy: crate::config::ProxyConfig {
+                read_timeout: "30s".into(),
+                stream_read_timeout: "3600s".into(),
+                ..crate::config::ProxyConfig::default()
+            },
+            logging: crate::config::LoggingConfig::default(),
+            tls: crate::config::TlsConfig::default(),
+            tls_listeners: Vec::new(),
+            tcp: crate::config::TcpConfig::default(),
+            parsed_timeouts: Default::default(),
+        });
+        let target = crate::route::target::Target::new("svc".into(), "http://example.com".into());
+
+        // Non-streaming uses the short read_timeout.
+        assert_eq!(
+            resolve_read_timeout(&target, &config, false),
+            std::time::Duration::from_secs(30)
+        );
+        // Streaming uses the long stream_read_timeout.
+        assert_eq!(
+            resolve_read_timeout(&target, &config, true),
+            std::time::Duration::from_secs(3600)
+        );
+    }
+
+    #[test]
+    fn test_resolve_read_timeout_per_route_override_wins() {
+        use crate::proxy::handler::rewrite::resolve_read_timeout;
+        let config = Arc::new(Config {
+            server: crate::config::ServerConfig {
+                listen: ":9999".into(),
+                admin_listen: "127.0.0.1:9998".into(),
+                admin_token: String::new(),
+                admin_users: vec![],
+                workers: 0,
+                drain_timeout: String::new(),
+            },
+            consul: crate::config::ConsulConfig {
+                address: "127.0.0.1:8500".into(),
+                scheme: "http".into(),
+                token: String::new(),
+                kv_prefix: "/sentirum-lb/routes".into(),
+                tag_prefix: "urlprefix-".into(),
+                poll_interval: "0s".into(),
+                service_discovery: true,
+                kv_watching: true,
+                service_whitelist: Vec::new(),
+                service_blacklist: Vec::new(),
+                graceful_shutdown: true,
+                include_warning: false,
+            },
+            proxy: crate::config::ProxyConfig {
+                read_timeout: "30s".into(),
+                stream_read_timeout: "3600s".into(),
+                ..crate::config::ProxyConfig::default()
+            },
+            logging: crate::config::LoggingConfig::default(),
+            tls: crate::config::TlsConfig::default(),
+            tls_listeners: Vec::new(),
+            tcp: crate::config::TcpConfig::default(),
+            parsed_timeouts: Default::default(),
+        });
+        let mut target =
+            crate::route::target::Target::new("svc".into(), "http://example.com".into());
+        target.opts.insert("readtimeout".into(), "120s".into());
+
+        // Override beats both streaming and non-streaming defaults.
+        assert_eq!(
+            resolve_read_timeout(&target, &config, false),
+            std::time::Duration::from_secs(120)
+        );
+        assert_eq!(
+            resolve_read_timeout(&target, &config, true),
+            std::time::Duration::from_secs(120)
+        );
     }
 
     #[test]

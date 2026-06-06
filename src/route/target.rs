@@ -456,6 +456,17 @@ impl Target {
             .unwrap_or(false)
     }
 
+    /// Per-route read timeout override (Fabio-style escape hatch, Issue #22).
+    /// Set via the `readtimeout=` target option, e.g. `readtimeout=120s`.
+    /// Returns the raw string; parsing/validation happens at the call site
+    /// using the shared duration parser. `None` means no override.
+    pub fn read_timeout_override(&self) -> Option<&str> {
+        self.opts
+            .get("readtimeout")
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
+
     /// Parse header match constraints from opts.
     /// Format: `header=x-version:v2` or `header=x-version:v2,x-env:prod`
     pub fn header_matches(&self) -> Vec<(&str, &str)> {

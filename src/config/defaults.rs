@@ -91,8 +91,36 @@ impl Default for ProxyConfig {
             rate_limit_burst: default_rate_limit_burst(),
             health_check_path: default_health_check_path(),
             health_check_tls_skip_verify: false,
+            upstream_tcp_keepalive: default_upstream_tcp_keepalive(),
+            upstream_user_timeout: default_upstream_user_timeout(),
+            downstream_tcp_keepalive: default_downstream_tcp_keepalive(),
+            stream_read_timeout: default_stream_read_timeout(),
         }
     }
+}
+
+/// Upstream pool keepalive: probe after 15s idle, re-probe every 5s, declare
+/// dead after 3 misses (≈30s worst case). Detects silently-dead pooled
+/// connections (Issue #22).
+pub(super) fn default_upstream_tcp_keepalive() -> String {
+    "15s,5s,3".to_string()
+}
+
+/// `TCP_USER_TIMEOUT` for upstream connections: a request written into a
+/// black-holed connection fails within ~30s instead of waiting on read_timeout.
+pub(super) fn default_upstream_user_timeout() -> String {
+    "30s".to_string()
+}
+
+/// Downstream (CDN → LB) accepted-connection keepalive.
+pub(super) fn default_downstream_tcp_keepalive() -> String {
+    "15s,5s,3".to_string()
+}
+
+/// Streaming read timeout. Long-lived by default so WebSocket/SSE/long-poll
+/// stay alive, while non-streaming requests use the shorter `read_timeout`.
+pub(super) fn default_stream_read_timeout() -> String {
+    "3600s".to_string()
 }
 
 pub(super) fn default_strategy() -> String {

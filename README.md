@@ -175,11 +175,23 @@ poll_interval = "3s"
 strategy = "round-robin"
 matcher = "prefix"
 connect_timeout = "5s"
-read_timeout = "30s"
+read_timeout = "30s"            # non-streaming read timeout (see stream_read_timeout)
 write_timeout = "30s"
 idle_timeout = "120s"
 pool_size = 128
 max_connections = 10000
+
+# TCP keepalive on pooled connections (Issue #22) — detects/evicts silently-dead
+# connections so non-idempotent (POST/PUT/PATCH) requests are not black-holed.
+# Format: "idle,interval,count". Empty disables.
+upstream_tcp_keepalive = "15s,5s,3"     # LB -> backend pooled connections
+downstream_tcp_keepalive = "15s,5s,3"   # edge/CDN -> LB accepted connections
+upstream_user_timeout = "30s"           # TCP_USER_TIMEOUT (Linux); bounds unacked writes
+
+# Streaming responses (WebSocket / SSE text/event-stream / long-poll) keep this
+# longer read timeout; non-streaming requests use read_timeout above.
+# Per-route override: add `readtimeout=120s` to a target's options.
+stream_read_timeout = "3600s"
 
 # Circuit breaker
 circuit_breaker_enabled = true
@@ -758,9 +770,13 @@ matcher = "prefix"                 # prefix | iprefix | glob
 request_id_header = "X-Request-ID"
 no_route_status = 404
 connect_timeout = "5s"
-read_timeout = "30s"
+read_timeout = "30s"                # Non-streaming read timeout (Issue #22)
 write_timeout = "30s"
 idle_timeout = "120s"
+stream_read_timeout = "3600s"      # WebSocket/SSE/long-poll read timeout; empty = use read_timeout
+upstream_tcp_keepalive = "15s,5s,3"   # Pooled LB->backend keepalive "idle,interval,count"; empty disables
+downstream_tcp_keepalive = "15s,5s,3" # Accepted CDN->LB keepalive; empty disables
+upstream_user_timeout = "30s"      # TCP_USER_TIMEOUT (Linux only); empty/0 = system default
 enable_h2c = false                 # Accept cleartext H2 for gRPC clients
 upstream_h2_max_streams = 128
 upstream_h2_ping_interval = ""
