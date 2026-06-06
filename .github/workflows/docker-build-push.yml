@@ -31,6 +31,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Strip the leading `v` from the git tag (v1.5.0 -> 1.5.0) so the pushed
+      # image tags match the registry convention used by the Nomad jobs.
+      - name: Resolve version (strip v prefix)
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -47,7 +53,7 @@ jobs:
         with:
           images: ${{ vars.NEXUS_REGISTRY_ADDRESS }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=tag
+            type=semver,pattern={{version}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
 
       - name: Build and push arch image
@@ -58,7 +64,7 @@ jobs:
           push: true
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          tags: ${{ vars.NEXUS_REGISTRY_ADDRESS }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-${{ matrix.arch }}
+          tags: ${{ vars.NEXUS_REGISTRY_ADDRESS }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-${{ matrix.arch }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
@@ -84,7 +90,8 @@ jobs:
       - name: Create and push multi-arch manifest
         run: |
           IMAGE="${{ vars.NEXUS_REGISTRY_ADDRESS }}/${{ env.IMAGE_NAME }}"
-          VERSION_TAG="${GITHUB_REF_NAME}"
+          # Strip leading `v` (v1.5.0 -> 1.5.0) to match the registry convention.
+          VERSION_TAG="${GITHUB_REF_NAME#v}"
 
           docker buildx imagetools create \
             -t "${IMAGE}:${VERSION_TAG}" \
