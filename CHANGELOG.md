@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-06-06
+
+### Added
+
+- **TCP keepalive on pooled connections (Issue #22)** — both upstream (LB → backend) and downstream (edge/CDN → LB) pooled connections now carry TCP keepalive probes, so silently-dead connections are detected and evicted before a request is written into them. Previously a dead pooled connection would black-hole a non-idempotent (POST/PUT/PATCH) request until `read_timeout`, surfacing as 100s+ stalls and Cloudflare 524s.
+  - `proxy.upstream_tcp_keepalive` — pooled LB→backend keepalive, format `"idle,interval,count"` (default `"15s,5s,3"`; empty disables)
+  - `proxy.downstream_tcp_keepalive` — accepted CDN→LB keepalive, applied to the plaintext listener and **every** TLS listener (default `"15s,5s,3"`; empty disables)
+  - `proxy.upstream_user_timeout` — `TCP_USER_TIMEOUT` (Linux only); bounds unacknowledged upstream writes so a black-holed write fails in ~30s instead of waiting on `read_timeout` (default `"30s"`; empty/0 = system default)
+- **Streaming-aware read timeout (Issue #22)** — `proxy.stream_read_timeout` (default `"3600s"`) applies to long-lived streams (WebSocket upgrades, SSE via `Accept: text/event-stream`), while non-streaming requests use the shorter `proxy.read_timeout`. This lets the LB fail fast on dead non-streaming upstreams while keeping streams alive.
+- **Per-route `readtimeout=` target option** — Fabio-style escape hatch that overrides the read timeout for a specific target (e.g. `readtimeout=120s`); takes precedence over both `read_timeout` and `stream_read_timeout`. Covers long-polling and non-standard SSE backends that have no deterministic request-side signal.
+
+### Changed
+
+- **Parsed TCP keepalive is cached** in `ParsedProxyTimeouts` (lazily computed, `OnceLock`-backed) so the `"idle,interval,count"` string is parsed once per config rather than on every request; config swaps (ArcSwap) recompute automatically.
+- **All dependencies upgraded to latest stable** — pingora 0.8.0→0.8.1, thiserror 1→2, base64 0.21→0.22, rand 0.8→0.10, dashmap 5→6, reqwest 0.12→0.13, bcrypt 0.15→0.19, tonic/tonic-build/prost 0.12/0.13→0.14 (+ `tonic-prost`), criterion 0.5→0.8, rcgen 0.13→0.14, tokio-tungstenite 0.24→0.29. No public API or config breakage; verified against the full unit + e2e suite (gRPC/gRPC-Web/WebSocket/mTLS/TCP). `rand` session-token generation remains CSPRNG-backed (ChaCha12 ThreadRng).
+
+### Notes
+
+- `read_timeout` is now the **non-streaming** default. Deployments that previously set a long `read_timeout` (e.g. `3600s`) for WebSocket/SSE compatibility should lower it (e.g. `60s`) and rely on `stream_read_timeout` for long-lived streams — see the updated `docs/sentirum-lb.nomad.hcl`.
+
 ## [1.3.2] - 2026-05-15
 
 ### Fixed

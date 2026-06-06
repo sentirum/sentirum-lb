@@ -1,6 +1,6 @@
 [package]
 name = "sentirum-lb"
-version = "1.4.4"
+version = "1.5.0"
 edition = "2024"
 description = "High-performance Rust-based load balancer with Consul KV integration, inspired by Fabio"
 license = "MIT"
