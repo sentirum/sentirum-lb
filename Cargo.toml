@@ -15,14 +15,14 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 
 # Auth
-bcrypt = "0.15"
+bcrypt = "0.19"
 async-stream = "0.3"
 
 # HTTP client (Consul API)
-reqwest = { version = "0.12", features = ["rustls-tls", "json"] }
+reqwest = { version = "0.13", features = ["rustls", "json"] }
 
 # Error handling
-thiserror = "1"
+thiserror = "2"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -59,19 +59,19 @@ futures = "0.3"
 
 # Byte buffer types (for response body construction)
 bytes = "1"
-base64 = "0.21"
+base64 = "0.22"
 
 # Stack-allocated small vectors for hot-path route matching
 smallvec = "1"
 
 # Random number generation (for RandomPicker)
-rand = { version = "0.8", features = ["small_rng"] }
+rand = { version = "0.10", features = ["thread_rng"] }
 
 # Fast mutex (for circuit breaker state)
 parking_lot = "0.12"
 
 # Concurrent hash map (for DNS cache)
-dashmap = "5"
+dashmap = "6"
 
 axum = "0.8"
 tower = "0.5.3"
@@ -81,18 +81,20 @@ time = "0.3"
 
 [build-dependencies]
 protoc-bin-vendored = "3"
-tonic-build = "0.12"
+tonic-build = "0.14"
+tonic-prost-build = "0.14"
 
 [dev-dependencies]
-criterion = "0.5"
-prost = "0.13"
-rcgen = "0.13"
+criterion = "0.8"
+prost = "0.14"
+rcgen = "0.14"
 rustls-pemfile = "2"
 tempfile = "3"
 tokio-rustls = "0.26"
 tokio-stream = { version = "0.1", features = ["net"] }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-tonic = { version = "0.12", features = ["transport", "tls"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+tonic = { version = "0.14", features = ["transport", "tls-ring"] }
+tonic-prost = "0.14"
 
 [[bench]]
 name = "proxy_hot_path"

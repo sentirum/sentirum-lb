@@ -641,7 +641,7 @@ mod tests {
     use super::*;
     use rcgen::{CertificateParams, DistinguishedName, DnType, generate_simple_self_signed};
 
-    fn self_signed_cert(names: &[&str]) -> rcgen::CertifiedKey {
+    fn self_signed_cert(names: &[&str]) -> rcgen::CertifiedKey<rcgen::KeyPair> {
         generate_simple_self_signed(
             names
                 .iter()
@@ -653,7 +653,7 @@ mod tests {
 
     fn self_signed_pem(names: &[&str]) -> (String, String) {
         let cert = self_signed_cert(names);
-        (cert.cert.pem(), cert.key_pair.serialize_pem())
+        (cert.cert.pem(), cert.signing_key.serialize_pem())
     }
 
     fn self_signed_cn_pem(common_name: &str) -> String {
@@ -856,9 +856,17 @@ mod tests {
 
     #[test]
     fn test_dynamic_store_loads_fabio_style_combined_pem() {
-        let cert = self_signed_cert(&["example.com", "*.example.com"]);
-        let expected_not_after = cert.cert.params().not_after.unix_timestamp() as u64;
-        let combined = format!("{}{}", cert.cert.pem(), cert.key_pair.serialize_pem());
+        // rcgen 0.14 `Certificate` no longer exposes `params()`, so build the
+        // cert explicitly and keep the `not_after` we configured for the assert.
+        let mut params =
+            CertificateParams::new(vec!["example.com".to_string(), "*.example.com".to_string()])
+                .unwrap();
+        let not_after = rcgen::date_time_ymd(2030, 1, 1);
+        params.not_after = not_after;
+        let signing_key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&signing_key).unwrap();
+        let expected_not_after = not_after.unix_timestamp() as u64;
+        let combined = format!("{}{}", cert.pem(), signing_key.serialize_pem());
         let mut entries = BTreeMap::new();
         entries.insert("example.com.pem".to_string(), combined.into_bytes());
 

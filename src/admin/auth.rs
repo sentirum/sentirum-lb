@@ -8,7 +8,7 @@ use axum::response::Response;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bcrypt::verify;
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -183,8 +183,8 @@ fn verify_password(password: &str, hash: &str) -> bool {
 
 /// Generate a random session token
 fn generate_token() -> String {
-    let mut rng = rand::thread_rng();
-    let bytes: Vec<u8> = (0..32).map(|_| rng.r#gen()).collect();
+    let mut rng = rand::rng();
+    let bytes: Vec<u8> = (0..32).map(|_| rng.random()).collect();
     BASE64.encode(&bytes)
 }
 

@@ -323,8 +323,10 @@ fn generate_client_auth_fixture(ca_common_name: &str) -> ClientAuthFixture {
     client_params.distinguished_name = client_dn;
     client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
     client_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    // rcgen 0.14: signed_by(public_key, issuer); build an Issuer from the CA.
+    let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
     let client_cert = client_params
-        .signed_by(&client_key, &ca_cert, &ca_key)
+        .signed_by(&client_key, &ca_issuer)
         .unwrap();
 
     ClientAuthFixture {
@@ -385,5 +387,5 @@ async fn free_port() -> u16 {
 
 fn generate_cert_material(name: &str) -> (String, String) {
     let cert = generate_simple_self_signed(vec![name.into()]).unwrap();
-    (cert.cert.pem(), cert.key_pair.serialize_pem())
+    (cert.cert.pem(), cert.signing_key.serialize_pem())
 }

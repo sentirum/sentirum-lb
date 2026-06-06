@@ -417,7 +417,7 @@ async fn free_port() -> u16 {
 
 fn generate_cert_material(name: &str) -> (String, String) {
     let cert = generate_simple_self_signed(vec![name.into()]).unwrap();
-    (cert.cert.pem(), cert.key_pair.serialize_pem())
+    (cert.cert.pem(), cert.signing_key.serialize_pem())
 }
 
 fn server_rustls_config(cert_pem: &str, key_pem: &str) -> RustlsServerConfig {
@@ -816,7 +816,7 @@ async fn websocket_plain_echo_roundtrip() {
     // Send multiple messages
     for i in 0..5 {
         let payload = format!("msg-{i}");
-        ws.send(WsMessage::Text(payload.clone())).await.unwrap();
+        ws.send(WsMessage::Text(payload.clone().into())).await.unwrap();
         let msg = timeout(Duration::from_secs(5), ws.next())
             .await
             .unwrap()

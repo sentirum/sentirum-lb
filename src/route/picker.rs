@@ -1,5 +1,5 @@
 use crate::route::target::Target;
-use rand::Rng;
+use rand::RngExt;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -77,8 +77,8 @@ impl Picker for RandomPicker {
             return None;
         }
         // Thread-local RNG - no sharing issues, very fast
-        let mut rng = rand::thread_rng();
-        let idx = rng.gen_range(0..w_targets.len());
+        let mut rng = rand::rng();
+        let idx = rng.random_range(0..w_targets.len());
         Some(Arc::clone(&w_targets[idx]))
     }
 }

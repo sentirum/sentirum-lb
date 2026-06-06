@@ -114,7 +114,7 @@ async fn tcp_plain_proxy_proto_and_tcp_sni_smoke() {
     let public_tls_port = free_port().await;
     let proxy_cert = generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
     let proxy_cert_pem = proxy_cert.cert.pem();
-    let proxy_key_pem = proxy_cert.key_pair.serialize_pem();
+    let proxy_key_pem = proxy_cert.signing_key.serialize_pem();
     let https_runtime = spawn_tcp_proxy(
         "https+tcp+sni",
         None,
@@ -221,7 +221,7 @@ async fn spawn_tls_echo_backend(name: &str) -> TlsBackend {
     let addr = listener.local_addr().unwrap();
     let cert = generate_simple_self_signed(vec![name.to_string()]).unwrap();
     let cert_pem = cert.cert.pem();
-    let key_pem = cert.key_pair.serialize_pem();
+    let key_pem = cert.signing_key.serialize_pem();
     let acceptor = TlsAcceptor::from(Arc::new(server_rustls_config(&cert_pem, &key_pem)));
 
     let task = tokio::spawn(async move {

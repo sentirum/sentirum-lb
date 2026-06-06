@@ -545,7 +545,7 @@ async fn free_port() -> u16 {
 fn generate_cert_material(name: &str) -> (String, String) {
     let cert = generate_simple_self_signed(vec![name.into()]).unwrap();
     let cert_pem = cert.cert.pem();
-    let key_pem = cert.key_pair.serialize_pem();
+    let key_pem = cert.signing_key.serialize_pem();
     (cert_pem, key_pem)
 }
 
