@@ -51,7 +51,7 @@ impl Picker for RoundRobinPicker {
 }
 
 /// Random picker — selects a random target from weighted list
-/// Uses thread-local SmallRng for fast, high-quality randomness (thread-safe)
+/// Uses the thread-local RNG (`rand::rng()`) for fast, thread-safe randomness.
 pub struct RandomPicker;
 
 impl RandomPicker {
