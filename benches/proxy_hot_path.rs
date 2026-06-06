@@ -1,6 +1,6 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use std::hint::black_box;
 use sentirum_lb::proxy::handler::{CidrRange, client_ip_from_socket_addr, request_id_header_value};
+use std::hint::black_box;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 fn bench_request_id_header_value(c: &mut Criterion) {

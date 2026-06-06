@@ -279,7 +279,10 @@ fn validate_keepalive_field(errors: &mut Vec<String>, name: &str, value: &str) {
         return;
     }
     if Config::parse_optional_duration(parts[0]).is_none_or(|d| d.is_zero()) {
-        errors.push(format!("{name} idle must be a positive duration, got '{}'", parts[0]));
+        errors.push(format!(
+            "{name} idle must be a positive duration, got '{}'",
+            parts[0]
+        ));
     }
     if Config::parse_optional_duration(parts[1]).is_none_or(|d| d.is_zero()) {
         errors.push(format!(

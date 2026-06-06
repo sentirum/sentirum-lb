@@ -514,7 +514,10 @@ fn validate_accepts_empty_keepalive_as_disabled() {
         parsed_timeouts: Default::default(),
         tcp: TcpConfig::default(),
     };
-    assert!(config.validate().is_none(), "empty keepalive should be valid");
+    assert!(
+        config.validate().is_none(),
+        "empty keepalive should be valid"
+    );
 }
 
 #[test]
@@ -535,7 +538,9 @@ fn parsed_timeouts_caches_keepalive() {
     assert_eq!(up.interval, Duration::from_secs(5));
     assert_eq!(up.count, 3);
     assert_eq!(up.user_timeout, Duration::from_secs(30));
-    let down = parsed.downstream_keepalive.expect("default enables downstream");
+    let down = parsed
+        .downstream_keepalive
+        .expect("default enables downstream");
     assert_eq!(down.idle, Duration::from_secs(15));
     // Downstream has no user_timeout (listener sockets); ZERO = system default.
     assert_eq!(down.user_timeout, Duration::ZERO);

@@ -816,7 +816,9 @@ async fn websocket_plain_echo_roundtrip() {
     // Send multiple messages
     for i in 0..5 {
         let payload = format!("msg-{i}");
-        ws.send(WsMessage::Text(payload.clone().into())).await.unwrap();
+        ws.send(WsMessage::Text(payload.clone().into()))
+            .await
+            .unwrap();
         let msg = timeout(Duration::from_secs(5), ws.next())
             .await
             .unwrap()

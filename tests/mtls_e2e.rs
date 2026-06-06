@@ -325,9 +325,7 @@ fn generate_client_auth_fixture(ca_common_name: &str) -> ClientAuthFixture {
     client_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     // rcgen 0.14: signed_by(public_key, issuer); build an Issuer from the CA.
     let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
-    let client_cert = client_params
-        .signed_by(&client_key, &ca_issuer)
-        .unwrap();
+    let client_cert = client_params.signed_by(&client_key, &ca_issuer).unwrap();
 
     ClientAuthFixture {
         ca_cert_pem: ca_cert.pem(),

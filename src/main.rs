@@ -548,8 +548,7 @@ fn main() {
     // #22). Applied to the plaintext listener and, below, to every TLS
     // listener so silently-dead downstream connections are probed/closed
     // instead of lingering as corpses.
-    let downstream_sock_opts =
-        sentirum_lb::proxy::keepalive::downstream_socket_options(&config);
+    let downstream_sock_opts = sentirum_lb::proxy::keepalive::downstream_socket_options(&config);
     match downstream_sock_opts.as_ref() {
         Some(opts) => lb_service.add_tcp_with_settings(&config.server.listen, opts.clone()),
         None => lb_service.add_tcp(&config.server.listen),

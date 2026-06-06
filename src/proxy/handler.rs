@@ -776,8 +776,7 @@ mod tests {
             tcp: crate::config::TcpConfig::default(),
             parsed_timeouts: Default::default(),
         });
-        let target =
-            crate::route::target::Target::new("svc".into(), "http://example.com".into());
+        let target = crate::route::target::Target::new("svc".into(), "http://example.com".into());
         let mut peer = HttpPeer::new("127.0.0.1:80", false, "example.com".into());
 
         configure_peer_options(&mut peer, &target, &config, false);
