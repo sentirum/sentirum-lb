@@ -749,8 +749,17 @@ mod tests {
         });
         cb.state_atomic.store(STATE_HALF_OPEN, Ordering::Release);
         cb.half_open_in_flight.store(true, Ordering::Release);
+        // The probe is considered "sent" at monotonic ms = 1. With
+        // recovery_timeout_secs = 0 the reset threshold floors at 100ms, so the
+        // probe is only stuck once `monotonic_elapsed_ms() - 1 >= 100`. The
+        // monotonic epoch is process-wide, so when this test runs early (e.g.
+        // alone or first in the suite) the clock may not have advanced past the
+        // threshold yet. Wait for it deterministically instead of relying on a
+        // fixed sleep that assumes prior elapsed time.
         cb.half_open_probe_sent_at_ms.store(1, Ordering::Relaxed);
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        while monotonic_elapsed_ms() < 101 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
 
         assert!(
             cb.allow_request(),
