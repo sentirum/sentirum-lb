@@ -71,24 +71,35 @@ pub(super) async fn login_handler(
         now.duration_since(*window_start).as_secs() < LOGIN_WINDOW_SECS
     });
 
+    // Verify credentials off the async executor: bcrypt is intentionally
+    // CPU-heavy and would otherwise stall this (single-threaded) admin worker.
     let config = state.config.load();
-    let valid = config
+    let password = req.password.clone();
+    let req_username = req.username.clone();
+    let admin_users: Vec<(String, String)> = config
         .server
         .admin_users
         .iter()
-        .any(|u| u.username == req.username && verify_password(&req.password, &u.password));
-    let legacy_valid = !config.server.admin_token.is_empty()
-        && constant_time_eq(&req.password, &config.server.admin_token);
+        .map(|u| (u.username.clone(), u.password.clone()))
+        .collect();
+    let admin_token = config.server.admin_token.clone();
+    drop(config);
+
+    let (valid, legacy_valid) = tokio::task::spawn_blocking(move || {
+        let valid = admin_users
+            .iter()
+            .any(|(uname, phash)| *uname == req_username && verify_password(&password, phash));
+        let legacy_valid = !admin_token.is_empty() && constant_time_eq(&password, &admin_token);
+        (valid, legacy_valid)
+    })
+    .await
+    .unwrap_or((false, false));
 
     if valid || legacy_valid {
+        // On success the matched user IS req.username (matched by username);
+        // a legacy admin_token login is attributed to "admin".
         let user = if valid {
-            config
-                .server
-                .admin_users
-                .iter()
-                .find(|u| u.username == req.username)
-                .map(|u| u.username.clone())
-                .unwrap_or(req.username.clone())
+            req.username.clone()
         } else {
             "admin".to_string()
         };
@@ -283,11 +294,10 @@ pub(super) async fn admin_auth_middleware(
             .map(
                 |token| -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> {
                     Box::pin(async move {
-                        let matches_admin =
-                            !expected.is_empty() && constant_time_eq(&token, &expected);
-                        if matches_admin {
-                            return true;
-                        }
+                        // Only ephemeral session tokens are accepted via the query
+                        // string. The long-lived admin_token must never travel in a
+                        // URL (it leaks into access logs / browser history); Bearer
+                        // and X-Admin-Token header auth above still accept it.
                         // Use read().await instead of try_read() to avoid false 401s
                         // on SSE/dashboard streams during login/logout.
                         state.sessions.read().await.get(&token).is_some()

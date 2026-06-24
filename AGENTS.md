@@ -122,8 +122,8 @@ If you introduce a new config field, wire it into runtime behavior and cover it 
 
 - **Minimum sample threshold**: Circuit opens when `error_rate >= error_threshold%` AND `window_len >= min_samples`. `min_samples = max(window_size / 4, 5)`. This ensures the circuit can open even before the window is full if error rate is high enough (e.g., 100% failure on first 25 requests with threshold=50 and window=100)
 - **Half-open probe timeout**: If a half-open probe's callback is lost (DNS failure, connection drop without logging), the `half_open_in_flight` flag is auto-reset after `recovery_timeout` seconds. This prevents permanent HalfOpen stuck state
-- **Check ordering**: Rate limit → Circuit breaker check → Connection slot acquire. CB is checked before acquiring connection slots to avoid unnecessary acquire/release cycles
-- **Matcher hot path**: `MatcherKind` enum (not string) is used on the hot path for branch-prediction-friendly dispatch
+- **Check ordering**: Circuit breaker check → Rate limit → Connection slot acquire. CB is checked first so a CB fast-fail (503) does not leak a rate-limit token; if a half-open probe is reserved but the request is then rejected by the rate limiter or the connection-slot limit, the probe slot is released (`CircuitBreaker::abort_probe`) so recovery is not stalled
+- **Matcher hot path**: `MatcherKind` enum (`Prefix`/`CaseInsensitivePrefix`/`Glob`/`Exact`, not a string) is used on the hot path for branch-prediction-friendly dispatch via the shared `Table::route_matches` helper (single source of truth for both the collect and find paths). `proxy.matcher` and `proxy.strategy` are validated at config load and via `PUT /admin/config` — unknown values are rejected, never silently degraded
 
 - No-match responses use `proxy.no_route_status`
 - Circuit breaker: when `proxy.circuit_breaker_enabled` is true, failing upstream targets are temporarily bypassed with 503; when a picked target has an open circuit breaker, the proxy attempts to find a healthy fallback on the same route before returning 503
@@ -131,6 +131,7 @@ If you introduce a new config field, wire it into runtime behavior and cover it 
 - DNS cache: `proxy.dns_cache_ttl` controls positive cache TTL (default 30s); `proxy.dns_negative_cache_ttl` controls negative cache TTL (default 10s)
 - `iprefix` is case-insensitive prefix matching
 - `glob` uses the `glob` crate pattern support
+- Under `glob`, a route path with no glob metacharacters has no compiled `Pattern` and matches itself exactly, so literal routes — including the `/` catch-all — stay reachable; `exact` matches the full request path
 - `strip` happens before `prepend`
 - Query strings must survive rewrites
 - `host=` route option overrides upstream Host header and TLS SNI

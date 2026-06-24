@@ -186,6 +186,65 @@ tags = []
 }
 
 #[test]
+fn config_validate_rejects_unknown_matcher_and_strategy() {
+    let toml_str = r#"
+[server]
+listen = ":9999"
+admin_listen = "127.0.0.1:9998"
+admin_token = ""
+admin_users = []
+workers = 0
+drain_timeout = "30s"
+
+[consul]
+address = "127.0.0.1:8500"
+services = []
+tags = []
+"#
+    .to_string();
+
+    // "exact" is now a supported matcher (previously silently fell back to prefix).
+    let mut config: Config = toml::from_str(&toml_str).unwrap();
+    config.proxy.matcher = "exact".to_string();
+    assert!(
+        config.validate().is_none(),
+        "exact matcher must be accepted"
+    );
+
+    // Unknown matcher is rejected instead of silently degrading to prefix.
+    let mut config: Config = toml::from_str(&toml_str).unwrap();
+    config.proxy.matcher = "bogus".to_string();
+    assert!(
+        config.validate().is_some(),
+        "unknown matcher must be rejected"
+    );
+
+    // Unknown strategy is rejected.
+    let mut config: Config = toml::from_str(&toml_str).unwrap();
+    config.proxy.strategy = "weighted".to_string();
+    assert!(
+        config.validate().is_some(),
+        "unknown strategy must be rejected"
+    );
+
+    // rise/fall of 0 would make a single probe flip health.
+    let mut config: Config = toml::from_str(&toml_str).unwrap();
+    config.proxy.health_check_rise = 0;
+    assert!(
+        config.validate().is_some(),
+        "health_check_rise=0 must be rejected"
+    );
+
+    // An invalid request_id_header name would fail every request's insert_header.
+    let mut config: Config = toml::from_str(&toml_str).unwrap();
+    config.proxy.request_id_header = "bad header".to_string();
+    assert!(
+        config.validate().is_some(),
+        "invalid request_id_header must be rejected"
+    );
+}
+
+#[test]
 fn config_validate_accepts_valid_settings() {
     let toml_str = r#"
 [server]

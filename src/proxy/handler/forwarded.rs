@@ -17,14 +17,19 @@ pub(super) fn append_forwarded_headers(
     let trusted = is_trusted_proxy(peer_ip, trusted_proxies);
 
     let forwarded_for = if trusted {
-        match downstream_request
+        // Preserve the FULL forwarded chain: a client may send several
+        // `X-Forwarded-For` headers; `get` would keep only the first.
+        let existing = downstream_request
             .headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-        {
-            Some(existing) if !peer_ip.is_empty() => format!("{existing}, {peer_ip}"),
-            Some(existing) => existing.to_string(),
-            None => peer_ip.to_string(),
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect::<Vec<_>>()
+            .join(", ");
+        match (existing.is_empty(), peer_ip.is_empty()) {
+            (true, _) => peer_ip.to_string(),
+            (false, true) => existing,
+            (false, false) => format!("{existing}, {peer_ip}"),
         }
     } else {
         peer_ip.to_string()

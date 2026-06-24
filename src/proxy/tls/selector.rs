@@ -35,6 +35,15 @@ impl ClientAuthState {
         };
 
         let Some(snapshot) = self.store.current_store() else {
+            // No client CA store is loaded yet. For Required mode this must
+            // fail closed (never silently disable verification), otherwise
+            // unauthenticated clients could connect. Optional mode keeps the
+            // historical best-effort behaviour of requesting but not enforcing.
+            if self.mode == ClientAuthMode::Required {
+                return Err(TlsError::ConfigError(
+                    "client auth required but no client CA store is loaded".to_string(),
+                ));
+            }
             ssl.set_verify(ssl::SslVerifyMode::NONE);
             return Ok(());
         };

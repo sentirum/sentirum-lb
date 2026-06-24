@@ -29,7 +29,10 @@ impl SentirumProxy {
                 continue;
             }
 
-            let any_header_constraint = route.targets.iter().any(|t| t.opts.contains_key("header"));
+            let any_header_constraint = route
+                .targets
+                .iter()
+                .any(|t| !t.parsed_header_matches.is_empty());
 
             // Header-constrained routes need filtered Vec copies.
             // Routes without header constraints borrow directly from the
@@ -52,7 +55,7 @@ impl SentirumProxy {
                 let matching: Vec<Arc<crate::route::target::Target>> = route
                     .targets
                     .iter()
-                    .filter(|t| t.matches_headers(headers))
+                    .filter(|t| t.weight > 0.0 && t.matches_headers(headers))
                     .cloned()
                     .collect();
 
@@ -67,13 +70,12 @@ impl SentirumProxy {
                     continue;
                 }
 
-                let matching_w: Vec<Arc<crate::route::target::Target>> = route
-                    .w_targets
-                    .iter()
-                    .filter(|t| t.matches_headers(headers))
-                    .cloned()
-                    .collect();
-                (Targets::Owned(matching), Targets::Owned(matching_w))
+                // Select over the matched, non-drained (weight > 0) target set rather
+                // than re-cloning the up-to-1000-slot weighted `w_targets` each request.
+                // weight-0 targets stay drained (matching the weighted expansion, which
+                // gives them 0 slots); proportional weighting within the matched subset
+                // is flattened to uniform — an accepted trade-off on this rare path.
+                (Targets::Owned(matching), Targets::Owned(Vec::new()))
             } else {
                 // Zero-copy: borrow directly from the immutable route table snapshot.
                 // The ArcSwap guard keeps the table alive for the duration of
@@ -190,8 +192,10 @@ impl SentirumProxy {
                 if route.w_targets.is_empty() {
                     continue;
                 }
-                let any_header_constraint =
-                    route.targets.iter().any(|t| t.opts.contains_key("header"));
+                let any_header_constraint = route
+                    .targets
+                    .iter()
+                    .any(|t| !t.parsed_header_matches.is_empty());
                 let fallback = route
                     .targets
                     .iter()
@@ -249,6 +253,9 @@ impl SentirumProxy {
             crate::metrics::prometheus::global()
                 .rate_limit_rejected_total
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if config.proxy.circuit_breaker_enabled {
+                target.health_tracker.circuit_breaker().abort_probe();
+            }
             return Err(Error::new(ErrorType::HTTPStatus(429)));
         }
 
@@ -260,6 +267,9 @@ impl SentirumProxy {
                 max_connections = config.proxy.max_connections,
                 "Upstream concurrency limit reached"
             );
+            if config.proxy.circuit_breaker_enabled {
+                target.health_tracker.circuit_breaker().abort_probe();
+            }
             return Err(Error::new(ErrorType::HTTPStatus(503)));
         }
 

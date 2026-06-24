@@ -44,6 +44,18 @@ pub struct DnsCache {
 /// Maximum number of entries in the DNS cache before eviction kicks in.
 const DNS_CACHE_MAX_ENTRIES: usize = 10_000;
 
+/// Result of a DNS cache lookup. Distinguishes a live negative (NXDOMAIN) entry
+/// from a true miss so the caller can fast-fail instead of re-resolving a host
+/// that is known not to exist.
+pub enum DnsLookup {
+    /// Live positive entry with resolved addresses.
+    Hit(Arc<[SocketAddr]>),
+    /// Live negative entry (host recently failed to resolve).
+    NegativeCached,
+    /// No live entry — the caller should resolve.
+    Miss,
+}
+
 impl DnsCache {
     pub fn new() -> Self {
         Self {
@@ -80,43 +92,39 @@ impl DnsCache {
         }
     }
 
-    /// Lookup a cached DNS entry
-    pub fn lookup(&self, host: &str) -> Option<Arc<[SocketAddr]>> {
+    /// Look up a cached DNS entry.
+    ///
+    /// The common live-entry path takes a single read lock; the write lock is
+    /// only acquired to evict an entry that has actually expired.
+    pub fn lookup(&self, host: &str) -> DnsLookup {
         let now_ms = monotonic_elapsed_ms();
 
-        if self
-            .inner
-            .remove_if(host, |_, entry| now_ms >= entry.expires_at_ms)
-            .is_some()
-        {
-            self.misses.fetch_add(1, Ordering::Relaxed);
-            self.prom
-                .dns_cache_misses_total
-                .fetch_add(1, Ordering::Relaxed);
-            return None;
+        if let Some(entry) = self.inner.get(host) {
+            if now_ms < entry.expires_at_ms {
+                if entry.negative {
+                    self.negatives.fetch_add(1, Ordering::Relaxed);
+                    self.prom
+                        .dns_cache_negatives_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    return DnsLookup::NegativeCached;
+                }
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                self.prom
+                    .dns_cache_hits_total
+                    .fetch_add(1, Ordering::Relaxed);
+                return DnsLookup::Hit(Arc::clone(&entry.addrs));
+            }
+            // Expired — drop the read guard before taking the write lock to evict.
+            // The predicate re-checks expiry so a concurrent refresh is preserved.
+            drop(entry);
+            self.inner.remove_if(host, |_, e| now_ms >= e.expires_at_ms);
         }
 
-        let Some(entry) = self.inner.get(host) else {
-            self.misses.fetch_add(1, Ordering::Relaxed);
-            self.prom
-                .dns_cache_misses_total
-                .fetch_add(1, Ordering::Relaxed);
-            return None;
-        };
-
-        if entry.negative {
-            self.negatives.fetch_add(1, Ordering::Relaxed);
-            self.prom
-                .dns_cache_negatives_total
-                .fetch_add(1, Ordering::Relaxed);
-            return None;
-        }
-
-        self.hits.fetch_add(1, Ordering::Relaxed);
+        self.misses.fetch_add(1, Ordering::Relaxed);
         self.prom
-            .dns_cache_hits_total
+            .dns_cache_misses_total
             .fetch_add(1, Ordering::Relaxed);
-        Some(Arc::clone(&entry.addrs))
+        DnsLookup::Miss
     }
 
     /// Store a positive DNS lookup result
@@ -286,10 +294,20 @@ mod tests {
     #[test]
     fn test_dns_cache_absent_key_counts_as_miss() {
         let cache = DnsCache::with_ttl(30, 10);
-        assert!(cache.lookup("missing.example").is_none());
+        assert!(matches!(cache.lookup("missing.example"), DnsLookup::Miss));
         let stats = cache.stats();
         assert_eq!(stats.misses, 1);
         assert_eq!(stats.hits, 0);
+    }
+
+    #[test]
+    fn test_dns_cache_negative_entry_reported_as_negative_cached() {
+        let cache = DnsCache::with_ttl(30, 10);
+        cache.store_negative("nxdomain.example:80".to_string());
+        assert!(matches!(
+            cache.lookup("nxdomain.example:80"),
+            DnsLookup::NegativeCached
+        ));
     }
 
     #[test]
@@ -297,7 +315,10 @@ mod tests {
         let cache = DnsCache::with_ttl(0, 10);
         let addr: SocketAddr = "203.0.113.10:80".parse().unwrap();
         cache.store("no-cache.example:80".to_string(), vec![addr]);
-        assert!(cache.lookup("no-cache.example:80").is_none());
+        assert!(matches!(
+            cache.lookup("no-cache.example:80"),
+            DnsLookup::Miss
+        ));
         assert_eq!(cache.stats().entries, 0);
     }
 

@@ -84,7 +84,7 @@ fn parse_route_add(tokens: &[String]) -> Option<RouteDef> {
                 i += 1;
                 if i < tokens.len() {
                     match tokens[i].parse::<f64>() {
-                        Ok(w) if w >= 0.0 => weight = w,
+                        Ok(w) if w.is_finite() && w >= 0.0 => weight = w,
                         _ => {
                             tracing::warn!(weight = %tokens[i], "Invalid weight in route add; skipping");
                         }
@@ -202,7 +202,7 @@ fn parse_route_weight(tokens: &[String]) -> Option<RouteDef> {
                 i += 1;
                 if i < tokens.len() {
                     match tokens[i].parse::<f64>() {
-                        Ok(w) if w >= 0.0 => weight = w,
+                        Ok(w) if w.is_finite() && w >= 0.0 => weight = w,
                         _ => {
                             tracing::warn!(weight = %tokens[i], "Invalid weight in route weight; skipping");
                         }

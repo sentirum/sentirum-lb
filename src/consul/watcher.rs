@@ -72,21 +72,27 @@ impl ServiceMonitor {
                 }
             };
 
-            // Index unchanged means blocking query timed out — loop immediately.
-            // Index reset (new_index < last_index) should NOT be treated as
+            // Index unchanged means the blocking query timed out with no change.
+            // Index reset (new_index < last_index) must NOT be treated as
             // "unchanged": we must reprocess with the new index.
+            //
+            // A small floor sleep guards against a tight CPU spin if a missing
+            // or unparseable X-Consul-Index ever yields a clamped index equal
+            // to the previous one (blocking effectively disabled server-side).
             if new_index == last_index {
                 backoff_secs = 1;
                 metrics.set_consul_watcher_backoff_seconds("services", 0);
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 continue;
             }
 
-            // Update last_index regardless of whether new_index went up or reset.
-            // This prevents tight-looping on Consul restart.
-            last_index = new_index;
-
             match self.process_checks(&checks, &tag_prefix).await {
                 Ok(route_defs) => {
+                    // Only advance last_index after a successful process. Advancing
+                    // before process_checks would make the next iteration's
+                    // `new_index == last_index` guard discard a stashed pending
+                    // retry, defeating the backoff mechanism in the Err arm.
+                    last_index = new_index;
                     backoff_secs = 1;
                     metrics.set_consul_watcher_backoff_seconds("services", 0);
                     if updates
@@ -433,6 +439,11 @@ impl KVWatcher {
                             tracing::warn!("KV watcher: channel closed, stopping");
                             break;
                         }
+                    } else {
+                        // Index unchanged (blocking query timed out, or index
+                        // missing/unparseable and clamped). A floor sleep avoids
+                        // a tight CPU spin when blocking is disabled server-side.
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     }
                 }
                 Err(e) => {
@@ -709,5 +720,141 @@ mod tests {
             .await
             .expect_err("catalog failure should preserve previous routes");
         assert!(error.contains("web"));
+    }
+
+    /// After a failing `process_checks`, the watcher must stash the snapshot and
+    /// re-run `process_checks` on the next loop iteration without re-issuing the
+    /// blocking query. Previously `last_index` was advanced *before*
+    /// `process_checks`, so the next iteration's `new_index == last_index`
+    /// guard discarded the stashed snapshot — the whole pending/backoff path
+    /// was dead. This drives the real `watch` loop against a stub Consul server.
+    #[tokio::test]
+    async fn watch_retries_process_checks_after_catalog_failure() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::Duration;
+
+        let health_calls = Arc::new(AtomicU64::new(0));
+        let catalog_calls = Arc::new(AtomicU64::new(0));
+        // Park every health-check request after the first so the watch loop
+        // cannot race ahead and re-fetch before the test observes the retry.
+        let health_gate = Arc::new(tokio::sync::Notify::new());
+
+        let health_calls_h = health_calls.clone();
+        let health_gate_h = health_gate.clone();
+        let catalog_calls_h = catalog_calls.clone();
+
+        let app = Router::new()
+            .route(
+                "/v1/health/state/any",
+                get(move || {
+                    let health_calls = health_calls_h.clone();
+                    let health_gate = health_gate_h.clone();
+                    async move {
+                        if health_calls.load(Ordering::SeqCst) >= 1 {
+                            health_gate.notified().await;
+                        }
+                        let index = 10 + health_calls.fetch_add(1, Ordering::SeqCst);
+                        let body = serde_json::json!([{
+                            "Node": "node-1",
+                            "CheckID": "service:web:1",
+                            "Name": "service:web:1",
+                            "Status": "passing",
+                            "ServiceName": "web",
+                            "ServiceID": "web:1",
+                            "ServiceTags": ["urlprefix-/"],
+                        }])
+                        .to_string();
+                        axum::http::Response::builder()
+                            .status(StatusCode::OK)
+                            .header(
+                                "x-consul-index",
+                                axum::http::HeaderValue::try_from(index.to_string().as_str())
+                                    .unwrap(),
+                            )
+                            .body(axum::body::Body::from(body))
+                            .unwrap()
+                    }
+                }),
+            )
+            .route(
+                "/v1/catalog/service/{service}",
+                get(
+                    move |axum::extract::Path(service): axum::extract::Path<String>| {
+                        let catalog_calls = catalog_calls_h.clone();
+                        async move {
+                            let n = catalog_calls.fetch_add(1, Ordering::SeqCst);
+                            if n == 0 || service != "web" {
+                                return (StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string());
+                            }
+                            let body = serde_json::json!([{
+                                "Node": "node-1",
+                                "ServiceID": "web:1",
+                                "Address": "10.0.0.5",
+                                "ServiceAddress": "",
+                                "ServicePort": 8080,
+                                "ServiceTags": ["urlprefix-/"],
+                                "ServiceMeta": {},
+                            }])
+                            .to_string();
+                            (StatusCode::OK, body)
+                        }
+                    },
+                ),
+            );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let monitor = ServiceMonitor {
+            client: Arc::new(
+                ConsulClient::new(ConsulConfig {
+                    address: addr.to_string(),
+                    ..ConsulConfig::default()
+                })
+                .unwrap(),
+            ),
+            config: ConsulConfig::default(),
+        };
+
+        let (tx, mut rx) = mpsc::channel::<RouteUpdate>(8);
+        let handle = tokio::spawn(async move {
+            monitor.watch(tx).await;
+        });
+
+        let mut saw_error = false;
+        let mut services_with_health_calls = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            let Ok(recv) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await else {
+                continue;
+            };
+            match recv {
+                Some(RouteUpdate::Error(_)) => saw_error = true,
+                Some(RouteUpdate::Services(_)) => {
+                    services_with_health_calls = Some(health_calls.load(Ordering::SeqCst));
+                    break;
+                }
+                _ => {}
+            }
+        }
+        handle.abort();
+
+        assert!(
+            saw_error,
+            "expected an Error update from the failed catalog lookup"
+        );
+        let calls = services_with_health_calls
+            .expect("expected process_checks to be retried and emit a Services update");
+        // The retry must reuse the stashed pending snapshot. In the buggy version
+        // `last_index` was advanced before process_checks, the guard discarded
+        // the snapshot, and the loop re-fetched health checks (calls >= 2) before
+        // any Services update could be emitted.
+        assert_eq!(
+            calls, 1,
+            "retry must reuse the pending snapshot without a fresh health-check fetch"
+        );
     }
 }

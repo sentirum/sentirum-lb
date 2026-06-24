@@ -144,6 +144,16 @@ impl CircuitBreaker {
         }
     }
 
+    /// Release a half-open probe reservation: clear the in-flight flag AND reset
+    /// the dispatch timestamp, so the next reservation's stuck-probe auto-reset
+    /// measures elapsed time from a clean baseline rather than a stale prior
+    /// probe's timestamp.
+    #[inline]
+    fn release_probe_slot(&self) {
+        self.half_open_in_flight.store(false, Ordering::Release);
+        self.half_open_probe_sent_at_ms.store(0, Ordering::Release);
+    }
+
     /// Returns true if the circuit allows a request to proceed.
     /// In half-open state this reserves the next probe slot.
     #[inline]
@@ -173,7 +183,7 @@ impl CircuitBreaker {
                     // Minimum 100ms guard prevents race conditions where another
                     // thread sees the flag set in the same millisecond and resets it.
                     if self.half_open_in_flight.load(Ordering::Acquire) {
-                        let probe_sent = self.half_open_probe_sent_at_ms.load(Ordering::Relaxed);
+                        let probe_sent = self.half_open_probe_sent_at_ms.load(Ordering::Acquire);
                         let recovery_ms = self.recovery_timeout_secs.load(Ordering::Relaxed) * 1000;
                         let reset_threshold_ms = (recovery_ms).max(100);
                         let elapsed = monotonic_elapsed_ms().saturating_sub(probe_sent);
@@ -184,7 +194,7 @@ impl CircuitBreaker {
                                 recovery_ms,
                                 "Half-open probe appears stuck; auto-resetting"
                             );
-                            self.half_open_in_flight.store(false, Ordering::Release);
+                            self.release_probe_slot();
                         }
                     }
                     if self
@@ -192,14 +202,35 @@ impl CircuitBreaker {
                         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                         .is_ok()
                     {
+                        // Record the dispatch time ONLY on the reserving (CAS-success)
+                        // path — never on a rejected attempt — so the stuck-probe reset
+                        // above measures elapsed time since THIS probe was dispatched.
+                        // (Bumping it on every rejected allow_request would pin it near
+                        // "now" under load and the auto-reset would never fire.) Release
+                        // pairs with the Acquire load in the reset check.
                         self.half_open_probe_sent_at_ms
-                            .store(monotonic_elapsed_ms(), Ordering::Relaxed);
+                            .store(monotonic_elapsed_ms(), Ordering::Release);
                         return true;
                     }
                     return false;
                 }
                 _ => return false,
             }
+        }
+    }
+
+    /// Release a reserved-but-unused half-open probe slot.
+    ///
+    /// `allow_request()` reserves the single in-flight probe when the circuit is
+    /// half-open. If the caller later decides not to dispatch that request (e.g.
+    /// the upstream selection was abandoned before sending), call this to clear
+    /// the reservation so the next `allow_request()` is admitted immediately
+    /// instead of waiting for the probe's stuck-probe timeout to auto-reset it.
+    ///
+    /// No-op when the circuit is not half-open.
+    pub fn abort_probe(&self) {
+        if (self.state_atomic.load(Ordering::Acquire) & STATE_MASK) == STATE_HALF_OPEN {
+            self.release_probe_slot();
         }
     }
 
@@ -231,7 +262,7 @@ impl CircuitBreaker {
             Ordering::Relaxed,
         ) {
             Ok(_) => {
-                self.half_open_in_flight.store(false, Ordering::Release);
+                self.release_probe_slot();
                 self.record_transition(CircuitState::Open, CircuitState::HalfOpen);
                 tracing::info!(
                     recovery_timeout = self.recovery_timeout_secs.load(Ordering::Relaxed),
@@ -258,18 +289,29 @@ impl CircuitBreaker {
                 window.push_back(false);
             }
             STATE_HALF_OPEN => {
-                self.half_open_in_flight.store(false, Ordering::Release);
                 let probe_count = ((state >> 2) & 0x3F) as usize;
                 if probe_count + 1 >= self.half_open_max_requests {
+                    // Final successful probe → close. `transition_to_closed`
+                    // releases the probe slot as part of the transition.
                     self.transition_to_closed();
                     tracing::info!("Circuit breaker closed after successful recovery probes");
                 } else {
-                    let _ = self.state_atomic.compare_exchange(
-                        state,
-                        STATE_HALF_OPEN | (((probe_count + 1) as u8) << 2),
+                    // Commit the probe-counter increment (retrying on contention)
+                    // BEFORE releasing the probe slot, so a concurrent
+                    // `allow_request()` cannot reserve a second probe against a
+                    // not-yet-incremented counter (success-drop race fix 5a).
+                    let _ = self.state_atomic.fetch_update(
                         Ordering::AcqRel,
-                        Ordering::Relaxed,
+                        Ordering::Acquire,
+                        |current| {
+                            if current & STATE_MASK != STATE_HALF_OPEN {
+                                return None;
+                            }
+                            let pc = ((current >> 2) & 0x3F) as usize;
+                            Some(STATE_HALF_OPEN | (((pc + 1) as u8) << 2))
+                        },
                     );
+                    self.release_probe_slot();
                 }
             }
             _ => {}
@@ -303,14 +345,18 @@ impl CircuitBreaker {
                 //   2. At least min_samples requests observed
                 // min_samples = max(window_size / 4, 5) to avoid triggering on
                 // tiny samples while still protecting against 100% failure rates.
-                let threshold = self.window_size * self.error_threshold as usize / 100;
+                // Compute the threshold against the CURRENT window length, not the
+                // configured size: otherwise the documented `min_samples`
+                // early-open gate is dead code and the circuit needs a full window
+                // (roughly 2× the failures) to trip during post-recovery warm-up.
+                let threshold = window_len * self.error_threshold as usize / 100;
                 let min_samples = (self.window_size / 4).max(5).min(self.window_size);
                 if errors >= threshold as u64 && window_len >= min_samples {
                     self.transition_to_open();
                     tracing::warn!(
-                        error_rate =
-                            format!("{:.1}%", 100.0 * errors as f64 / self.window_size as f64),
+                        error_rate = format!("{:.1}%", 100.0 * errors as f64 / window_len as f64),
                         error_count = errors,
+                        window_len = window_len,
                         window_size = self.window_size,
                         threshold = threshold,
                         "Circuit breaker OPENED"
@@ -318,7 +364,7 @@ impl CircuitBreaker {
                 }
             }
             STATE_HALF_OPEN => {
-                self.half_open_in_flight.store(false, Ordering::Release);
+                self.release_probe_slot();
                 self.transition_to_open();
                 tracing::warn!("Circuit breaker REOPENED — probe failed");
             }
@@ -338,7 +384,6 @@ impl CircuitBreaker {
     fn transition_to_open(&self) {
         self.opened_at_ms
             .store(monotonic_elapsed_ms(), Ordering::Relaxed);
-        self.half_open_in_flight.store(false, Ordering::Release);
         let mut attempts = 0u32;
         loop {
             let current = self.state_atomic.load(Ordering::Acquire);
@@ -355,6 +400,11 @@ impl CircuitBreaker {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
+                    // Release the probe slot AFTER committing the state CAS to
+                    // OPEN, so a concurrent `allow_request()` never observes Open
+                    // with the slot already released (which could let it re-reserve
+                    // a probe before other readers see the Open state — race fix 5c).
+                    self.release_probe_slot();
                     self.record_open_transition(from);
                     break;
                 }
@@ -367,6 +417,7 @@ impl CircuitBreaker {
                             "transition_to_open: CAS contention after 64 attempts, forcing open"
                         );
                         self.state_atomic.store(STATE_OPEN, Ordering::Release);
+                        self.release_probe_slot();
                         self.record_open_transition(from);
                         break;
                     }
@@ -379,7 +430,7 @@ impl CircuitBreaker {
     #[inline(always)]
     fn transition_to_closed(&self) {
         let current = self.state_atomic.load(Ordering::Relaxed);
-        self.half_open_in_flight.store(false, Ordering::Release);
+        self.release_probe_slot();
         if self
             .state_atomic
             .compare_exchange(current, STATE_CLOSED, Ordering::AcqRel, Ordering::Relaxed)
@@ -769,6 +820,42 @@ mod tests {
     }
 
     #[test]
+    fn test_stuck_probe_auto_resets_under_repeated_rejected_probes() {
+        // Regression: rejected `allow_request()` calls must NOT bump the probe-sent
+        // timestamp. If they did, a half-open target under sustained load whose probe
+        // result is lost would never cross the auto-reset threshold and would be
+        // stranded in half-open until restart.
+        let cb = CircuitBreaker::with_config(CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 10,
+            recovery_timeout_secs: 0, // reset threshold floors at 100ms
+            half_open_max_requests: 2,
+        });
+        cb.state_atomic.store(STATE_HALF_OPEN, Ordering::Release);
+
+        // Reserve the single probe via the real reservation path.
+        assert!(cb.allow_request(), "first probe should be reserved");
+        assert!(cb.half_open_in_flight.load(Ordering::Acquire));
+
+        // Sustained traffic with a lost probe callback: every call is rejected
+        // while in-flight. The auto-reset must eventually fire and re-reserve;
+        // if rejected calls bumped probe_sent this would spin until the timeout.
+        let start = std::time::Instant::now();
+        let mut reset = false;
+        while start.elapsed() < std::time::Duration::from_secs(2) {
+            if cb.allow_request() {
+                reset = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            reset,
+            "stuck probe must auto-reset despite repeated rejected allow_request calls"
+        );
+    }
+
+    #[test]
     fn test_circuit_breaker_concurrent_half_open_errors_reopen_cleanly() {
         let cb = Arc::new(CircuitBreaker::with_config(CircuitBreakerConfig {
             error_threshold: 50,
@@ -845,6 +932,86 @@ mod tests {
         assert!(
             cb.recovery_elapsed(),
             "recovery should be possible after errors in Open state"
+        );
+    }
+
+    #[test]
+    fn test_circuit_breaker_opens_on_partial_window() {
+        // Regression: the open threshold was previously computed against the
+        // configured window_size (100*50/100 = 50) rather than the current
+        // sample count, so the `min_samples` early-open gate was dead code and
+        // the circuit needed a full window to trip. With window_size=100 /
+        // error_threshold=50 the min_samples floor is 25, so 25 errors as the
+        // first 25 samples (100% failures) must open immediately.
+        let config = CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 100,
+            recovery_timeout_secs: 30,
+            half_open_max_requests: 3,
+        };
+        let cb = CircuitBreaker::with_config(config);
+
+        // 24 errors: meets the rate bar (threshold = 24*50/100 = 12 <= errs=24)
+        // but NOT the min_samples floor (25) → stays Closed, proving the gate is live.
+        for _ in 0..24 {
+            cb.record_error();
+        }
+        assert_eq!(
+            cb.current_state(),
+            CircuitState::Closed,
+            "24 samples is below min_samples=25 even at 100% failure rate"
+        );
+
+        // The 25th error crosses the min_samples floor → Open.
+        cb.record_error();
+        assert_eq!(
+            cb.current_state(),
+            CircuitState::Open,
+            "25 of 25 errors over min_samples=25 should open the circuit"
+        );
+        assert!(!cb.allow_request());
+    }
+
+    #[test]
+    fn test_abort_probe_releases_half_open_reservation() {
+        let config = CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 10,
+            recovery_timeout_secs: 0,
+            half_open_max_requests: 3,
+        };
+        let cb = CircuitBreaker::with_config(config);
+
+        // Drive the circuit Open, then into HalfOpen by reserving a probe.
+        for _ in 0..5 {
+            cb.record_error();
+        }
+        assert_eq!(cb.current_state(), CircuitState::Open);
+
+        assert!(cb.allow_request());
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+        assert!(
+            cb.half_open_in_flight.load(Ordering::Acquire),
+            "allow_request should reserve the probe slot"
+        );
+
+        // While a probe is reserved, a second reservation is rejected.
+        assert!(
+            !cb.allow_request(),
+            "second probe must be rejected while one is in flight"
+        );
+
+        // Aborting releases the unused reservation.
+        cb.abort_probe();
+        assert!(
+            !cb.half_open_in_flight.load(Ordering::Acquire),
+            "abort_probe should clear the in-flight flag"
+        );
+
+        // The next allow_request is admitted again because the slot was freed.
+        assert!(
+            cb.allow_request(),
+            "after abort_probe the next probe should be admitted"
         );
     }
 }

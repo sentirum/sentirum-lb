@@ -139,7 +139,7 @@ cargo test
 
 | Category | Features |
 |----------|----------|
-| **Routing** | Fabio-style commands, live addition via admin API, `prefix`/`iprefix`/`glob` matchers, header-based routing, path rewrite (`strip`/`prepend`), host override |
+| **Routing** | Fabio-style commands, live addition via admin API, `prefix`/`iprefix`/`glob`/`exact` matchers, header-based routing, path rewrite (`strip`/`prepend`), host override |
 | **Balancing** | Round-robin, random, least-connections; weighted targets with weighted interleaving |
 | **Protocols** | HTTP, HTTPS, gRPC, gRPCS, gRPC-Web bridge, WebSocket, WSS, raw TCP (tcp/tcp+sni/https+tcp+sni/tcp-dynamic) |
 | **Resilience** | Per-target circuit breaker (closed/open/half-open), active health checks (HTTP/TCP probes), per-target rate limiting (token bucket) |
@@ -766,7 +766,7 @@ include_warning = false            # Include "warning" health status services
 
 [proxy]
 strategy = "round-robin"           # round-robin | random | least-connections
-matcher = "prefix"                 # prefix | iprefix | glob
+matcher = "prefix"                 # prefix | iprefix | glob | exact
 request_id_header = "X-Request-ID"
 no_route_status = 404
 connect_timeout = "5s"

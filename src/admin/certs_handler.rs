@@ -52,32 +52,45 @@ pub(super) async fn certs_handler(
     let runtime = state.tls_store.as_ref().map(|store| store.status());
     let client_ca_runtime = state.client_ca_store.as_ref().map(|store| store.status());
 
-    let mut listeners: Vec<serde_json::Value> = Vec::new();
-
-    if tls_source != "disabled" && tls_source == "file" && !config.tls.cert_path.is_empty() {
-        listeners.push(file_cert_info(
-            "primary",
-            &config.tls.listen,
-            &config.tls.cert_path,
-            &config.tls.client_auth,
+    // Gather file-listener descriptors, then read + parse the certificate files
+    // off the async executor (fs I/O and X509 parsing are blocking).
+    let mut file_listeners: Vec<(String, String, String, String)> = Vec::new();
+    if tls_source == "file" && !config.tls.cert_path.is_empty() {
+        file_listeners.push((
+            "primary".to_string(),
+            config.tls.listen.clone(),
+            config.tls.cert_path.clone(),
+            config.tls.client_auth.clone(),
         ));
     }
-
     for (i, tls_cfg) in config.tls_listeners.iter().enumerate() {
-        let src = match crate::proxy::tls::TlsMode::resolve(tls_cfg) {
-            Ok(Some(crate::proxy::tls::TlsMode::File(_))) => "file",
-            Ok(Some(crate::proxy::tls::TlsMode::ConsulKv(_))) => "consul_kv",
-            _ => continue,
-        };
-        if src == "file" && !tls_cfg.cert_path.is_empty() {
-            listeners.push(file_cert_info(
-                &format!("tls_listeners[{}]", i),
-                &tls_cfg.listen,
-                &tls_cfg.cert_path,
-                &tls_cfg.client_auth,
+        let is_file = matches!(
+            crate::proxy::tls::TlsMode::resolve(tls_cfg),
+            Ok(Some(crate::proxy::tls::TlsMode::File(_)))
+        );
+        if is_file && !tls_cfg.cert_path.is_empty() {
+            file_listeners.push((
+                format!("tls_listeners[{}]", i),
+                tls_cfg.listen.clone(),
+                tls_cfg.cert_path.clone(),
+                tls_cfg.client_auth.clone(),
             ));
         }
     }
+    let listeners: Vec<serde_json::Value> = if file_listeners.is_empty() {
+        Vec::new()
+    } else {
+        tokio::task::spawn_blocking(move || {
+            file_listeners
+                .iter()
+                .map(|(label, listen, cert_path, client_auth)| {
+                    file_cert_info(label, listen, cert_path, client_auth)
+                })
+                .collect()
+        })
+        .await
+        .unwrap_or_default()
+    };
 
     axum::Json(serde_json::json!({
         "source": tls_source,
@@ -116,76 +129,88 @@ pub(super) async fn certs_reload_handler(
         }));
     }
 
-    let mut results = Vec::new();
-    let mut errors = Vec::new();
+    // Cert load + file read + X509 parse are blocking; run them off the executor.
+    // file_certs holds Arc/Config clones, so this is cheap to move into the task.
+    let file_certs = state.file_certs.clone();
+    let (results, errors) = tokio::task::spawn_blocking(move || {
+        let mut results = Vec::new();
+        let mut errors = Vec::new();
+        for (label, shared_cert, config) in &file_certs {
+            match crate::proxy::tls::load_static_certificate(config) {
+                Ok(new_cert) => {
+                    let cert_path = &config.cert_path;
+                    let subject;
+                    let cn;
+                    let days: Option<i64>;
 
-    for (label, shared_cert, config) in &state.file_certs {
-        match crate::proxy::tls::load_static_certificate(config) {
-            Ok(new_cert) => {
-                let cert_path = &config.cert_path;
-                let subject;
-                let cn;
-                let days: Option<i64>;
-
-                if let Ok(pem_bytes) = std::fs::read(cert_path) {
-                    if let Ok(certs) = crate::proxy::tls::parse_certificate_chain(&pem_bytes) {
-                        if let Some(leaf) = certs.first() {
-                            subject = crate::proxy::tls::certificate_subject_string_ref(leaf);
-                            cn = crate::proxy::tls::first_subject_value(
-                                leaf,
-                                pingora::tls::nid::Nid::COMMONNAME,
-                            );
-                            let not_after_unix =
-                                crate::proxy::tls::asn1_time_to_unix_seconds(leaf.not_after());
-                            days = not_after_unix.map(|exp| {
-                                ((exp as i64) - (crate::proxy::tls::now_unix() as i64)) / 86400
-                            });
+                    if let Ok(pem_bytes) = std::fs::read(cert_path) {
+                        if let Ok(certs) = crate::proxy::tls::parse_certificate_chain(&pem_bytes) {
+                            if let Some(leaf) = certs.first() {
+                                subject = crate::proxy::tls::certificate_subject_string_ref(leaf);
+                                cn = crate::proxy::tls::first_subject_value(
+                                    leaf,
+                                    pingora::tls::nid::Nid::COMMONNAME,
+                                );
+                                let not_after_unix =
+                                    crate::proxy::tls::asn1_time_to_unix_seconds(leaf.not_after());
+                                days = not_after_unix.map(|exp| {
+                                    ((exp as i64) - (crate::proxy::tls::now_unix() as i64)) / 86400
+                                });
+                            } else {
+                                subject = "unknown".to_string();
+                                cn = None;
+                                days = None;
+                            }
                         } else {
-                            subject = "unknown".to_string();
+                            subject = "parse-error".to_string();
                             cn = None;
                             days = None;
                         }
                     } else {
-                        subject = "parse-error".to_string();
+                        subject = "read-error".to_string();
                         cn = None;
                         days = None;
                     }
-                } else {
-                    subject = "read-error".to_string();
-                    cn = None;
-                    days = None;
+
+                    shared_cert.store(new_cert);
+
+                    tracing::info!(
+                        listener = %label,
+                        subject = %subject,
+                        common_name = ?cn,
+                        days_remaining = ?days,
+                        "Certificate manually reloaded via admin API"
+                    );
+
+                    results.push(serde_json::json!({
+                        "listener": label,
+                        "subject": subject,
+                        "common_name": cn,
+                        "days_remaining": days,
+                    }));
                 }
-
-                shared_cert.store(new_cert);
-
-                tracing::info!(
-                    listener = %label,
-                    subject = %subject,
-                    common_name = ?cn,
-                    days_remaining = ?days,
-                    "Certificate manually reloaded via admin API"
-                );
-
-                results.push(serde_json::json!({
-                    "listener": label,
-                    "subject": subject,
-                    "common_name": cn,
-                    "days_remaining": days,
-                }));
-            }
-            Err(error) => {
-                tracing::warn!(
-                    listener = %label,
-                    error = %error,
-                    "Failed to reload certificate via admin API"
-                );
-                errors.push(serde_json::json!({
-                    "listener": label,
-                    "error": error.to_string(),
-                }));
+                Err(error) => {
+                    tracing::warn!(
+                        listener = %label,
+                        error = %error,
+                        "Failed to reload certificate via admin API"
+                    );
+                    errors.push(serde_json::json!({
+                        "listener": label,
+                        "error": error.to_string(),
+                    }));
+                }
             }
         }
-    }
+        (results, errors)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        (
+            Vec::new(),
+            vec![serde_json::json!({ "error": "certificate reload task failed" })],
+        )
+    });
 
     axum::Json(serde_json::json!({
         "success": errors.is_empty(),

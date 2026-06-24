@@ -92,9 +92,10 @@ impl Picker for RandomPicker {
 /// (they receive no traffic). When all targets have weight 0, falls back
 /// to simple min-by-connection-count.
 ///
-/// Memory ordering: Acquire on load pairs with Release in
-/// `Target::try_acquire_connection_slot`, forming a proper inter-thread
-/// ordering boundary without requiring full SeqCst serialization.
+/// Memory ordering: `active_connections` is read with `Acquire`, but the counter
+/// carries no dependent data — it only feeds a magnitude comparison — so `Relaxed`
+/// would be equally correct. There is intentionally no happens-before pairing with
+/// the (Relaxed) slot increment/decrement in `Target::try_acquire_connection_slot`.
 pub struct LeastConnectionsPicker;
 
 impl Picker for LeastConnectionsPicker {
@@ -159,10 +160,9 @@ pub fn pick_target_by_strategy(
             PICKER.pick(targets, w_targets, counter)
         }
         "least-connections" | "lc" => LeastConnectionsPicker.pick(targets, w_targets, counter),
-        _ => {
-            tracing::warn!("Unknown picker '{}', defaulting to round-robin", strategy);
-            RoundRobinPicker.pick(targets, w_targets, counter)
-        }
+        // Unknown strategies are rejected by Config::validate(); this arm is a
+        // defensive fallback and stays allocation/log-free on the hot path.
+        _ => RoundRobinPicker.pick(targets, w_targets, counter),
     }
 }
 

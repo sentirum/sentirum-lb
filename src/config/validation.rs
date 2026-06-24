@@ -131,6 +131,62 @@ impl Config {
             ));
         }
 
+        // Validate proxy.matcher against the supported set. Unknown values would
+        // otherwise silently fall back to prefix matching (MatcherKind::from_config),
+        // broadening routes and potentially over-exposing backends with no signal.
+        if !matches!(
+            self.proxy.matcher.as_str(),
+            "" | "prefix" | "iprefix" | "glob" | "exact"
+        ) {
+            errors.push(format!(
+                "proxy.matcher must be one of prefix|iprefix|glob|exact, got '{}'",
+                self.proxy.matcher
+            ));
+        }
+
+        // Validate proxy.strategy. Unknown values silently fall back to round-robin.
+        if !matches!(
+            self.proxy.strategy.as_str(),
+            "" | "round-robin" | "rr" | "random" | "rnd" | "least-connections" | "lc"
+        ) {
+            errors.push(format!(
+                "proxy.strategy must be one of round-robin|random|least-connections, got '{}'",
+                self.proxy.strategy
+            ));
+        }
+
+        // Health-check debounce counts must be >= 1; 0 makes a single probe flip
+        // health, defeating the consecutive-sample debounce.
+        if self.proxy.health_check_rise == 0 {
+            errors.push("proxy.health_check_rise must be >= 1".to_string());
+        }
+        if self.proxy.health_check_fall == 0 {
+            errors.push("proxy.health_check_fall must be >= 1".to_string());
+        }
+
+        // no_route_status must be a valid HTTP status code.
+        if !(100..=599).contains(&self.proxy.no_route_status) {
+            errors.push(format!(
+                "proxy.no_route_status must be a valid HTTP status (100-599), got {}",
+                self.proxy.no_route_status
+            ));
+        }
+
+        // request_id_header, when set, must be a valid HTTP header name — otherwise
+        // the per-request insert_header would error and fail all proxying.
+        if !self.proxy.request_id_header.is_empty()
+            && self
+                .proxy
+                .request_id_header
+                .parse::<http::header::HeaderName>()
+                .is_err()
+        {
+            errors.push(format!(
+                "proxy.request_id_header is not a valid HTTP header name: '{}'",
+                self.proxy.request_id_header
+            ));
+        }
+
         // Validate trusted_proxies CIDR format
         for cidr in &self.proxy.trusted_proxies {
             if let Err(e) = validate_cidr(cidr) {

@@ -31,24 +31,31 @@ pub fn load_shareable_cert(config: &TlsCertConfig) -> Result<SharedFileCert, Tls
 struct FileMeta {
     cert_mtime: Option<SystemTime>,
     key_mtime: Option<SystemTime>,
+    cert_len: Option<u64>,
+    key_len: Option<u64>,
 }
 
 impl FileMeta {
     fn read(cert_path: &str, key_path: &str) -> Self {
-        let cert_mtime = std::fs::metadata(cert_path)
-            .ok()
-            .and_then(|m| m.modified().ok());
-        let key_mtime = std::fs::metadata(key_path)
-            .ok()
-            .and_then(|m| m.modified().ok());
+        let cert_meta = std::fs::metadata(cert_path).ok();
+        let key_meta = std::fs::metadata(key_path).ok();
         Self {
-            cert_mtime,
-            key_mtime,
+            cert_mtime: cert_meta.as_ref().and_then(|m| m.modified().ok()),
+            key_mtime: key_meta.as_ref().and_then(|m| m.modified().ok()),
+            cert_len: cert_meta.as_ref().map(|m| m.len()),
+            key_len: key_meta.as_ref().map(|m| m.len()),
         }
     }
 
     fn has_changed(&self, other: &Self) -> bool {
-        self.cert_mtime != other.cert_mtime || self.key_mtime != other.key_mtime
+        // Reload when either mtime or length differs. Comparing length too
+        // catches two writes that land within a single fs mtime tick. `!=`
+        // (not `>`) is kept deliberately so clock-skewed mtimes in either
+        // direction still trigger a reload rather than being ignored.
+        self.cert_mtime != other.cert_mtime
+            || self.key_mtime != other.key_mtime
+            || self.cert_len != other.cert_len
+            || self.key_len != other.key_len
     }
 }
 
@@ -208,5 +215,42 @@ mod tests {
         assert_eq!(cert.entry_name, "static-file");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+    #[test]
+    fn file_meta_detects_length_only_change() {
+        // A rewrite within the same fs mtime tick that changes only the file
+        // length must still be detected. mtime is identical across snapshots
+        // here, so only the length comparison can catch the change.
+        let epoch = SystemTime::UNIX_EPOCH;
+        let a = FileMeta {
+            cert_mtime: Some(epoch),
+            key_mtime: Some(epoch),
+            cert_len: Some(100),
+            key_len: Some(50),
+        };
+        let longer = FileMeta {
+            cert_mtime: Some(epoch),
+            key_mtime: Some(epoch),
+            cert_len: Some(120),
+            key_len: Some(50),
+        };
+        let shorter = FileMeta {
+            cert_mtime: Some(epoch),
+            key_mtime: Some(epoch),
+            cert_len: Some(100),
+            key_len: Some(40),
+        };
+        assert!(
+            a.has_changed(&longer),
+            "cert length growth must be detected"
+        );
+        assert!(
+            a.has_changed(&shorter),
+            "key length shrink must be detected"
+        );
+        assert!(
+            !a.has_changed(&a),
+            "identical meta must not report a change"
+        );
     }
 }

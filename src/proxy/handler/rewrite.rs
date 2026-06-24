@@ -56,8 +56,8 @@ pub(super) fn resolve_read_timeout(
 ) -> std::time::Duration {
     let timeouts = config.parsed_timeouts();
 
-    if let Some(raw) = target.read_timeout_override() {
-        return Config::parse_duration(raw);
+    if let Some(d) = target.read_timeout_override() {
+        return d;
     }
 
     if is_streaming {

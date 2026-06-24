@@ -6,11 +6,57 @@ use crate::route::target::Target;
 use async_trait::async_trait;
 use pingora::services::background::BackgroundService;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio::sync::watch;
+
+/// Maximum number of in-flight TCP connections that have been accepted but not
+/// yet fully established upstream — i.e. before a per-target slot is acquired
+/// and the ClientHello is read/parsed. Caps the memory/CPU a slowloris-style
+/// flood of half-open connections can consume before SNI routing completes.
+const MAX_INFLIGHT_TCP_CONNS: usize = 8192;
+
+/// Cooldown (wall-clock seconds) between "inflight limit saturated" warnings so
+/// a sustained flood does not spam the log while backpressure is applied.
+const TCP_INFLIGHT_WARN_COOLDOWN_SECS: u64 = 5;
+
+/// Global bounded semaphore backing [`MAX_INFLIGHT_TCP_CONNS`]. An
+/// `OwnedSemaphorePermit` is acquired in the accept loop and moved into each
+/// connection task, so it is released automatically when the task ends
+/// (success, error, or panic) — no manual bookkeeping required.
+static TCP_INFLIGHT_SEMAPHORE: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(MAX_INFLIGHT_TCP_CONNS)));
+
+/// Wall-clock seconds of the last "inflight limit saturated" warning; used to
+/// rate-limit the log via [`warn_tcp_inflight_saturated`].
+static LAST_TCP_INFLIGHT_WARN_SECS: AtomicU64 = AtomicU64::new(0);
+
+/// Emit the "TCP inflight limit saturated" warning at most once per
+/// [`TCP_INFLIGHT_WARN_COOLDOWN_SECS`]. Returns `true` when a warning was
+/// emitted this call and `false` when it was suppressed by the rate limiter.
+fn warn_tcp_inflight_saturated() -> bool {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST_TCP_INFLIGHT_WARN_SECS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= TCP_INFLIGHT_WARN_COOLDOWN_SECS {
+        LAST_TCP_INFLIGHT_WARN_SECS.store(now, Ordering::Relaxed);
+        tracing::warn!(
+            limit = MAX_INFLIGHT_TCP_CONNS,
+            "TCP inflight connection limit saturated; applying backpressure to new accepts"
+        );
+        true
+    } else {
+        false
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TcpMode {
@@ -233,8 +279,18 @@ async fn reconcile_dynamic_listeners(
     }
 
     for port in ports {
-        if listeners.contains_key(&port) {
-            continue;
+        // Treat a listener whose task has died (e.g. its `TcpListener::bind`
+        // failed) as absent so the next reconcile rebinds it instead of
+        // leaving a dead handle that is never recovered.
+        if let Some(handle) = listeners.get(&port) {
+            if !handle.task.is_finished() {
+                continue;
+            }
+            tracing::warn!(
+                listen_port = port,
+                "Dynamic TCP listener task has exited; rebinding"
+            );
+            listeners.remove(&port);
         }
 
         let listen = format!("0.0.0.0:{port}");
@@ -334,10 +390,31 @@ async fn run_tcp_listener_with_watch(
                     }
                 };
 
+                // Cap in-flight pre-routing connections so a slowloris-style
+                // flood of half-open ClientHellos cannot exhaust memory before a
+                // per-target slot is acquired. The permit is moved into the
+                // spawned task and released automatically on drop.
+                let inflight_permit = match TCP_INFLIGHT_SEMAPHORE.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        warn_tcp_inflight_saturated();
+                        // Apply backpressure: wait for a slot. The semaphore is
+                        // never closed in normal operation; if it is (teardown),
+                        // abandon this accept.
+                        match TCP_INFLIGHT_SEMAPHORE.clone().acquire_owned().await {
+                            Ok(permit) => permit,
+                            Err(_) => continue,
+                        }
+                    }
+                };
+
                 let route_table = route_table.clone();
                 let config = config.clone();
                 let mode = mode.clone();
                 tokio::spawn(async move {
+                    // Hold the permit for the whole connection lifetime; it is
+                    // released automatically when the task ends.
+                    let _inflight_permit = inflight_permit;
                     let result = match mode {
                         TcpListenerMode::Plain => {
                             handle_tcp_connection(downstream, route_table, config).await
@@ -432,6 +509,11 @@ async fn handle_https_tcp_sni_connection(
     let config_snapshot = config.load();
     let read_timeout = crate::config::Config::parse_duration(&config_snapshot.proxy.read_timeout);
     let strategy = config_snapshot.proxy.strategy.clone();
+    // Pre-extract the timeouts used by the fallback path so we can drop the
+    // arc_swap guard before the long-lived fallback copy.
+    let connect_timeout =
+        crate::config::Config::parse_duration(&config_snapshot.proxy.connect_timeout);
+    let idle_timeout = crate::config::Config::parse_duration(&config_snapshot.proxy.idle_timeout);
 
     let mut headers = [0_u8; 9];
     read_exact_with_timeout(&mut downstream, &mut headers, read_timeout).await?;
@@ -444,11 +526,14 @@ async fn handle_https_tcp_sni_connection(
             data
         }
         Err(_) => {
+            // Drop the arc_swap guard before the long-lived fallback copy.
+            drop(config_snapshot);
             return proxy_to_https_fallback(
                 downstream,
                 headers.to_vec(),
-                config_snapshot.as_ref(),
                 https_fallback_addr,
+                connect_timeout,
+                idle_timeout,
             )
             .await;
         }
@@ -473,11 +558,14 @@ async fn handle_https_tcp_sni_connection(
         .await;
     }
 
+    // Drop the arc_swap guard before the long-lived fallback copy.
+    drop(config_snapshot);
     proxy_to_https_fallback(
         downstream,
         client_hello,
-        config_snapshot.as_ref(),
         https_fallback_addr,
+        connect_timeout,
+        idle_timeout,
     )
     .await
 }
@@ -522,13 +610,14 @@ async fn proxy_tcp_streams(
     server_name: Option<&str>,
 ) -> Result<(), std::io::Error> {
     let config_snapshot = config.load();
-    if !target.try_acquire_connection_slot(config_snapshot.proxy.max_connections as u64) {
+    let max_connections = config_snapshot.proxy.max_connections as u64;
+    if !target.try_acquire_connection_slot(max_connections) {
         match server_name {
             Some(server_name) => {
-                tracing::warn!(server_name = %server_name, target_url = %target.url, max_connections = config_snapshot.proxy.max_connections, "TCP SNI upstream concurrency limit reached")
+                tracing::warn!(server_name = %server_name, target_url = %target.url, max_connections, "TCP SNI upstream concurrency limit reached")
             }
             None => {
-                tracing::warn!(target_url = %target.url, max_connections = config_snapshot.proxy.max_connections, "TCP upstream concurrency limit reached")
+                tracing::warn!(target_url = %target.url, max_connections, "TCP upstream concurrency limit reached")
             }
         }
         return Ok(());
@@ -578,6 +667,13 @@ async fn proxy_tcp_streams(
         }
     };
 
+    // Extract the idle timeout while the snapshot is still valid, then drop the
+    // arc_swap guard immediately. Holding it across the long-lived copy below
+    // would pin an arc_swap debt slot for the whole connection lifetime and
+    // stall the HTTP hot-path `load()`.
+    let idle_timeout = crate::config::Config::parse_duration(&config_snapshot.proxy.idle_timeout);
+    drop(config_snapshot);
+
     if target.proxy_proto() {
         write_proxy_header(&mut upstream, &downstream).await?;
     }
@@ -587,32 +683,42 @@ async fn proxy_tcp_streams(
         upstream.flush().await?;
     }
 
-    let _ = copy_bidirectional(&mut downstream, &mut upstream).await?;
+    let _ = copy_bidirectional_with_idle(&mut downstream, &mut upstream, idle_timeout).await?;
     Ok(())
 }
 
 async fn proxy_to_https_fallback(
     mut downstream: TcpStream,
     initial_bytes: Vec<u8>,
-    config: &Config,
     fallback_addr: &str,
+    connect_timeout: Duration,
+    idle_timeout: Duration,
 ) -> Result<(), std::io::Error> {
-    let mut upstream = connect_addr(fallback_addr, config).await?;
+    let mut upstream = connect_with_timeout(fallback_addr, connect_timeout).await?;
     if !initial_bytes.is_empty() {
         upstream.write_all(&initial_bytes).await?;
         upstream.flush().await?;
     }
-    let _ = copy_bidirectional(&mut downstream, &mut upstream).await?;
+    let _ = copy_bidirectional_with_idle(&mut downstream, &mut upstream, idle_timeout).await?;
     Ok(())
 }
 
 async fn connect_upstream(target: &Target, config: &Config) -> Result<TcpStream, std::io::Error> {
     let resolved = target.resolve_upstream_addr().await?;
-    connect_addr(&resolved.to_string(), config).await
+    // Connect with the already-resolved SocketAddr instead of round-tripping it
+    // through a string parse; the string/hostname path is reserved for the
+    // HTTPS fallback upstream.
+    let connect_timeout = crate::config::Config::parse_duration(&config.proxy.connect_timeout);
+    connect_with_timeout(resolved, connect_timeout).await
 }
 
-async fn connect_addr(addr: &str, config: &Config) -> Result<TcpStream, std::io::Error> {
-    let timeout = crate::config::Config::parse_duration(&config.proxy.connect_timeout);
+/// Connect to `addr` (a resolved `SocketAddr` for direct upstreams, or a
+/// hostname:port string for the HTTPS fallback), applying the configured
+/// connect timeout. A zero timeout disables the deadline.
+async fn connect_with_timeout<A>(addr: A, timeout: Duration) -> Result<TcpStream, std::io::Error>
+where
+    A: tokio::net::ToSocketAddrs,
+{
     if timeout.is_zero() {
         return TcpStream::connect(addr).await;
     }
@@ -628,20 +734,106 @@ async fn write_proxy_header(
 ) -> Result<(), std::io::Error> {
     let client = downstream.peer_addr()?;
     let server = downstream.local_addr()?;
-    let proto = if client.ip().is_ipv4() {
-        "TCP4"
-    } else {
-        "TCP6"
-    };
-    let header = format!(
-        "PROXY {proto} {} {} {} {}\r\n",
-        client.ip(),
-        server.ip(),
-        client.port(),
-        server.port()
-    );
+    let header = format_proxy_header(client, server);
     upstream.write_all(header.as_bytes()).await?;
     Ok(())
+}
+
+/// Build a PROXY protocol v1 header line for the given client/server pair.
+///
+/// Both addresses are normalized with [`IpAddr::to_canonical`] so an IPv4 client
+/// accepted on a dual-stack (`::`) listener — which arrives as an IPv4-mapped
+/// IPv6 address (`::ffff:a.b.c.d`) — yields a correct `PROXY TCP4` line instead
+/// of the malformed `PROXY TCP6 ::ffff:a.b.c.d ...`.
+fn format_proxy_header(client: SocketAddr, server: SocketAddr) -> String {
+    let client_ip = client.ip().to_canonical();
+    let server_ip = server.ip().to_canonical();
+    let proto = if client_ip.is_ipv4() { "TCP4" } else { "TCP6" };
+    format!(
+        "PROXY {proto} {client_ip} {server_ip} {} {}\r\n",
+        client.port(),
+        server.port()
+    )
+}
+
+/// Bidirectional copy between `downstream` and `upstream` with an idle timeout
+/// that is reset on every chunk of progress.
+///
+/// Unlike a total-duration cap, only uninterrupted idleness (neither side sends
+/// data) for `idle` triggers a `TimedOut` error. This reaps half-open
+/// connections whose peer vanished without FIN/RST — which would otherwise pin
+/// the connection, the per-target slot, and the copy buffers until the OS
+/// keepalive (~2h) — while long-lived but chatty protocols (NATS heartbeats,
+/// etc.) stay alive. `idle == Duration::ZERO` disables the cap and falls back
+/// to the plain `copy_bidirectional`.
+///
+/// Returns `(downstream_to_upstream_bytes, upstream_to_downstream_bytes)`.
+async fn copy_bidirectional_with_idle(
+    downstream: &mut TcpStream,
+    upstream: &mut TcpStream,
+    idle: Duration,
+) -> Result<(u64, u64), std::io::Error> {
+    if idle.is_zero() {
+        return copy_bidirectional(downstream, upstream).await;
+    }
+
+    let (mut down_read, mut down_write) = downstream.split();
+    let (mut up_read, mut up_write) = upstream.split();
+    let mut down_buf = [0_u8; 8 * 1024];
+    let mut up_buf = [0_u8; 8 * 1024];
+    let mut downstream_to_upstream: u64 = 0;
+    let mut upstream_to_downstream: u64 = 0;
+
+    // Half-close bookkeeping. tokio's `copy_bidirectional`, on a one-sided EOF,
+    // shuts down the peer's write half and keeps relaying the other direction
+    // until it also closes. We mirror that so request/response and half-close
+    // protocols (FTP data channels, `nc -N`, RPC shutdown(WR)+read) are not
+    // truncated when `idle` is non-zero — which it is by default
+    // (`proxy.idle_timeout` defaults to 120s).
+    let mut down_eof = false;
+    let mut up_eof = false;
+
+    loop {
+        if down_eof && up_eof {
+            return Ok((downstream_to_upstream, upstream_to_downstream));
+        }
+
+        // The sleep is re-armed every iteration, so the idle deadline only
+        // fires after a full `idle` period with no progress in any still-open
+        // direction. A disabled read branch (its EOF already seen) is never
+        // polled again.
+        tokio::select! {
+            n = down_read.read(&mut down_buf), if !down_eof => {
+                let n = n?;
+                if n == 0 {
+                    // Downstream finished sending: signal EOF to the upstream
+                    // write side and stop polling this direction, but keep
+                    // relaying upstream -> downstream.
+                    let _ = up_write.shutdown().await;
+                    down_eof = true;
+                } else {
+                    up_write.write_all(&down_buf[..n]).await?;
+                    downstream_to_upstream += n as u64;
+                }
+            }
+            n = up_read.read(&mut up_buf), if !up_eof => {
+                let n = n?;
+                if n == 0 {
+                    let _ = down_write.shutdown().await;
+                    up_eof = true;
+                } else {
+                    down_write.write_all(&up_buf[..n]).await?;
+                    upstream_to_downstream += n as u64;
+                }
+            }
+            _ = tokio::time::sleep(idle) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "TCP proxy idle timeout",
+                ));
+            }
+        }
+    }
 }
 
 async fn read_exact_with_timeout(
@@ -1078,5 +1270,248 @@ mod tests {
             !t.is_host_safe() && t.ssrf_skip_verify(),
             "Loopback blocked by SSRF but ssrfskipverify=true should bypass proxy check"
         );
+    }
+    #[test]
+    fn format_proxy_header_canonicalizes_ipv4_mapped_ipv6() {
+        // A real IPv4 client address → TCP4 line.
+        let v4_client = SocketAddr::from(([10, 11, 12, 13], 1234));
+        let v4_server = SocketAddr::from(([192, 0, 2, 1], 80));
+        let header = format_proxy_header(v4_client, v4_server);
+        assert!(
+            header.starts_with("PROXY TCP4 10.11.12.13 192.0.2.1 1234 80\r\n"),
+            "unexpected v4 header: {header}"
+        );
+
+        // A dual-stack listener yields the client as an IPv4-mapped IPv6 addr
+        // (::ffff:a.b.c.d). It must be normalized to TCP4, not emitted as TCP6.
+        let mapped_client: SocketAddr = "[::ffff:10.11.12.13]:1234".parse().unwrap();
+        let mapped_server: SocketAddr = "[::ffff:192.0.2.1]:80".parse().unwrap();
+        let header = format_proxy_header(mapped_client, mapped_server);
+        assert!(
+            header.starts_with("PROXY TCP4 10.11.12.13 192.0.2.1 1234 80\r\n"),
+            "v4-mapped-v6 must canonicalize to TCP4: {header}"
+        );
+        assert!(
+            !header.contains("::ffff"),
+            "header must not contain a mapped-v6 literal: {header}"
+        );
+
+        // A genuine IPv6 client address stays TCP6.
+        let v6_client: SocketAddr = "[2001:db8::1]:1234".parse().unwrap();
+        let v6_server: SocketAddr = "[2001:db8::2]:80".parse().unwrap();
+        let header = format_proxy_header(v6_client, v6_server);
+        assert!(
+            header.starts_with("PROXY TCP6 2001:db8::1 2001:db8::2 1234 80\r\n"),
+            "unexpected v6 header: {header}"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_bidirectional_with_idle_reaps_idle_connection() {
+        // downstream pair (client side + server side)
+        let d_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let d_addr = d_listener.local_addr().unwrap();
+        let d_accept = tokio::spawn(async move { d_listener.accept().await.unwrap().0 });
+        let mut d_client = TcpStream::connect(d_addr).await.unwrap();
+        let d_server = d_accept.await.unwrap();
+
+        // upstream pair (client side + server side)
+        let u_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let u_addr = u_listener.local_addr().unwrap();
+        let u_accept = tokio::spawn(async move { u_listener.accept().await.unwrap().0 });
+        let mut u_client = TcpStream::connect(u_addr).await.unwrap();
+        let u_server = u_accept.await.unwrap();
+
+        let idle = Duration::from_millis(200);
+        let mut d_server = d_server;
+        let mut u_server = u_server;
+        let copy = tokio::spawn(async move {
+            copy_bidirectional_with_idle(&mut d_server, &mut u_server, idle).await
+        });
+
+        // 1) Data flows both ways while the connection is active (the idle timer
+        //    is reset by each chunk of progress).
+        d_client.write_all(b"hello-downstream").await.unwrap();
+        let mut buf = [0_u8; 32];
+        let n = u_client.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"hello-downstream");
+
+        u_client.write_all(b"hello-upstream").await.unwrap();
+        let n = d_client.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"hello-upstream");
+
+        // 2) With no further data in either direction, the copy must time out
+        //    rather than blocking forever (half-open reap). Allow generous
+        //    slack for slow CI.
+        let result = tokio::time::timeout(Duration::from_secs(3), copy)
+            .await
+            .expect("idle copy did not finish in time")
+            .expect("copy task panicked");
+        let err = result.expect_err("expected an idle-timeout error");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn copy_bidirectional_with_idle_preserves_half_close() {
+        // downstream pair (client side + server side)
+        let d_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let d_addr = d_listener.local_addr().unwrap();
+        let d_accept = tokio::spawn(async move { d_listener.accept().await.unwrap().0 });
+        let mut d_client = TcpStream::connect(d_addr).await.unwrap();
+        let d_server = d_accept.await.unwrap();
+
+        // upstream pair (client side + server side)
+        let u_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let u_addr = u_listener.local_addr().unwrap();
+        let u_accept = tokio::spawn(async move { u_listener.accept().await.unwrap().0 });
+        let mut u_client = TcpStream::connect(u_addr).await.unwrap();
+        let u_server = u_accept.await.unwrap();
+
+        // Generous idle: this test exercises half-close, not the idle reaper.
+        let mut d_server = d_server;
+        let mut u_server = u_server;
+        let copy = tokio::spawn(async move {
+            copy_bidirectional_with_idle(&mut d_server, &mut u_server, Duration::from_secs(30))
+                .await
+        });
+
+        // Client sends a request and half-closes its write side (shutdown(WR)).
+        d_client.write_all(b"REQUEST").await.unwrap();
+        d_client.shutdown().await.unwrap();
+
+        // Upstream reads the full request, then sends a response larger than a
+        // single relay buffer (exercises the loop), then also half-closes.
+        let mut req = [0_u8; 64];
+        let n = u_client.read(&mut req).await.unwrap();
+        assert_eq!(&req[..n], b"REQUEST");
+
+        let response: Vec<u8> = (0..4096_u32).map(|i| (i % 251) as u8).collect();
+        u_client.write_all(&response).await.unwrap();
+        u_client.shutdown().await.unwrap();
+
+        // The client MUST receive the full response despite having half-closed
+        // its write side first. A loop that `break`s on the first EOF (the old
+        // bug) would truncate this to zero bytes.
+        let mut received = Vec::new();
+        let mut buf = [0_u8; 512];
+        loop {
+            let n = d_client.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            received.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(
+            received, response,
+            "half-closed response must not be truncated"
+        );
+
+        // Both directions EOF'd → the copy returns Ok with accurate byte counts.
+        let (down_to_up, up_to_down) = tokio::time::timeout(Duration::from_secs(5), copy)
+            .await
+            .expect("copy did not finish after both half-closes")
+            .expect("copy task panicked")
+            .expect("copy should complete cleanly on a symmetric half-close");
+        assert_eq!(down_to_up, b"REQUEST".len() as u64);
+        assert_eq!(up_to_down, response.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn reconcile_rebinds_dead_dynamic_listener() {
+        // Reserve a free port; reconcile will bind 0.0.0.0:{port}.
+        let probe = TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let route_table = Arc::new(ManagedRouteTable::new());
+        route_table.update_services(vec![tcp_def(&format!(":{port}"), "tcp://10.0.0.10:4222")]);
+
+        let config = config();
+        let mut listeners: HashMap<u16, DynamicListenerHandle> = HashMap::new();
+
+        // Seed a handle whose task has already exited (simulates a failed bind
+        // that returned immediately, leaving a dead handle that must be rebound).
+        let (dead_tx, _dead_rx) = watch::channel(false);
+        let dead_task = tokio::spawn(async {});
+        while !dead_task.is_finished() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        listeners.insert(
+            port,
+            DynamicListenerHandle {
+                shutdown: dead_tx,
+                task: dead_task,
+            },
+        );
+
+        reconcile_dynamic_listeners(&mut listeners, route_table, config).await;
+
+        // The dead handle must have been replaced with a live, running listener.
+        let handle = listeners
+            .get(&port)
+            .expect("listener should be present after reconcile");
+        // Give the freshly spawned task a chance to bind; a live listener stays
+        // running (blocked on accept), a failed one would finish immediately.
+        for _ in 0..40 {
+            if handle.task.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            !handle.task.is_finished(),
+            "reconcile should have rebound a live listener, not left it dead"
+        );
+
+        // Tear down the spawned listener.
+        let _ = handle.shutdown.send(true);
+    }
+
+    #[test]
+    fn inflight_saturation_warning_is_rate_limited() {
+        // Pretend we last warned at the epoch so the first call emits.
+        LAST_TCP_INFLIGHT_WARN_SECS.store(0, Ordering::Relaxed);
+        assert!(
+            warn_tcp_inflight_saturated(),
+            "first call after cooldown should warn"
+        );
+        assert!(
+            !warn_tcp_inflight_saturated(),
+            "immediate second call within cooldown should be suppressed"
+        );
+        // A last-warn timestamp far in the future also suppresses.
+        LAST_TCP_INFLIGHT_WARN_SECS.store(u64::MAX, Ordering::Relaxed);
+        assert!(
+            !warn_tcp_inflight_saturated(),
+            "call when last-warn is far in the future should be suppressed"
+        );
+        // Restore the shared static for any other tests.
+        LAST_TCP_INFLIGHT_WARN_SECS.store(0, Ordering::Relaxed);
+    }
+
+    #[tokio::test]
+    async fn connect_with_timeout_accepts_socketaddr_and_str() {
+        // SocketAddr-typed connect (fix #6: resolved upstream connects directly,
+        // no string round-trip).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _accept = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+        let via_socketaddr = connect_with_timeout(addr, Duration::from_secs(2))
+            .await
+            .expect("SocketAddr connect should succeed");
+        drop(via_socketaddr);
+
+        // String-typed connect (reserved for the fallback hostname path).
+        let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let _accept2 = tokio::spawn(async move {
+            let _ = listener2.accept().await;
+        });
+        let via_str = connect_with_timeout(addr2.to_string(), Duration::from_secs(2))
+            .await
+            .expect("string connect should succeed");
+        drop(via_str);
     }
 }

@@ -13,7 +13,9 @@ use crate::route::definition::RouteSource;
 pub use crate::route::circuit_breaker::{
     CircuitBreaker, CircuitBreakerConfig, CircuitState, CircuitTransition, monotonic_elapsed_ms,
 };
-pub use crate::route::dns_cache::{DnsCache, DnsCacheEntryView, DnsCacheStats, global_dns_cache};
+pub use crate::route::dns_cache::{
+    DnsCache, DnsCacheEntryView, DnsCacheStats, DnsLookup, global_dns_cache,
+};
 pub use crate::route::health_tracker::TargetHealthTracker;
 pub use crate::route::target_stats::{TargetStats, TargetStatsRegistry};
 
@@ -126,6 +128,35 @@ pub struct Target {
     /// Per-target token bucket rate limiter
     #[serde(skip)]
     pub rate_limiter: Arc<crate::proxy::ratelimit::TokenBucket>,
+
+    // --- Pre-parsed route options (not serialized, computed from `opts` in
+    // pre_parse so the request hot path reads typed fields instead of doing
+    // HashMap lookups + string parsing on every request) ---
+    /// `strip=` path prefix to remove before proxying.
+    #[serde(skip)]
+    pub parsed_strip: Option<String>,
+    /// `prepend=` path prefix to add before proxying.
+    #[serde(skip)]
+    pub parsed_prepend: Option<String>,
+    /// `host=` override for the upstream Host header / TLS SNI.
+    #[serde(skip)]
+    pub parsed_host_override: Option<String>,
+    /// `tlsskipverify=true` — skip upstream certificate verification.
+    #[serde(skip)]
+    pub parsed_tls_skip_verify: bool,
+    /// `pxyproto=true` — emit PROXY protocol v1 to the upstream (raw TCP).
+    #[serde(skip)]
+    pub parsed_proxy_proto: bool,
+    /// `readtimeout=` per-route upstream read-timeout override (pre-parsed).
+    #[serde(skip)]
+    pub parsed_read_timeout: Option<std::time::Duration>,
+    /// Whether a per-target `ratelimit=` override configured the rate limiter.
+    /// Authoritative: a global rate-limit change must not override it.
+    #[serde(skip)]
+    pub has_rate_limit_override: bool,
+    /// Pre-parsed `header=` match constraints as (name, expected value) pairs.
+    #[serde(skip)]
+    pub parsed_header_matches: Vec<(String, String)>,
 }
 
 impl Clone for Target {
@@ -147,6 +178,14 @@ impl Clone for Target {
             stats: Arc::clone(&self.stats),
             edge_stats: Arc::clone(&self.edge_stats),
             rate_limiter: Arc::clone(&self.rate_limiter),
+            parsed_strip: self.parsed_strip.clone(),
+            parsed_prepend: self.parsed_prepend.clone(),
+            parsed_host_override: self.parsed_host_override.clone(),
+            parsed_tls_skip_verify: self.parsed_tls_skip_verify,
+            parsed_proxy_proto: self.parsed_proxy_proto,
+            parsed_read_timeout: self.parsed_read_timeout,
+            has_rate_limit_override: self.has_rate_limit_override,
+            parsed_header_matches: self.parsed_header_matches.clone(),
         }
     }
 }
@@ -170,6 +209,14 @@ impl Default for Target {
             stats: Arc::new(TargetStats::default()),
             edge_stats: Arc::new(TargetStats::default()),
             rate_limiter: Arc::new(crate::proxy::ratelimit::TokenBucket::new()),
+            parsed_strip: None,
+            parsed_prepend: None,
+            parsed_host_override: None,
+            parsed_tls_skip_verify: false,
+            parsed_proxy_proto: false,
+            parsed_read_timeout: None,
+            has_rate_limit_override: false,
+            parsed_header_matches: Vec::new(),
         }
     }
 }
@@ -219,9 +266,15 @@ impl Target {
             self.parsed_tls = self.parsed_protocol.uses_tls();
         }
 
-        // Configure per-target rate limiter from route opts
+        // Configure the per-target rate limiter from route opts. A per-target
+        // `ratelimit=N` override with N > 0 is authoritative and is NOT overridden by
+        // the global rate-limit config (see try_acquire_rate_limit). `ratelimit=0` is
+        // treated as "no per-target override" so the target inherits the global limit.
+        // The flag is reset first so pre_parse stays idempotent if called again.
+        self.has_rate_limit_override = false;
         if let Some(rate_str) = self.opts.get("ratelimit")
             && let Ok(rate) = rate_str.parse::<u64>()
+            && rate > 0
         {
             let burst = self
                 .opts
@@ -229,7 +282,34 @@ impl Target {
                 .and_then(|b| b.parse::<u64>().ok())
                 .unwrap_or(rate);
             self.rate_limiter.configure(rate, burst);
+            self.has_rate_limit_override = true;
         }
+
+        // Pre-parse the remaining route options into typed fields (hot-path reads).
+        self.parsed_strip = self.opts.get("strip").cloned();
+        self.parsed_prepend = self.opts.get("prepend").cloned();
+        self.parsed_host_override = self.opts.get("host").cloned();
+        self.parsed_tls_skip_verify = self.opts.get("tlsskipverify").is_some_and(|v| v == "true");
+        self.parsed_proxy_proto = self.opts.get("pxyproto").is_some_and(|v| v == "true");
+        self.parsed_read_timeout = self
+            .opts
+            .get("readtimeout")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(crate::config::Config::parse_duration);
+        self.parsed_header_matches = self
+            .opts
+            .get("header")
+            .map(|v| {
+                v.split(',')
+                    .filter_map(|pair| {
+                        pair.trim()
+                            .split_once(':')
+                            .map(|(n, val)| (n.to_string(), val.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
     }
 
     /// Check if the upstream host is safe for proxying.
@@ -301,16 +381,18 @@ impl Target {
 
     /// Try to acquire a rate limit token. Returns `true` if allowed.
     pub fn try_acquire_rate_limit(&self, global_rate: usize, global_burst: usize) -> bool {
-        if self.rate_limiter.is_configured() {
+        // A per-target `ratelimit=` override is authoritative — configured once
+        // at parse time and never overridden by the (hot-reloadable) global config.
+        if self.has_rate_limit_override {
             return self.rate_limiter.try_acquire();
         }
 
-        if global_rate == 0 {
-            return true;
-        }
-
+        // Otherwise track the live global config: reconcile the bucket to the
+        // current globals on each call so raising/lowering/disabling the global
+        // rate at runtime takes effect on already-warm targets too. `reconcile`
+        // is a no-op (atomic loads only) when the values are unchanged.
         self.rate_limiter
-            .configure(global_rate as u64, global_burst as u64);
+            .reconcile(global_rate as u64, global_burst as u64);
         self.rate_limiter.try_acquire()
     }
 
@@ -330,19 +412,32 @@ impl Target {
         let cache_key = format!("{host}:{port}");
 
         let cache = global_dns_cache();
-        if let Some(addrs) = cache.lookup(&cache_key)
-            && let Some(addr) = addrs.first()
-        {
-            tracing::trace!(host, port, "DNS cache hit");
-            if !self.ssrf_skip_verify()
-                && (is_ip_always_blocked(&addr.ip())
-                    || (!self.source_allows_private_upstreams() && is_ip_rfc1918(&addr.ip())))
-            {
-                cache.remove(&cache_key);
-                tracing::warn!(host, port, addr = %addr, "DNS cache hit failed SSRF check, re-resolving");
-            } else {
-                return Ok(*addr);
+        match cache.lookup(&cache_key) {
+            DnsLookup::Hit(addrs) => {
+                if let Some(addr) = addrs.first() {
+                    tracing::trace!(host, port, "DNS cache hit");
+                    if !self.ssrf_skip_verify()
+                        && (is_ip_always_blocked(&addr.ip())
+                            || (!self.source_allows_private_upstreams()
+                                && is_ip_rfc1918(&addr.ip())))
+                    {
+                        cache.remove(&cache_key);
+                        tracing::warn!(host, port, addr = %addr, "DNS cache hit failed SSRF check, re-resolving");
+                    } else {
+                        return Ok(*addr);
+                    }
+                }
             }
+            DnsLookup::NegativeCached => {
+                // Negatively cached (recent NXDOMAIN) — fail fast without
+                // re-resolving until the negative TTL expires.
+                tracing::trace!(host, port, "DNS negative cache hit");
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("host {host}:{port} negatively cached (NXDOMAIN)"),
+                ));
+            }
+            DnsLookup::Miss => {}
         }
 
         let addr_str = if host.contains(':') {
@@ -442,57 +537,34 @@ impl Target {
     }
 
     pub fn strip_path(&self) -> Option<&str> {
-        self.opts.get("strip").map(|s| s.as_str())
+        self.parsed_strip.as_deref()
     }
 
     pub fn prepend_path(&self) -> Option<&str> {
-        self.opts.get("prepend").map(|s| s.as_str())
+        self.parsed_prepend.as_deref()
     }
 
     pub fn tls_skip_verify(&self) -> bool {
-        self.opts
-            .get("tlsskipverify")
-            .map(|v| v == "true")
-            .unwrap_or(false)
+        self.parsed_tls_skip_verify
     }
 
-    /// Per-route read timeout override (Fabio-style escape hatch, Issue #22).
-    /// Set via the `readtimeout=` target option, e.g. `readtimeout=120s`.
-    /// Returns the raw string; parsing/validation happens at the call site
-    /// using the shared duration parser. `None` means no override.
-    pub fn read_timeout_override(&self) -> Option<&str> {
-        self.opts
-            .get("readtimeout")
-            .map(|s| s.as_str())
-            .filter(|s| !s.trim().is_empty())
-    }
-
-    /// Parse header match constraints from opts.
-    /// Format: `header=x-version:v2` or `header=x-version:v2,x-env:prod`
-    pub fn header_matches(&self) -> Vec<(&str, &str)> {
-        self.opts
-            .iter()
-            .filter(|(k, _)| *k == "header")
-            .flat_map(|(_, v)| {
-                v.split(',').filter_map(|pair| {
-                    let trimmed = pair.trim();
-                    trimmed.split_once(':')
-                })
-            })
-            .collect()
+    /// Per-route read-timeout override (Fabio-style escape hatch, Issue #22),
+    /// pre-parsed from the `readtimeout=` target option (e.g. `readtimeout=120s`).
+    /// `None` means no override.
+    pub fn read_timeout_override(&self) -> Option<std::time::Duration> {
+        self.parsed_read_timeout
     }
 
     /// Check if this target's header constraints are satisfied by the given request headers.
     pub fn matches_headers(&self, headers: &http::HeaderMap) -> bool {
-        let constraints = self.header_matches();
-        if constraints.is_empty() {
+        if self.parsed_header_matches.is_empty() {
             return true;
         }
-        constraints.iter().all(|(name, expected)| {
+        self.parsed_header_matches.iter().all(|(name, expected)| {
             headers
-                .get(*name)
+                .get(name.as_str())
                 .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v == *expected)
+                .is_some_and(|v| v == expected.as_str())
         })
     }
 
@@ -501,10 +573,7 @@ impl Target {
     }
 
     pub fn proxy_proto(&self) -> bool {
-        self.opts
-            .get("pxyproto")
-            .map(|v| v == "true")
-            .unwrap_or(false)
+        self.parsed_proxy_proto
     }
 
     pub fn is_https(&self) -> bool {
@@ -519,7 +588,7 @@ impl Target {
     }
 
     pub fn host_override(&self) -> Option<&str> {
-        self.opts.get("host").map(|s| s.as_str())
+        self.parsed_host_override.as_deref()
     }
 
     pub fn upstream_authority(&self) -> String {
@@ -732,7 +801,35 @@ mod tests {
         let mut t = Target::new("svc".into(), "tcp://10.0.0.1:4222".into());
         assert!(!t.proxy_proto());
         t.opts.insert("pxyproto".to_string(), "true".to_string());
+        t.pre_parse();
         assert!(t.proxy_proto());
+    }
+
+    #[test]
+    fn test_per_target_ratelimit_zero_inherits_global() {
+        // `ratelimit=0` is NOT a per-target override; the target inherits the
+        // global rate limit (preserving the pre-typed-fields behavior).
+        let mut t = Target::new("svc".into(), "http://10.0.0.1:8080/".into());
+        t.opts.insert("ratelimit".to_string(), "0".to_string());
+        t.pre_parse();
+        assert!(!t.has_rate_limit_override);
+        // Global limit of 1 (burst 1) applies: first allowed, second rejected.
+        assert!(t.try_acquire_rate_limit(1, 1));
+        assert!(!t.try_acquire_rate_limit(1, 1));
+    }
+
+    #[test]
+    fn test_per_target_ratelimit_override_ignores_global() {
+        // A positive per-target `ratelimit=` is authoritative and ignores global.
+        let mut t = Target::new("svc".into(), "http://10.0.0.1:8080/".into());
+        t.opts.insert("ratelimit".to_string(), "2".to_string());
+        t.pre_parse();
+        assert!(t.has_rate_limit_override);
+        // Per-target burst defaults to rate (2): two allowed, third rejected,
+        // regardless of the (unlimited) global setting passed in.
+        assert!(t.try_acquire_rate_limit(0, 0));
+        assert!(t.try_acquire_rate_limit(0, 0));
+        assert!(!t.try_acquire_rate_limit(0, 0));
     }
 
     #[test]
@@ -826,20 +923,22 @@ mod tests {
     // Header-based routing tests
     #[test]
     fn test_header_matches_no_constraints() {
-        let t = Target {
+        let mut t = Target {
             opts: HashMap::new(),
             ..Default::default()
         };
+        t.pre_parse();
         let headers = http::HeaderMap::new();
         assert!(t.matches_headers(&headers));
     }
 
     #[test]
     fn test_header_matches_single_constraint() {
-        let t = Target {
+        let mut t = Target {
             opts: HashMap::from([("header".to_string(), "x-version:v2".to_string())]),
             ..Default::default()
         };
+        t.pre_parse();
 
         let mut headers = http::HeaderMap::new();
         assert!(!t.matches_headers(&headers));
@@ -851,10 +950,11 @@ mod tests {
 
     #[test]
     fn test_header_matches_multiple_constraints() {
-        let t = Target {
+        let mut t = Target {
             opts: HashMap::from([("header".to_string(), "x-version:v2,x-env:prod".to_string())]),
             ..Default::default()
         };
+        t.pre_parse();
 
         let mut headers = http::HeaderMap::new();
         headers.insert("x-version", http::HeaderValue::from_static("v2"));
@@ -867,10 +967,11 @@ mod tests {
 
     #[test]
     fn test_header_matches_case_insensitive_name() {
-        let t = Target {
+        let mut t = Target {
             opts: HashMap::from([("header".to_string(), "X-Version:v2".to_string())]),
             ..Default::default()
         };
+        t.pre_parse();
 
         let mut headers = http::HeaderMap::new();
         headers.insert("x-version", http::HeaderValue::from_static("v2"));
@@ -879,10 +980,11 @@ mod tests {
 
     #[test]
     fn test_header_matches_separate_opts() {
-        let t = Target {
+        let mut t = Target {
             opts: HashMap::from([("header".to_string(), "x-version:v2,x-env:prod".to_string())]),
             ..Default::default()
         };
+        t.pre_parse();
 
         let mut headers = http::HeaderMap::new();
         headers.insert("x-version", http::HeaderValue::from_static("v2"));
@@ -892,10 +994,11 @@ mod tests {
 
     #[test]
     fn test_header_matches_empty_value() {
-        let t = Target {
+        let mut t = Target {
             opts: HashMap::from([("header".to_string(), "x-debug:".to_string())]),
             ..Default::default()
         };
+        t.pre_parse();
 
         let mut headers = http::HeaderMap::new();
         headers.insert("x-debug", http::HeaderValue::from_bytes(b"").unwrap());

@@ -72,8 +72,8 @@ impl TokenBucket {
             self.burst.store(0, Ordering::Release);
             return;
         }
-        let scaled_rate = rate * SCALE;
-        let scaled_burst = burst.max(1) * SCALE;
+        let scaled_rate = rate.saturating_mul(SCALE);
+        let scaled_burst = burst.max(1).saturating_mul(SCALE);
         self.rate.store(scaled_rate, Ordering::Release);
         self.burst.store(scaled_burst, Ordering::Release);
         // Initialize tokens to full burst on first configuration
@@ -84,6 +84,27 @@ impl TokenBucket {
         if state.last_refill_ns == 0 {
             state.last_refill_ns = Self::now_ns();
         }
+    }
+
+    /// Reconcile the bucket to `rate`/`burst` if they differ from the current
+    /// configuration. Cheap (atomic loads only) and a no-op when unchanged, so it
+    /// is safe to call on every request for globally-configured targets — this is
+    /// how a runtime change to the global rate limit reaches already-warm buckets.
+    pub fn reconcile(&self, rate: u64, burst: u64) {
+        let (want_rate, want_burst) = if rate == 0 {
+            (UNCONFIGURED, 0)
+        } else {
+            (
+                rate.saturating_mul(SCALE),
+                burst.max(1).saturating_mul(SCALE),
+            )
+        };
+        if self.rate.load(Ordering::Acquire) == want_rate
+            && self.burst.load(Ordering::Acquire) == want_burst
+        {
+            return;
+        }
+        self.configure(rate, burst);
     }
 
     /// Try to acquire one token. Returns `true` if allowed.
@@ -146,8 +167,9 @@ impl TokenBucket {
     }
 }
 
-/// Clone shares the underlying state via Arc so that route-table rebuilds
-/// do not duplicate token buckets (which would double the effective rate).
+/// Clone produces an INDEPENDENT bucket (a point-in-time copy of tokens/rate/
+/// burst). True sharing across route-table rebuilds is provided by the
+/// `Arc<TokenBucket>` field on `Target`, not by this `Clone`.
 impl Clone for TokenBucket {
     fn clone(&self) -> Self {
         // Note: This creates an independent bucket (not Arc-shared).
@@ -184,6 +206,34 @@ mod tests {
         }
         // 11th should fail (bucket depleted)
         assert!(!bucket.try_acquire(), "should reject over burst");
+    }
+
+    #[test]
+    fn test_token_bucket_reconcile_tracks_and_disables() {
+        let bucket = TokenBucket::new();
+        assert!(bucket.try_acquire(), "unconfigured is unlimited");
+        bucket.reconcile(1, 2);
+        assert!(bucket.try_acquire());
+        assert!(bucket.try_acquire());
+        assert!(!bucket.try_acquire(), "rejects after burst exhausted");
+        bucket.reconcile(0, 0);
+        assert!(
+            bucket.try_acquire(),
+            "reconcile to rate 0 is unlimited again"
+        );
+        assert!(bucket.try_acquire());
+    }
+
+    #[test]
+    fn test_token_bucket_reconcile_noop_when_unchanged() {
+        let bucket = TokenBucket::with_params(1, 1);
+        assert!(bucket.try_acquire());
+        assert!(!bucket.try_acquire());
+        bucket.reconcile(1, 1);
+        assert!(
+            !bucket.try_acquire(),
+            "reconcile with unchanged params must not reset tokens"
+        );
     }
 
     #[test]

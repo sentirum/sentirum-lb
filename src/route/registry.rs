@@ -95,7 +95,7 @@ impl ManagedRouteTable {
         });
         let mut registry = (**self.registry.load()).clone();
         registry.set_static(mark_sources(defs.to_vec(), RouteSource::Static));
-        self.rebuild_and_swap(&registry, "static");
+        self.rebuild_and_swap(registry, "static");
     }
 
     /// Append additional static routes to the existing set.
@@ -109,7 +109,7 @@ impl ManagedRouteTable {
         let mut existing = registry.static_routes.clone();
         existing.extend(mark_sources(new_defs, RouteSource::Static));
         registry.set_static(existing);
-        self.rebuild_and_swap(&registry, "static");
+        self.rebuild_and_swap(registry, "static");
     }
 
     /// Update KV routes
@@ -120,7 +120,7 @@ impl ManagedRouteTable {
         });
         let mut registry = (**self.registry.load()).clone();
         registry.update_kv(mark_sources(defs, RouteSource::ConsulKv));
-        self.rebuild_and_swap(&registry, "kv");
+        self.rebuild_and_swap(registry, "kv");
     }
 
     /// Update service routes
@@ -131,11 +131,11 @@ impl ManagedRouteTable {
         });
         let mut registry = (**self.registry.load()).clone();
         registry.update_services(mark_sources(defs, RouteSource::ConsulService));
-        self.rebuild_and_swap(&registry, "service");
+        self.rebuild_and_swap(registry, "service");
     }
 
     /// Rebuild table from registry and atomically swap
-    fn rebuild_and_swap(&self, registry: &RouteRegistry, source: &str) {
+    fn rebuild_and_swap(&self, registry: RouteRegistry, source: &str) {
         let all_defs = registry.get_all();
         let table = Table::from_definitions_with_stats(
             &all_defs,
@@ -144,14 +144,17 @@ impl ManagedRouteTable {
         );
         let route_count = table.route_count();
         let target_count = table.target_count();
-        self.registry.store(Arc::new(registry.clone()));
+        let is_empty = registry.is_empty();
+        // Store the already-built registry directly. The callers built a local
+        // `registry` they move in, so there is no need to clone it again here.
+        self.registry.store(Arc::new(registry));
         self.inner.swap(table);
         crate::metrics::prometheus::global().record_route_reload(source);
         tracing::info!(
             route_count,
             target_count,
             source,
-            is_empty = registry.is_empty(),
+            is_empty,
             "Route table updated"
         );
     }

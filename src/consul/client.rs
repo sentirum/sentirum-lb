@@ -202,7 +202,11 @@ impl ConsulClient {
         } else {
             query_wait
         };
-        let http_timeout = query_wait + Duration::from_secs(10);
+        // Consul holds a blocking query open for up to `wait + wait/16`
+        // (RandomStagger, JitterFraction=16). For the default 5m wait that is
+        // up to 18.75s of jitter, so the client must outlast `wait + wait/16`,
+        // not merely `wait`, or ~47% of idle cycles time out prematurely.
+        let http_timeout = query_wait + query_wait / 16 + Duration::from_secs(10);
 
         let client = Client::builder()
             .timeout(http_timeout)
@@ -270,7 +274,8 @@ impl ConsulClient {
             .get("X-Consul-Index")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(1);
 
         if response.status() == StatusCode::NOT_FOUND {
             return Ok((Vec::new(), new_index));
@@ -393,7 +398,8 @@ impl ConsulClient {
             .get("X-Consul-Index")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(1);
 
         let body = read_success_body(response, "health checks").await?;
         let checks: Vec<HealthCheck> = serde_json::from_str(&body).map_err(|e| {

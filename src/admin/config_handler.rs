@@ -6,6 +6,12 @@ use axum::extract::{Json, State};
 use serde::Deserialize;
 use std::sync::Arc;
 
+/// Serializes runtime config mutations (`PUT /admin/config`, `POST /admin/config/reset`)
+/// so concurrent updates compose instead of clobbering each other (lost update), and so
+/// the dependent ArcSwap publishes (config, trusted_proxies, circuit breaker) apply as
+/// one atomic group rather than interleaving with another request's swaps.
+static CONFIG_UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Request body for config update (partial update - only specified fields are applied)
 #[derive(Deserialize)]
 pub struct ConfigUpdateRequest {
@@ -277,6 +283,10 @@ pub(super) async fn config_update_handler(
         }));
     }
 
+    // Serialize the load → validate → store sequence (and the dependent swaps
+    // below) so concurrent PUTs cannot lose each other's changes.
+    let _update_guard = CONFIG_UPDATE_LOCK.lock().await;
+
     let current = state.config.load();
     let mut new_proxy = current.proxy.clone();
     let mut new_logging = current.logging.clone();
@@ -442,6 +452,9 @@ pub(super) async fn config_update_handler(
 pub(super) async fn config_reset_handler(
     State(state): State<AdminState>,
 ) -> axum::Json<serde_json::Value> {
+    // Serialize with concurrent config updates (see CONFIG_UPDATE_LOCK).
+    let _update_guard = CONFIG_UPDATE_LOCK.lock().await;
+
     let startup = state.startup_config.clone();
     let old_cb_config = circuit_breaker_config_from_proxy(&state.config.load().proxy);
 

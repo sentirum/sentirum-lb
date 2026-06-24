@@ -95,10 +95,18 @@ impl HealthChecker {
         } else {
             format!("{host}:{port}")
         };
-        tokio::net::TcpStream::connect(&addr)
-            .await
-            .map(|_| ())
-            .map_err(|e| format!("TCP connect failed: {e}"))
+        // Bound the connect with the configured probe timeout so a
+        // SYN-black-holing target cannot occupy a `buffer_unordered` probe slot
+        // for the OS connect timeout (the HTTP probe path already has a timeout).
+        match tokio::time::timeout(self.config.timeout, tokio::net::TcpStream::connect(&addr)).await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(format!("TCP connect failed: {e}")),
+            Err(_) => Err(format!(
+                "TCP connect timed out after {:?}",
+                self.config.timeout
+            )),
+        }
     }
 
     /// Run a single health check probe against a target.
@@ -205,6 +213,9 @@ pub async fn run_health_checks_with_shutdown(
     );
 
     let mut ticker = tokio::time::interval(interval);
+    // Delay (not Burst) so a stalled tick doesn't fire a back-to-back catch-up
+    // storm of probe rounds; the immediate first tick is consumed on the next line.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await; // First tick is immediate
 
     loop {
@@ -260,7 +271,13 @@ pub async fn run_health_checks_with_shutdown(
             // Reset ticker if interval changed
             if new_hc_config.interval != interval {
                 interval = new_hc_config.interval;
+                // The interval period cannot be changed in place, so the ticker
+                // must be rebuilt. A freshly-created interval's first tick fires
+                // immediately; consume it here so the next loop iteration doesn't
+                // fire an extra probe round right after the hot-reload.
                 ticker = tokio::time::interval(interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                ticker.tick().await; // consume the immediate first tick
             }
         }
 

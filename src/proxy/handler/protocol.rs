@@ -24,9 +24,17 @@ pub(super) fn parse_host_from_header(header: &pingora_http::RequestHeader) -> &s
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if let Some(bracket_end) = host_header.find("]:") {
-        &host_header[1..bracket_end]
-    } else if let Some(colon_pos) = host_header.rfind(':') {
+    // Bracketed IPv6 literal: `[::1]` or `[::1]:8080` → `::1`. Strip the
+    // brackets consistently whether or not a port follows.
+    if let Some(rest) = host_header.strip_prefix('[')
+        && let Some(end) = rest.find(']')
+    {
+        return &rest[..end];
+    }
+
+    // Otherwise strip a trailing `:port` only when the part before the last
+    // colon is not itself an (unbracketed) IPv6 address.
+    if let Some(colon_pos) = host_header.rfind(':') {
         let before_colon = &host_header[..colon_pos];
         let after_colon = &host_header[colon_pos + 1..];
         if !before_colon.contains(':') && after_colon.parse::<u16>().is_ok() {

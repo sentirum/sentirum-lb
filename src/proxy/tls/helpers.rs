@@ -306,6 +306,7 @@ fn first_name_value(name: &pingora::tls::x509::X509NameRef, nid: Nid) -> Option<
         .find_map(|entry| entry.data().as_utf8().ok().map(|value| value.to_string()))
 }
 
+#[derive(Debug)]
 struct PemBlock<'a> {
     kind: &'a str,
     pem: &'a str,
@@ -332,7 +333,12 @@ fn pem_blocks(input: &str) -> Vec<PemBlock<'_>> {
         let end_marker = format!("-----END {kind}-----");
         let search_from = offset + whole.end();
         let Some(relative_end) = input[search_from..].find(&end_marker) else {
-            break;
+            // Unmatched BEGIN marker (e.g. a truncated bundle observed mid-write):
+            // advance past this marker and keep scanning rather than breaking,
+            // so any valid blocks that follow are not silently dropped. Mirrors
+            // OpenSSL's skip-garbage behaviour.
+            offset = search_from;
+            continue;
         };
         let end = search_from + relative_end + end_marker.len();
         blocks.push(PemBlock {
@@ -387,4 +393,43 @@ pub(crate) fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pem_blocks_extracts_paired_blocks() {
+        let input = "-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n\
+                     -----BEGIN PRIVATE KEY-----\nBBB\n-----END PRIVATE KEY-----\n";
+        let blocks = pem_blocks(input);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].kind, "CERTIFICATE");
+        assert_eq!(blocks[1].kind, "PRIVATE KEY");
+    }
+
+    #[test]
+    fn pem_blocks_skips_unterminated_block_and_keeps_rest() {
+        // An unterminated BEGIN CERTIFICATE block (e.g. a bundle observed
+        // mid-write) followed by a valid PRIVATE KEY block: the scanner must
+        // skip the broken block and still emit the valid one instead of
+        // aborting at the first unmatched BEGIN marker.
+        let input = "-----BEGIN CERTIFICATE-----\ntruncated, no end marker here\n\
+                     -----BEGIN PRIVATE KEY-----\nBBB\n-----END PRIVATE KEY-----\n";
+        let blocks = pem_blocks(input);
+        assert_eq!(
+            blocks.len(),
+            1,
+            "expected only the terminated block, got {blocks:?}"
+        );
+        assert_eq!(blocks[0].kind, "PRIVATE KEY");
+    }
+
+    #[test]
+    fn pem_blocks_drops_trailing_unterminated_block() {
+        // A lone unterminated block at the end yields nothing.
+        let input = "-----BEGIN CERTIFICATE-----\ntruncated, no end marker here";
+        assert!(pem_blocks(input).is_empty());
+    }
 }

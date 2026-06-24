@@ -427,6 +427,17 @@ impl LoadedCertificate {
         })?;
         let chain: Vec<X509> = iter.collect();
         let key = parse_private_key(key_pem)?;
+        // Reject mismatched cert/key pairs (e.g. a partial rotation observed
+        // mid-write by the watcher). Returning Err keeps the current cert and
+        // lets the next poll retry once the files are consistent again.
+        match leaf.public_key() {
+            Ok(pk) if key.public_eq(&pk) => {}
+            _ => {
+                return Err(TlsError::ConfigError(format!(
+                    "certificate bundle '{entry_name}' private key does not match certificate"
+                )));
+            }
+        }
         let names = extract_certificate_names(&leaf);
 
         Ok(Self {
@@ -968,5 +979,37 @@ mod tests {
                 .contains("exceeds max size")
         );
         assert!(store.select_for_server_name(Some("example.com")).is_some());
+    }
+    #[test]
+    fn test_from_pem_pair_accepts_matching_key() {
+        let cert = self_signed_cert(&["match.example.com"]);
+        let (cert_pem, key_pem) = (cert.cert.pem(), cert.signing_key.serialize_pem());
+        let loaded =
+            LoadedCertificate::from_pem_pair("match", cert_pem.as_bytes(), key_pem.as_bytes());
+        assert!(
+            loaded.is_ok(),
+            "matching cert/key should load: {:?}",
+            loaded.err()
+        );
+    }
+
+    #[test]
+    fn test_from_pem_pair_rejects_mismatched_key() {
+        // A partial rotation could observe a cert written alongside the wrong
+        // (previous) key; the loader must reject the pair rather than publish
+        // a mismatched cert that breaks every handshake on the listener.
+        let cert_a = self_signed_cert(&["alpha.example.com"]);
+        let cert_b = self_signed_cert(&["beta.example.com"]);
+        let result = LoadedCertificate::from_pem_pair(
+            "mismatch",
+            cert_a.cert.pem().as_bytes(),
+            cert_b.signing_key.serialize_pem().as_bytes(),
+        );
+        match result {
+            Err(TlsError::ConfigError(msg))
+                if msg.contains("private key does not match certificate") => {}
+            Err(_) => panic!("expected key-mismatch ConfigError, got a different TlsError"),
+            Ok(_) => panic!("expected key-mismatch error, but from_pem_pair succeeded"),
+        }
     }
 }

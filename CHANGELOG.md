@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Hardening pass from a full-codebase audit: correctness, availability, and security fixes plus hot-path performance work. No config schema breakage; new validation rejects values that previously degraded silently.
+
+### Security
+
+- **Admin token no longer accepted in the query string.** `?token=` auth (used by SSE/dashboard streams) now accepts only ephemeral session tokens; the long-lived `server.admin_token` must travel in a header (`Authorization: Bearer` / `X-Admin-Token`) so it cannot leak into access logs or browser history.
+- **Required mTLS fails closed when the client-CA store is empty** instead of silently disabling client-certificate verification.
+- **Primary TLS listener failure is now fatal.** A primary cert/settings load failure exits the process (matching the existing client-CA behavior) rather than silently coming up plaintext-only with the HTTPS port absent.
+
+### Fixed
+
+- **Route-weight DoS (Critical).** A non-finite or very large route `weight` (from a static file, Consul tag, or `POST /admin/routes`) expanded the weighted-target list without bound, OOM-ing or wedging the process on the lock-held route rebuild. Weights are now validated finite and per-target slot expansion is capped.
+- **`glob` matcher black-holed literal routes.** Under `matcher = "glob"`, every literal-path route — including the `/` catch-all — was unreachable (`no_route`). A literal path now matches itself under glob mode; the catch-all is preserved.
+- **`exact` matcher implemented.** It was documented/hot-reloadable but silently fell back to prefix matching, broadening routes (e.g. `/admin` also served `/admin-backup`). `exact` now matches the full path.
+- **Unknown `proxy.matcher` / `proxy.strategy` are rejected** at config load and via `PUT /admin/config`, instead of silently degrading to prefix / round-robin. The strategy hot path no longer logs a per-request warning.
+- **Rate limit is now truly hot-reloadable.** Changing or disabling `proxy.rate_limit_per_target` at runtime now affects already-warm targets; per-target buckets reconcile to the live global config (a per-route `ratelimit=` override still sticks).
+- **Negative DNS cache now suppresses re-resolution.** NXDOMAIN hosts fast-fail for `dns_negative_cache_ttl` instead of re-resolving on every request.
+- **TLS cert/key hot-reload no longer publishes a mismatched pair** observed mid-rotation: the private key is verified against the leaf certificate, and a mismatch keeps the current certificate and retries on the next poll.
+- **Circuit-breaker opens on error *rate*, not absolute count.** The open threshold is computed over the current window length, so the `min_samples` early-open gate works during warm-up — a fully-failing upstream trips at the documented sample count instead of ~2× later, and the regression recurs no longer after each recovery.
+- **Half-open probe slot is released** when a request is rejected by the rate limiter or connection-slot limit after the probe was reserved, preventing recovery from stalling for `recovery_timeout`.
+- **Active health-check TCP probe has a connect timeout**, so a SYN-black-holing target no longer pins a probe-concurrency slot for the OS connect timeout.
+- **Consul service-watcher retry path is no longer dead code.** After a transient catalog-lookup failure the stashed snapshot is actually retried on the next tick (previously the index guard discarded it, so new service state could be delayed indefinitely).
+- **Consul blocking-query HTTP timeout** now exceeds Consul's `wait + wait/16` jitter, eliminating spurious watcher errors/backoff on an idle cluster with the default 5m wait. The parsed index is clamped to ≥1 to avoid a non-blocking busy-loop if `X-Consul-Index` is ever absent.
+- **Dynamic TCP listener that fails to bind is rebound** on the next reconcile instead of being left permanently dead.
+- **Config validation gaps closed**: `health_check_rise`/`health_check_fall` must be ≥ 1 (no single-sample flapping), `no_route_status` must be a valid HTTP status, and `request_id_header` must be a valid header name (an invalid name previously failed every request).
+- **`X-Forwarded-For` preserves the full client chain** (all header values) instead of keeping only the first.
+- **`Host` header IPv6 parsing is consistent** — `[::1]` and `[::1]:8080` both normalize to `::1`.
+- **PROXY protocol v1 emits `TCP4`** for IPv4-mapped IPv6 client addresses on dual-stack listeners instead of a malformed `TCP6 ::ffff:a.b.c.d` line.
+- **Token-bucket scaling** uses saturating multiplication, and the PEM scanner skips an unterminated block instead of dropping all blocks after it.
+
+### Performance
+
+- **Target route options are pre-parsed into typed fields** (`strip`, `prepend`, `host`, `tlsskipverify`, `readtimeout`, `pxyproto`, header constraints), removing ~5 per-request HashMap lookups plus per-request duration/header parsing from the proxy hot path.
+- **Header-constrained routes** filter the small target list instead of cloning the up-to-1000-slot weighted list (and re-parsing header constraints) on every request.
+- **DNS cache lookups** take a single read lock on the common live-entry path (write lock only on actual expiry).
+- **bcrypt verification and admin certificate file reads** run on the blocking pool instead of stalling the single-threaded async admin worker.
+- **Raw TCP proxy** drops the `arc_swap` config guard before the long-lived `copy_bidirectional` (avoiding debt-slot exhaustion that pushed the HTTP hot-path `load()` onto the slow clone path), bounds pre-routing handshakes with a global semaphore (slowloris defense), and applies an idle timeout to reap half-open connections.
+
+### Changed
+
+- **Concurrent `PUT`/`POST /admin/config` are serialized** so updates compose (no lost updates) and the config, trusted-proxy, and circuit-breaker swaps apply as one atomic group.
+- The route matcher is now a single shared helper (`Table::route_matches`) used by both the collect and find paths, so matcher semantics cannot drift between them.
+
 ## [1.5.0] - 2026-06-06
 
 ### Added

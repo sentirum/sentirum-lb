@@ -625,6 +625,12 @@ fn main() {
         };
 
         let mut client_auth_state: Option<(ClientAuthMode, Arc<DynamicClientCaStore>)> = None;
+        // Defer registering the client-CA watcher + admin store until a listener
+        // is actually added, so a later cert/settings failure does not leave an
+        // orphaned Consul long-poll watching for a listener that never exists.
+        let mut listener_added = false;
+        let mut pending_ca_service: Option<ConsulClientCaBackgroundService> = None;
+        let mut pending_admin_ca_store: Option<Arc<DynamicClientCaStore>> = None;
         if let Some(client_auth) = client_auth_config.clone() {
             let client_ca_store =
                 Arc::new(DynamicClientCaStore::new(client_auth.ca_upgrade_cn.clone()));
@@ -695,7 +701,7 @@ fn main() {
                         continue;
                     }
 
-                    client_ca_background_services.push(ConsulClientCaBackgroundService {
+                    pending_ca_service = Some(ConsulClientCaBackgroundService {
                         client_ca_store: client_ca_store.clone(),
                         consul_config,
                         cert_prefix: prefix.clone(),
@@ -704,7 +710,7 @@ fn main() {
                 }
             }
 
-            client_ca_stores_for_admin.push(client_ca_store.clone());
+            pending_admin_ca_store = Some(client_ca_store.clone());
             client_auth_state = Some((client_auth.mode, client_ca_store));
         }
 
@@ -716,6 +722,9 @@ fn main() {
                         Ok(c) => c,
                         Err(e) => {
                             tracing::error!(listener = %label, error = %e, "Failed to load file certificate");
+                            if is_primary {
+                                std::process::exit(1);
+                            }
                             continue;
                         }
                     };
@@ -741,6 +750,7 @@ fn main() {
                             if is_primary {
                                 https_fallback_ready = true;
                             }
+                            listener_added = true;
                             // Register file cert watcher for hot-reload
                             file_cert_watchers.push(FileCertWatcherService::new(
                                 label.clone(),
@@ -753,6 +763,9 @@ fn main() {
                         }
                         Err(e) => {
                             tracing::error!(listener = %label, error = %e, "Failed to configure file-based TLS listener");
+                            if is_primary {
+                                std::process::exit(1);
+                            }
                         }
                     }
                 }
@@ -855,6 +868,7 @@ fn main() {
                         if is_primary {
                             https_fallback_ready = true;
                         }
+                        listener_added = true;
                         tls_stores_for_admin.push(tls_store.clone());
                         tls_background_services.push(ConsulTlsBackgroundService {
                             tls_store,
@@ -869,6 +883,9 @@ fn main() {
                             error = %e,
                             "Failed to configure Consul-backed TLS listener"
                         );
+                        if is_primary {
+                            std::process::exit(1);
+                        }
                     }
                 }
             }
@@ -878,6 +895,16 @@ fn main() {
             }
             Err(e) => {
                 tracing::error!(listener = %label, error = %e, "Invalid TLS source configuration; skipping");
+            }
+        }
+        // Now that any listener for this entry is wired, register its client-CA
+        // watcher + admin store (skipped above on a failed or absent listener).
+        if listener_added {
+            if let Some(service) = pending_ca_service.take() {
+                client_ca_background_services.push(service);
+            }
+            if let Some(store) = pending_admin_ca_store.take() {
+                client_ca_stores_for_admin.push(store);
             }
         }
     }

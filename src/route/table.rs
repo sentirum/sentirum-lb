@@ -13,6 +13,7 @@ pub enum MatcherKind {
     Prefix,
     CaseInsensitivePrefix,
     Glob,
+    Exact,
 }
 
 impl MatcherKind {
@@ -23,6 +24,7 @@ impl MatcherKind {
             "prefix" | "" => MatcherKind::Prefix,
             "iprefix" => MatcherKind::CaseInsensitivePrefix,
             "glob" => MatcherKind::Glob,
+            "exact" => MatcherKind::Exact,
             _ => MatcherKind::Prefix,
         }
     }
@@ -41,7 +43,10 @@ pub struct Route {
     pub targets: Vec<Arc<Target>>,
     /// Weighted targets (pre-distributed for fast selection, Arc refs for zero-copy pick)
     pub w_targets: Vec<Arc<Target>>,
-    /// Counter for round-robin selection (Arc-shared so clones preserve state across route table rebuilds)
+    /// Counter for round-robin selection. `Arc`-shared so `Route` clones within a
+    /// single table build share one counter; it is NOT carried across a full table
+    /// rebuild (each rebuild constructs fresh routes via `Route::new`), so the
+    /// round-robin phase resets on every route reload.
     pub rr_counter: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -181,8 +186,15 @@ impl Route {
         // Fabio uses 10000 slots; 1000 provides 0.1% precision with low memory
         self.w_targets.clear();
         let slots = 1000;
+        // Bound per-target slot expansion: a pathological route weight (huge or
+        // mis-scaled, e.g. from a Consul tag or admin route command) must not be
+        // able to blow up `w_targets` and OOM/stall the process on the lock-held
+        // rebuild path. 10x the granularity budget is well beyond any sane weight
+        // (normal weights are fractions summing to ~1.0). `f64 as usize` saturates,
+        // so this also caps non-finite/overflowing values defensively.
+        const MAX_SLOTS_PER_TARGET: usize = 10 * 1000;
         for t in &self.targets {
-            let count = (t.weight * slots as f64).round() as usize;
+            let count = ((t.weight * slots as f64).round() as usize).min(MAX_SLOTS_PER_TARGET);
             // Fabio-compatible: if weight > 0 but count is 0, give at least 1 slot
             // But if weight == 0, give 0 slots (target receives no traffic)
             if count == 0 && t.weight > 0.0 {
@@ -392,6 +404,29 @@ impl Table {
         results
     }
 
+    /// Does `route` match `path` under the active matcher. Single source of
+    /// truth for matcher semantics so `collect_matching_routes` and
+    /// `find_matching_route` can never drift apart.
+    #[inline]
+    fn route_matches(route: &Route, path: &str, matcher: MatcherKind) -> bool {
+        match matcher {
+            MatcherKind::Prefix => path.starts_with(&route.path) || route.path == "/",
+            MatcherKind::CaseInsensitivePrefix => {
+                starts_with_ignore_ascii_case(path, &route.path) || route.path == "/"
+            }
+            MatcherKind::Exact => route.path == path,
+            // A literal route path carries no compiled glob `Pattern` (Route::new
+            // only compiles one when the path has glob metacharacters), but a
+            // literal pattern is a glob that matches itself exactly. Falling back
+            // to equality keeps every literal route — including the "/" catch-all
+            // — reachable under glob mode instead of silently black-holing it.
+            MatcherKind::Glob => match route.glob.as_ref() {
+                Some(g) => g.matches(path),
+                None => route.path == path || route.path == "/",
+            },
+        }
+    }
+
     #[inline]
     fn collect_matching_routes<'a>(
         routes: &'a [Arc<Route>],
@@ -400,17 +435,7 @@ impl Table {
         results: &mut SmallVec<[&'a Arc<Route>; 4]>,
     ) {
         for route in routes {
-            let matches = match matcher {
-                MatcherKind::Prefix => path.starts_with(&route.path) || route.path == "/",
-                MatcherKind::CaseInsensitivePrefix => {
-                    starts_with_ignore_ascii_case(path, &route.path) || route.path == "/"
-                }
-                MatcherKind::Glob => route
-                    .glob
-                    .as_ref()
-                    .map(|g| g.matches(path))
-                    .unwrap_or(false),
-            };
+            let matches = Self::route_matches(route, path, matcher);
             if matches && !route.targets.is_empty() {
                 results.push(route);
             }
@@ -423,17 +448,7 @@ impl Table {
         matcher: MatcherKind,
     ) -> Option<&'a Arc<Route>> {
         for route in routes {
-            let matches = match matcher {
-                MatcherKind::Prefix => path.starts_with(&route.path) || route.path == "/",
-                MatcherKind::CaseInsensitivePrefix => {
-                    starts_with_ignore_ascii_case(path, &route.path) || route.path == "/"
-                }
-                MatcherKind::Glob => route
-                    .glob
-                    .as_ref()
-                    .map(|g| g.matches(path))
-                    .unwrap_or(false),
-            };
+            let matches = Self::route_matches(route, path, matcher);
 
             if matches && !route.targets.is_empty() {
                 return Some(route);
@@ -471,15 +486,12 @@ impl Table {
             tags: def.tags.clone(),
             opts: def.opts.clone(),
             source: def.source.clone(),
-            parsed_host: None,
-            parsed_port: None,
-            parsed_tls: false,
-            parsed_protocol: crate::route::target::UpstreamProtocol::Http,
             active_connections: self.active_connections_for(&def.dst),
             health_tracker: self.health_tracker_for(&def.dst),
             stats: self.stats_for(&def.dst),
             edge_stats: self.edge_stats_for(&edge_stats_key),
             rate_limiter: Arc::new(crate::proxy::ratelimit::TokenBucket::new()),
+            ..Default::default()
         };
         target.pre_parse();
 
@@ -962,6 +974,120 @@ mod tests {
             .count();
         assert_eq!(svc1_count, 500);
         assert_eq!(svc2_count, 500);
+    }
+
+    #[test]
+    fn test_compute_weights_bounds_pathological_weight() {
+        // A pathological/huge route weight must not expand w_targets without
+        // bound (DoS guard on the lock-held rebuild path).
+        let mut route = Route::new("example.com".to_string(), "/".to_string());
+        route.add_target(make_target("svc", "http://10.0.0.1:80", 1.0e9, 1.0e9));
+        route.compute_weights();
+        assert!(
+            !route.w_targets.is_empty(),
+            "a positive-weight target must still receive slots"
+        );
+        assert!(
+            route.w_targets.len() <= 10_000,
+            "w_targets must be bounded, got {}",
+            route.w_targets.len()
+        );
+    }
+
+    #[test]
+    fn test_exact_matcher_requires_full_path() {
+        let defs = vec![RouteDef {
+            cmd: RouteCmd::Add,
+            service: "svc".to_string(),
+            src: "example.com/admin".to_string(),
+            dst: "http://127.0.0.1:8080/".to_string(),
+            weight: 0.0,
+            tags: vec![],
+            opts: HashMap::new(),
+            source: crate::route::definition::RouteSource::Static,
+        }];
+        let table = Table::from_definitions(&defs);
+        assert!(
+            table
+                .lookup_route("example.com", "/admin", MatcherKind::Exact)
+                .is_some(),
+            "exact path must match"
+        );
+        assert!(
+            table
+                .lookup_route("example.com", "/admin-backup", MatcherKind::Exact)
+                .is_none(),
+            "exact matcher must NOT match a prefix superstring"
+        );
+        assert!(
+            table
+                .lookup_route("example.com", "/admin/secret", MatcherKind::Exact)
+                .is_none(),
+            "exact matcher must NOT match a subpath"
+        );
+    }
+
+    #[test]
+    fn test_glob_matcher_keeps_literal_and_catchall_reachable() {
+        let defs = vec![
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-literal".to_string(),
+                src: "example.com/api".to_string(),
+                dst: "http://127.0.0.1:8080/".to_string(),
+                weight: 0.0,
+                tags: vec![],
+                opts: HashMap::new(),
+                source: crate::route::definition::RouteSource::Static,
+            },
+            RouteDef {
+                cmd: RouteCmd::Add,
+                service: "svc-catchall".to_string(),
+                src: "/".to_string(),
+                dst: "http://127.0.0.1:9090/".to_string(),
+                weight: 0.0,
+                tags: vec![],
+                opts: HashMap::new(),
+                source: crate::route::definition::RouteSource::Static,
+            },
+        ];
+        let table = Table::from_definitions(&defs);
+        // Regression: a literal route path (no compiled glob Pattern) must remain
+        // reachable under glob mode instead of being silently black-holed.
+        assert!(
+            table
+                .lookup_route("example.com", "/api", MatcherKind::Glob)
+                .is_some(),
+            "literal route must match itself under glob mode"
+        );
+        // The "/" catch-all must still match any path under glob mode.
+        assert!(
+            table
+                .lookup_route("other.com", "/anything", MatcherKind::Glob)
+                .is_some(),
+            "catch-all must match under glob mode"
+        );
+    }
+
+    #[test]
+    fn test_glob_matcher_matches_wildcard_pattern() {
+        let defs = vec![RouteDef {
+            cmd: RouteCmd::Add,
+            service: "svc".to_string(),
+            src: "example.com/api/*".to_string(),
+            dst: "http://127.0.0.1:8080/".to_string(),
+            weight: 0.0,
+            tags: vec![],
+            opts: HashMap::new(),
+            source: crate::route::definition::RouteSource::Static,
+        }];
+        let table = Table::from_definitions(&defs);
+        assert!(
+            table
+                .lookup_route("example.com", "/api/users", MatcherKind::Glob)
+                .is_some(),
+            "wildcard glob must match a subpath"
+        );
     }
 
     #[test]

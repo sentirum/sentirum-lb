@@ -477,6 +477,7 @@ mod tests {
             crate::route::target::Target::new("svc".into(), "http://example.com".into());
         target.opts.insert("strip".into(), "/api".into());
         target.opts.insert("prepend".into(), "/v2".into());
+        target.pre_parse();
 
         let uri: http::Uri = "/api/users?id=42".parse().unwrap();
         let rewritten = rewrite_upstream_uri(&uri, &target).unwrap();
@@ -491,6 +492,7 @@ mod tests {
             crate::route::target::Target::new("svc".into(), "http://example.com".into());
         target.opts.insert("strip".into(), "/api".into());
         target.opts.insert("prepend".into(), "/v2".into());
+        target.pre_parse();
 
         let uri: http::Uri = "/users".parse().unwrap();
         let rewritten = rewrite_upstream_uri(&uri, &target).unwrap();
@@ -503,6 +505,7 @@ mod tests {
         let mut target =
             crate::route::target::Target::new("svc".into(), "grpc://example.com".into());
         target.opts.insert("strip".into(), "/api".into());
+        target.pre_parse();
 
         let uri: http::Uri = "/api/pkg.Service/Method?x=1".parse().unwrap();
         let rewritten = rewrite_upstream_uri(&uri, &target).unwrap();
@@ -516,6 +519,7 @@ mod tests {
         let mut target =
             crate::route::target::Target::new("svc".into(), "grpc://example.com".into());
         target.opts.insert("prepend".into(), "/v1".into());
+        target.pre_parse();
 
         let uri: http::Uri = "/pkg.Service/Method".parse().unwrap();
         let rewritten = rewrite_upstream_uri(&uri, &target).unwrap();
@@ -1015,6 +1019,7 @@ mod tests {
         let mut target =
             crate::route::target::Target::new("svc".into(), "http://example.com".into());
         target.opts.insert("readtimeout".into(), "120s".into());
+        target.pre_parse();
 
         // Override beats both streaming and non-streaming defaults.
         assert_eq!(
