@@ -34,7 +34,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # CLI & Config
 clap = { version = "4", features = ["derive"] }
-toml = "0.8"
+toml = "1"
 
 # Glob matching
 glob = "0.3"
