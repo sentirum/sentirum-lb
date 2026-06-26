@@ -91,8 +91,8 @@ pub(super) fn extract_certificate_names(cert: &X509) -> Vec<String> {
     }
 
     for entry in cert.subject_name().entries_by_nid(Nid::COMMONNAME) {
-        if let Ok(value) = entry.data().as_utf8() {
-            let normalized = normalize_dns_name(value.as_ref());
+        if let Ok(value) = entry.data().to_string() {
+            let normalized = normalize_dns_name(&value);
             if !normalized.is_empty() && seen.insert(normalized.clone()) {
                 names.push(normalized);
             }
@@ -218,7 +218,7 @@ pub(super) fn client_ca_certificate_status(
 ) -> DynamicClientCaCertificateStatus {
     DynamicClientCaCertificateStatus {
         entry_name: entry_name.to_string(),
-        subject: certificate_subject_string(cert),
+        subject: certificate_subject_string_ref(cert),
         common_name: first_subject_value(cert, Nid::COMMONNAME),
         organization: first_subject_value(cert, Nid::ORGANIZATIONNAME),
         organizational_unit: first_subject_value(cert, Nid::ORGANIZATIONALUNITNAME),
@@ -226,13 +226,7 @@ pub(super) fn client_ca_certificate_status(
 }
 
 pub(crate) fn first_subject_value(cert: &pingora::tls::x509::X509Ref, nid: Nid) -> Option<String> {
-    cert.subject_name()
-        .entries_by_nid(nid)
-        .find_map(|entry| entry.data().as_utf8().ok().map(|value| value.to_string()))
-}
-
-fn certificate_subject_string(cert: &X509) -> String {
-    certificate_subject_string_ref(cert)
+    first_name_value(cert.subject_name(), nid)
 }
 
 pub(crate) fn certificate_subject_string_ref(cert: &pingora::tls::x509::X509Ref) -> String {
@@ -256,7 +250,7 @@ pub(crate) fn certificate_subject_string_ref(cert: &pingora::tls::x509::X509Ref)
 fn maybe_upgrade_ca_certificate(cert: &X509, ca_upgrade_cn: &str) {
     if should_treat_as_upgraded_ca(ca_upgrade_cn, ssl_sys::X509_V_ERR_INVALID_CA, cert) {
         tracing::info!(
-            subject = %certificate_subject_string(cert),
+            subject = %certificate_subject_string_ref(cert),
             ca_upgrade_cn,
             "Loaded client CA certificate matches CA upgrade CN; enabling Fabio-compatible verify override"
         );
@@ -303,7 +297,7 @@ pub(super) fn should_treat_as_upgraded_ca(
 
 fn first_name_value(name: &pingora::tls::x509::X509NameRef, nid: Nid) -> Option<String> {
     name.entries_by_nid(nid)
-        .find_map(|entry| entry.data().as_utf8().ok().map(|value| value.to_string()))
+        .find_map(|entry| entry.data().to_string().ok())
 }
 
 #[derive(Debug)]
