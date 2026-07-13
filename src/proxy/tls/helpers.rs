@@ -91,8 +91,8 @@ pub(super) fn extract_certificate_names(cert: &X509) -> Vec<String> {
     }
 
     for entry in cert.subject_name().entries_by_nid(Nid::COMMONNAME) {
-        if let Ok(value) = entry.data().as_utf8() {
-            let normalized = normalize_dns_name(value.as_ref());
+        if let Ok(value) = entry.data().to_string() {
+            let normalized = normalize_dns_name(&value);
             if !normalized.is_empty() && seen.insert(normalized.clone()) {
                 names.push(normalized);
             }
@@ -228,7 +228,7 @@ pub(super) fn client_ca_certificate_status(
 pub(crate) fn first_subject_value(cert: &pingora::tls::x509::X509Ref, nid: Nid) -> Option<String> {
     cert.subject_name()
         .entries_by_nid(nid)
-        .find_map(|entry| entry.data().as_utf8().ok().map(|value| value.to_string()))
+        .find_map(|entry| entry.data().to_string().ok())
 }
 
 fn certificate_subject_string(cert: &X509) -> String {
@@ -303,7 +303,7 @@ pub(super) fn should_treat_as_upgraded_ca(
 
 fn first_name_value(name: &pingora::tls::x509::X509NameRef, nid: Nid) -> Option<String> {
     name.entries_by_nid(nid)
-        .find_map(|entry| entry.data().as_utf8().ok().map(|value| value.to_string()))
+        .find_map(|entry| entry.data().to_string().ok())
 }
 
 struct PemBlock<'a> {
