@@ -256,6 +256,14 @@ client_auth = "required"
 client_ca_path = "/etc/sentirum-lb/client-ca.pem"
 ```
 
+> **⚠️ `client_ca_upgrade_cn` is NOT safe for production.** It overrides X.509
+> verification based on a plain Common Name string match, so any self-signed
+> certificate whose Subject/Issuer CN equals the configured value is accepted
+> — the CN string is not a secret and can be freely forged. It exists only as a
+> transitional escape hatch and is disabled by default. Leave it empty. For real
+> mutual TLS, configure `client_auth = "required"` with a trusted `client_ca_*`
+> source instead.
+
 ### mTLS Identity Forwarding
 
 Verified client certificate fields are sent upstream as headers:
@@ -825,7 +833,7 @@ client_auth = ""                   # optional | required
 client_ca_source = ""              # file | consul_kv
 client_ca_path = ""
 client_ca_consul_prefix = ""
-client_ca_upgrade_cn = ""
+client_ca_upgrade_cn = ""              # ⚠️ UNSAFE: do not set in production (see note below)
 ocsp_stapling_enabled = false
 
 [[tls_listeners]]

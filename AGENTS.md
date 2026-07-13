@@ -216,9 +216,8 @@ These settings can be changed at runtime without restart:
 - `proxy.upstream_h2_max_streams`, `proxy.upstream_h2_ping_interval`
 - `proxy.health_check_*` (interval, timeout, fall, rise, path, tls_skip_verify)
 - `proxy.rate_limit_per_target`, `proxy.rate_limit_burst`
-- `logging.level`, `logging.format`
 
-Not hot-reloadable (require restart): `pool_size`, `enable_h2c`, `trusted_proxies`, `downstream_tcp_keepalive` (listener socket options are set at bind time; `PUT /admin/config` rejects this field).
+Not hot-reloadable (require restart): `pool_size`, `enable_h2c`, `trusted_proxies`, `downstream_tcp_keepalive` (listener socket options are set at bind time; `PUT /admin/config` rejects this field), `logging.level`/`logging.format` (the tracing subscriber is built once at startup with no reload handle; `PUT /admin/config` rejects these fields).
 
 ## Commit hygiene
 
