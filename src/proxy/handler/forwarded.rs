@@ -41,6 +41,12 @@ pub(super) fn append_forwarded_headers(
             .and_then(|v| v.to_str().ok())
     {
         upstream_request.insert_header("CF-Connecting-IP", cf_ip)?;
+    } else {
+        // ponytail: security — when the immediate peer is not a trusted proxy,
+        // strip any client-supplied CF-Connecting-IP so it cannot spoof the
+        // real client identity downstream. Pingora copies downstream headers
+        // into the upstream request, so we must explicitly remove it.
+        upstream_request.remove_header("cf-connecting-ip");
     }
 
     if !host.is_empty() {

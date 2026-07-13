@@ -330,6 +330,7 @@ pub(super) async fn topology_handler(
     let metrics = crate::metrics::prometheus::global();
     let ordering = Ordering::Relaxed;
     let flow_snapshot = state.topology_flow_cache.snapshot(&state.route_table);
+    let configured_matcher = state.config.load().proxy.matcher.clone();
 
     let total_requests = metrics.requests_total.load(ordering);
     let total_errors = metrics.requests_error_total.load(ordering);
@@ -353,11 +354,9 @@ pub(super) async fn topology_handler(
         let mut host_flows = Vec::new();
         if let Some(routes) = table.get_routes(host) {
             for route in routes.iter() {
-                let matcher = if route.glob.is_some() {
-                    "glob"
-                } else {
-                    "prefix"
-                };
+                // ponytail: report the configured matcher, not a glob-presence
+                // heuristic (all literal routes compile a glob now too).
+                let matcher = configured_matcher.as_str();
                 let mut target_entries = Vec::new();
                 let mut route_flows = Vec::new();
                 for target in route.targets.iter() {

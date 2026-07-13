@@ -402,6 +402,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_query_token_only_accepted_on_get() {
+        // Regression (O4): a leaked token in server logs / Referer must not be
+        // replayable for state-changing operations. The query-string token is
+        // only honored on GET (SSE/dashboard EventSource can't set headers).
+        let state = make_authed_test_state("secret", vec![]);
+        let app = build_router(state);
+
+        // GET with query token: accepted (200/OK).
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/admin/routes?token=secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            200,
+            "GET with query token should be accepted"
+        );
+
+        // PUT with query token: rejected (401/403), never accepted.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/config?token=secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            response.status() == 401 || response.status() == 403,
+            "PUT with query token must be rejected, got {}",
+            response.status()
+        );
+    }
+
+    #[tokio::test]
     async fn test_admin_config_includes_http2_fields() {
         let state = make_test_state();
         let app = build_router(state);
@@ -677,6 +722,11 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("application/javascript; charset=utf-8")
         );
+        let body = to_bytes(js_response.into_body(), usize::MAX).await.unwrap();
+        let javascript = String::from_utf8(body.to_vec()).unwrap();
+        assert!(javascript.contains("['prefix','iprefix','glob','exact']"));
+        assert!(!javascript.contains("logging.level"));
+        assert!(!javascript.contains("logging.format"));
     }
 
     #[tokio::test]

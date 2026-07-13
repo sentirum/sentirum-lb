@@ -579,6 +579,37 @@ mod tests {
     }
 
     #[test]
+    fn blocking_query_params_omitted_when_index_is_zero() {
+        // D3: when no valid Consul index has been observed (index=0), the
+        // request must be non-blocking (no index/wait params), so the watcher
+        // knows to sleep poll_interval rather than treat it as a blocking-query
+        // timeout and loop immediately (tight loop / CPU burn).
+        let client = make_client();
+        let kv_url = client.kv_watch_url("/sentirum-lb/routes", 0).unwrap();
+        let kv_query = kv_url.query().unwrap_or_default();
+        assert!(
+            !kv_query.contains("index="),
+            "kv url must omit index when 0"
+        );
+        assert!(
+            !kv_query.contains("wait="),
+            "kv url must omit wait when index 0"
+        );
+
+        // health_checks_url is exercised directly (test module is in-file).
+        let hc_url = client.health_checks_url(0).unwrap();
+        let hc_query = hc_url.query().unwrap_or_default();
+        assert!(
+            !hc_query.contains("index="),
+            "health url must omit index when 0"
+        );
+        assert!(
+            !hc_query.contains("wait="),
+            "health url must omit wait when index 0"
+        );
+    }
+
+    #[test]
     fn app_poll_interval_zero_uses_default_blocking_wait() {
         let app = AppConsulConfig {
             service_whitelist: Vec::new(),

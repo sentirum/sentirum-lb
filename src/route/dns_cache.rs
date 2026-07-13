@@ -6,6 +6,30 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::circuit_breaker::monotonic_elapsed_ms;
 
+/// Outcome of a DNS cache lookup, distinguishing a cached negative result
+/// (NXDOMAIN) from a genuine miss so callers can avoid hammering DNS for a
+/// name known to not exist.
+pub enum LookupOutcome {
+    /// Cached resolved addresses.
+    Positive(Arc<[SocketAddr]>),
+    /// Cached NXDOMAIN / lookup failure within the negative TTL.
+    Negative,
+    /// No cached entry (or expired).
+    Miss,
+}
+
+impl std::fmt::Debug for LookupOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LookupOutcome::Positive(addrs) => {
+                write!(f, "Positive({} addrs)", addrs.len())
+            }
+            LookupOutcome::Negative => write!(f, "Negative"),
+            LookupOutcome::Miss => write!(f, "Miss"),
+        }
+    }
+}
+
 /// Global DNS cache instance
 static DNS_CACHE: std::sync::OnceLock<DnsCache> = std::sync::OnceLock::new();
 
@@ -82,6 +106,15 @@ impl DnsCache {
 
     /// Lookup a cached DNS entry
     pub fn lookup(&self, host: &str) -> Option<Arc<[SocketAddr]>> {
+        match self.lookup_status(host) {
+            LookupOutcome::Positive(addrs) => Some(addrs),
+            LookupOutcome::Negative | LookupOutcome::Miss => None,
+        }
+    }
+
+    /// Lookup that distinguishes a cached negative result (NXDOMAIN) from a
+    /// genuine miss. Callers should skip a fresh `lookup_host` on `Negative`.
+    pub fn lookup_status(&self, host: &str) -> LookupOutcome {
         let now_ms = monotonic_elapsed_ms();
 
         if self
@@ -93,7 +126,7 @@ impl DnsCache {
             self.prom
                 .dns_cache_misses_total
                 .fetch_add(1, Ordering::Relaxed);
-            return None;
+            return LookupOutcome::Miss;
         }
 
         let Some(entry) = self.inner.get(host) else {
@@ -101,7 +134,7 @@ impl DnsCache {
             self.prom
                 .dns_cache_misses_total
                 .fetch_add(1, Ordering::Relaxed);
-            return None;
+            return LookupOutcome::Miss;
         };
 
         if entry.negative {
@@ -109,14 +142,14 @@ impl DnsCache {
             self.prom
                 .dns_cache_negatives_total
                 .fetch_add(1, Ordering::Relaxed);
-            return None;
+            return LookupOutcome::Negative;
         }
 
         self.hits.fetch_add(1, Ordering::Relaxed);
         self.prom
             .dns_cache_hits_total
             .fetch_add(1, Ordering::Relaxed);
-        Some(Arc::clone(&entry.addrs))
+        LookupOutcome::Positive(Arc::clone(&entry.addrs))
     }
 
     /// Store a positive DNS lookup result
@@ -290,6 +323,36 @@ mod tests {
         let stats = cache.stats();
         assert_eq!(stats.misses, 1);
         assert_eq!(stats.hits, 0);
+    }
+
+    #[test]
+    fn test_dns_cache_negative_distinguished_from_miss() {
+        // D1: a cached negative (NXDOMAIN) result must be distinguishable from
+        // a genuine miss, so resolve_upstream_addr can skip hammering DNS.
+        let cache = DnsCache::with_ttl(30, 10);
+
+        // Genuine miss.
+        assert!(matches!(
+            cache.lookup_status("absent.invalid:80"),
+            LookupOutcome::Miss
+        ));
+
+        // Stored negative entry.
+        cache.store_negative("nx.invalid:80".to_string());
+        assert!(matches!(
+            cache.lookup_status("nx.invalid:80"),
+            LookupOutcome::Negative
+        ));
+        // The negative counter must advance (regression guard).
+        assert_eq!(cache.stats().negatives, 1);
+
+        // Stored positive entry.
+        let addr: SocketAddr = "203.0.113.20:80".parse().unwrap();
+        cache.store("ok.example:80".to_string(), vec![addr]);
+        match cache.lookup_status("ok.example:80") {
+            LookupOutcome::Positive(addrs) => assert_eq!(addrs.len(), 1),
+            other => panic!("expected Positive, got {other:?}"),
+        }
     }
 
     #[test]

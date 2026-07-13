@@ -136,6 +136,16 @@ impl TokenBucket {
         self.rate.load(Ordering::Acquire) != UNCONFIGURED
     }
 
+    /// Returns the currently configured (rate, burst) in real units, or
+    /// `(0, 0)` when unconfigured. Used to detect config drift on hot-reload.
+    pub fn configured_rate_burst(&self) -> (u64, u64) {
+        let rate = self.rate.load(Ordering::Acquire);
+        if rate == UNCONFIGURED {
+            return (0, 0);
+        }
+        (rate / SCALE, self.burst.load(Ordering::Acquire) / SCALE)
+    }
+
     /// Current approximate number of available tokens (for diagnostics).
     pub fn available_tokens(&self) -> u64 {
         let rate = self.rate.load(Ordering::Acquire);
@@ -174,6 +184,19 @@ impl Default for TokenBucket {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn test_configured_rate_burst_reports_real_units() {
+        let bucket = TokenBucket::with_params(100, 10);
+        assert_eq!(bucket.configured_rate_burst(), (100, 10));
+        // Reconfigure (hot-reload path) and confirm it reports the new limits.
+        bucket.configure(5, 2);
+        assert_eq!(bucket.configured_rate_burst(), (5, 2));
+        // Disabling (rate 0) reports as unconfigured.
+        bucket.configure(0, 0);
+        assert_eq!(bucket.configured_rate_burst(), (0, 0));
+        assert!(!bucket.is_configured());
+    }
 
     #[test]
     fn test_token_bucket_allows_within_rate() {

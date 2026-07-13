@@ -76,17 +76,31 @@ impl ServiceMonitor {
             // Index reset (new_index < last_index) should NOT be treated as
             // "unchanged": we must reprocess with the new index.
             if new_index == last_index {
+                // ponytail: robustness — when last_index is 0 (no valid Consul
+                // index observed, e.g. a non-Consul responder or stripped index)
+                // the request was non-blocking and returned instantly. Sleep for
+                // poll_interval to avoid a CPU-burning tight loop, instead of
+                // looping immediately like a genuine blocking-query timeout.
+                if last_index == 0 {
+                    let poll = crate::config::Config::parse_duration(&self.config.query_wait);
+                    let poll = if poll.is_zero() {
+                        std::time::Duration::from_secs(5)
+                    } else {
+                        poll
+                    };
+                    tokio::time::sleep(poll).await;
+                }
                 backoff_secs = 1;
                 metrics.set_consul_watcher_backoff_seconds("services", 0);
                 continue;
             }
 
-            // Update last_index regardless of whether new_index went up or reset.
-            // This prevents tight-looping on Consul restart.
-            last_index = new_index;
-
             match self.process_checks(&checks, &tag_prefix).await {
                 Ok(route_defs) => {
+                    // Only advance after processing succeeds. On failure the
+                    // pending snapshot must still differ from last_index so it
+                    // is retried instead of discarded by the unchanged guard.
+                    last_index = new_index;
                     backoff_secs = 1;
                     metrics.set_consul_watcher_backoff_seconds("services", 0);
                     if updates
@@ -433,6 +447,17 @@ impl KVWatcher {
                             tracing::warn!("KV watcher: channel closed, stopping");
                             break;
                         }
+                    } else if last_index == 0 {
+                        // ponytail: robustness — a non-blocking response with no
+                        // valid index (e.g. non-Consul responder) returns instantly;
+                        // sleep poll_interval to avoid a tight loop.
+                        let poll = crate::config::Config::parse_duration(&self.config.query_wait);
+                        let poll = if poll.is_zero() {
+                            std::time::Duration::from_secs(5)
+                        } else {
+                            poll
+                        };
+                        tokio::time::sleep(poll).await;
                     }
                 }
                 Err(e) => {
@@ -709,5 +734,119 @@ mod tests {
             .await
             .expect_err("catalog failure should preserve previous routes");
         assert!(error.contains("web"));
+    }
+
+    #[tokio::test]
+    async fn watch_retries_pending_checks_without_refetching_health() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::Duration;
+
+        let health_calls = Arc::new(AtomicU64::new(0));
+        let catalog_calls = Arc::new(AtomicU64::new(0));
+        let health_gate = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new()
+            .route(
+                "/v1/health/state/any",
+                get({
+                    let health_calls = health_calls.clone();
+                    let health_gate = health_gate.clone();
+                    move || {
+                        let health_calls = health_calls.clone();
+                        let health_gate = health_gate.clone();
+                        async move {
+                            if health_calls.load(Ordering::SeqCst) >= 1 {
+                                health_gate.notified().await;
+                            }
+                            health_calls.fetch_add(1, Ordering::SeqCst);
+                            axum::http::Response::builder()
+                                .status(StatusCode::OK)
+                                .header("x-consul-index", "10")
+                                .body(axum::body::Body::from(
+                                    serde_json::json!([{
+                                        "Node": "node-1",
+                                        "CheckID": "service:web:1",
+                                        "Name": "service:web:1",
+                                        "Status": "passing",
+                                        "ServiceName": "web",
+                                        "ServiceID": "web:1",
+                                        "ServiceTags": ["urlprefix-/"],
+                                    }])
+                                    .to_string(),
+                                ))
+                                .unwrap()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/catalog/service/{service}",
+                get({
+                    let catalog_calls = catalog_calls.clone();
+                    move |axum::extract::Path(service): axum::extract::Path<String>| {
+                        let catalog_calls = catalog_calls.clone();
+                        async move {
+                            let call = catalog_calls.fetch_add(1, Ordering::SeqCst);
+                            if call == 0 || service != "web" {
+                                return (StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string());
+                            }
+                            (
+                                StatusCode::OK,
+                                serde_json::json!([{
+                                    "Node": "node-1",
+                                    "ServiceID": "web:1",
+                                    "Address": "10.0.0.5",
+                                    "ServiceAddress": "",
+                                    "ServicePort": 8080,
+                                    "ServiceTags": ["urlprefix-/"],
+                                    "ServiceMeta": {},
+                                }])
+                                .to_string(),
+                            )
+                        }
+                    }
+                }),
+            );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let monitor = ServiceMonitor {
+            client: Arc::new(
+                ConsulClient::new(ConsulConfig {
+                    address: addr.to_string(),
+                    ..ConsulConfig::default()
+                })
+                .unwrap(),
+            ),
+            config: ConsulConfig::default(),
+        };
+        let (tx, mut rx) = mpsc::channel(8);
+        let handle = tokio::spawn(async move { monitor.watch(tx).await });
+
+        let mut saw_error = false;
+        let mut health_calls_at_success = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            let Ok(update) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+            else {
+                continue;
+            };
+            match update {
+                Some(RouteUpdate::Error(_)) => saw_error = true,
+                Some(RouteUpdate::Services(_)) => {
+                    health_calls_at_success = Some(health_calls.load(Ordering::SeqCst));
+                    break;
+                }
+                _ => {}
+            }
+        }
+        handle.abort();
+
+        assert!(saw_error);
+        assert_eq!(
+            health_calls_at_success,
+            Some(1),
+            "pending snapshot must be retried without a fresh health query"
+        );
     }
 }

@@ -68,6 +68,65 @@ fn validate_rejects_invalid_timeout_strings() {
 }
 
 #[test]
+fn parse_duration_invalid_returns_zero_not_panic() {
+    // C7: an invalid duration string must not panic and must return ZERO
+    // (callers like resolve_read_timeout fall back to the default rather than
+    // treating ZERO as a configured "no timeout").
+    assert_eq!(Config::parse_duration("30sec"), Duration::ZERO);
+    assert_eq!(Config::parse_duration("abc"), Duration::ZERO);
+    assert_eq!(Config::parse_duration(""), Duration::ZERO);
+    // Valid durations still parse.
+    assert_eq!(Config::parse_duration("30s"), Duration::from_secs(30));
+}
+
+#[test]
+fn validate_rejects_zero_tcp_refresh() {
+    // D4a: tokio::time::interval panics on Duration::ZERO, so tcp.refresh=0s
+    // must be rejected at validation time, not crash at runtime.
+    let mut config = Config {
+        server: ServerConfig {
+            listen: ":9999".to_string(),
+            admin_listen: "127.0.0.1:9998".to_string(),
+            admin_users: Vec::new(),
+            admin_token: String::new(),
+            workers: 0,
+            drain_timeout: "30s".to_string(),
+        },
+        consul: ConsulConfig {
+            address: "127.0.0.1:8500".to_string(),
+            scheme: "http".to_string(),
+            token: String::new(),
+            kv_prefix: "/sentirum-lb/routes".to_string(),
+            tag_prefix: "urlprefix-".to_string(),
+            poll_interval: "0s".to_string(),
+            service_discovery: true,
+            kv_watching: true,
+            service_whitelist: Vec::new(),
+            service_blacklist: Vec::new(),
+            graceful_shutdown: true,
+            include_warning: false,
+        },
+        proxy: ProxyConfig::default(),
+        logging: LoggingConfig::default(),
+        tls: TlsConfig::default(),
+        tls_listeners: Vec::new(),
+        parsed_timeouts: Default::default(),
+        tcp: TcpConfig::default(),
+    };
+    config.tcp.refresh = "0s".to_string();
+
+    let error = config
+        .validate()
+        .expect("zero tcp.refresh should fail validation");
+    assert!(error.contains("tcp.refresh"), "error was: {error}");
+
+    // A non-zero refresh is accepted.
+    config.tcp.refresh = "5s".to_string();
+    config.proxy.connect_timeout = "30s".to_string();
+    assert!(config.validate().is_none());
+}
+
+#[test]
 fn proxy_config_defaults_long_lived_http2_fields() {
     let proxy = ProxyConfig::default();
     assert!(!proxy.enable_h2c);

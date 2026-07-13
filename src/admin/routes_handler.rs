@@ -45,11 +45,10 @@ pub(super) async fn routes_handler(
                     })
                     .collect();
 
-                let matcher = if route.glob.is_some() {
-                    "glob".to_string()
-                } else {
-                    default_matcher.clone()
-                };
+                // ponytail: the configured matcher decides how routes are
+                // matched at lookup time; a compiled glob is an implementation
+                // detail of matching and does not imply MatcherKind::Glob.
+                let matcher = default_matcher.clone();
 
                 serde_json::json!({
                     "host": host,

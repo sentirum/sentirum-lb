@@ -716,6 +716,9 @@ fn main() {
                         Ok(c) => c,
                         Err(e) => {
                             tracing::error!(listener = %label, error = %e, "Failed to load file certificate");
+                            if is_primary {
+                                std::process::exit(1);
+                            }
                             continue;
                         }
                     };
@@ -753,11 +756,17 @@ fn main() {
                         }
                         Err(e) => {
                             tracing::error!(listener = %label, error = %e, "Failed to configure file-based TLS listener");
+                            if is_primary {
+                                std::process::exit(1);
+                            }
                         }
                     }
                 }
                 Err(e) => {
                     tracing::error!(listener = %label, error = %e, "TLS configuration invalid, skipping");
+                    if is_primary {
+                        std::process::exit(1);
+                    }
                 }
             },
             Ok(Some(TlsMode::ConsulKv(consul_tls))) => {
@@ -869,6 +878,9 @@ fn main() {
                             error = %e,
                             "Failed to configure Consul-backed TLS listener"
                         );
+                        if is_primary {
+                            std::process::exit(1);
+                        }
                     }
                 }
             }
@@ -878,6 +890,9 @@ fn main() {
             }
             Err(e) => {
                 tracing::error!(listener = %label, error = %e, "Invalid TLS source configuration; skipping");
+                if is_primary {
+                    std::process::exit(1);
+                }
             }
         }
     }
@@ -957,22 +972,19 @@ fn main() {
     admin_service.threads = Some(1);
     server.add_service(admin_service);
 
-    // Health check background service
+    // Health check background service.
+    // ponytail: always spawn — the task itself sleeps on a guard interval when
+    // disabled, so a startup interval of 0 can still be re-enabled at runtime.
     {
-        let interval = sentirum_lb::config::Config::parse_duration(
-            &service_config.proxy.health_check_interval,
+        let mut health_service = background_service(
+            "health checker",
+            HealthCheckBackgroundService {
+                route_table: managed_table.clone(),
+                config: runtime_config.clone(),
+            },
         );
-        if !interval.is_zero() {
-            let mut health_service = background_service(
-                "health checker",
-                HealthCheckBackgroundService {
-                    route_table: managed_table.clone(),
-                    config: runtime_config.clone(),
-                },
-            );
-            health_service.threads = Some(1);
-            server.add_service(health_service);
-        }
+        health_service.threads = Some(1);
+        server.add_service(health_service);
     }
 
     tracing::info!("Sentirum LB is ready");

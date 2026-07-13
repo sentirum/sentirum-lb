@@ -24,3 +24,6 @@ REVIEW.md
 
 # Local config overrides
 config.local.toml
+
+# pi agent artifacts (local audit helpers)
+.pi-subagents/

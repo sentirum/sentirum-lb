@@ -102,7 +102,7 @@ const CONFIG_EDITOR_FIELDS = [
     {
         title: 'Routing & identity', subtitle: 'Live request routing behavior', fields: [
             { path: 'proxy.strategy', label: 'Strategy', type: 'select', options: ['round-robin','least-connections','random'], hint: 'Load-balancing strategy applied on new picks.' },
-            { path: 'proxy.matcher', label: 'Matcher', type: 'select', options: ['prefix','iprefix','glob'], hint: 'Path matching strategy for route lookup.' },
+            { path: 'proxy.matcher', label: 'Matcher', type: 'select', options: ['prefix','iprefix','glob','exact'], hint: 'Path matching strategy for route lookup.' },
             { path: 'proxy.request_id_header', label: 'Request ID header', type: 'text', allowEmpty: true, hint: 'Leave empty to disable request ID header injection.' },
             { path: 'proxy.no_route_status', label: 'No-route status', type: 'number', min: 100, max: 599, hint: 'HTTP status returned when no route matches.' },
         ]
@@ -147,12 +147,6 @@ const CONFIG_EDITOR_FIELDS = [
         title: 'Rate limiting', subtitle: 'Per-target request rate control', fields: [
             { path: 'proxy.rate_limit_per_target', label: 'Requests/sec per target', type: 'number', min: 0, hint: 'Token bucket rate. 0 = unlimited.' },
             { path: 'proxy.rate_limit_burst', label: 'Burst allowance', type: 'number', min: 1, hint: 'Maximum burst before rate limiting kicks in.' },
-        ]
-    },
-    {
-        title: 'Logging', subtitle: 'Runtime log output configuration', fields: [
-            { path: 'logging.level', label: 'Log level', type: 'select', options: ['trace','debug','info','warn','error'], hint: 'Minimum log level to emit.' },
-            { path: 'logging.format', label: 'Log format', type: 'select', options: ['json','text'], hint: 'Output format for log lines.' },
         ]
     }
 ];

@@ -35,6 +35,11 @@ impl ClientAuthState {
         };
 
         let Some(snapshot) = self.store.current_store() else {
+            if self.mode == ClientAuthMode::Required {
+                return Err(TlsError::ConfigError(
+                    "client auth required but no client CA store is loaded".to_string(),
+                ));
+            }
             ssl.set_verify(ssl::SslVerifyMode::NONE);
             return Ok(());
         };
@@ -167,4 +172,25 @@ fn build_tls_settings_from_source(
         }),
     });
     TlsSettings::with_callbacks(callbacks).map_err(|e| TlsError::ConfigError(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn required_client_auth_fails_closed_without_ca_store() {
+        let context = ssl::SslContextBuilder::new(ssl::SslMethod::tls())
+            .unwrap()
+            .build();
+        let mut ssl = ssl::Ssl::new(&context).unwrap();
+        let state = ClientAuthState {
+            mode: ClientAuthMode::Required,
+            store: Arc::new(DynamicClientCaStore::new(String::new())),
+            ca_upgrade_cn: String::new(),
+        };
+
+        let error = state.configure_ssl(&mut ssl).unwrap_err().to_string();
+        assert!(error.contains("no client CA store"));
+    }
 }

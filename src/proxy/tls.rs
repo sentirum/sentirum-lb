@@ -427,6 +427,14 @@ impl LoadedCertificate {
         })?;
         let chain: Vec<X509> = iter.collect();
         let key = parse_private_key(key_pem)?;
+        match leaf.public_key() {
+            Ok(public_key) if key.public_eq(&public_key) => {}
+            _ => {
+                return Err(TlsError::ConfigError(format!(
+                    "certificate bundle '{entry_name}' private key does not match certificate"
+                )));
+            }
+        }
         let names = extract_certificate_names(&leaf);
 
         Ok(Self {
@@ -968,5 +976,31 @@ mod tests {
                 .contains("exceeds max size")
         );
         assert!(store.select_for_server_name(Some("example.com")).is_some());
+    }
+
+    #[test]
+    fn test_from_pem_pair_accepts_matching_key() {
+        let cert = self_signed_cert(&["match.example.com"]);
+        let loaded = LoadedCertificate::from_pem_pair(
+            "match",
+            cert.cert.pem().as_bytes(),
+            cert.signing_key.serialize_pem().as_bytes(),
+        );
+        assert!(loaded.is_ok());
+    }
+
+    #[test]
+    fn test_from_pem_pair_rejects_mismatched_key() {
+        let cert = self_signed_cert(&["alpha.example.com"]);
+        let other = self_signed_cert(&["beta.example.com"]);
+        let error = LoadedCertificate::from_pem_pair(
+            "mismatch",
+            cert.cert.pem().as_bytes(),
+            other.signing_key.serialize_pem().as_bytes(),
+        )
+        .err()
+        .expect("mismatched key must be rejected")
+        .to_string();
+        assert!(error.contains("private key does not match certificate"));
     }
 }
