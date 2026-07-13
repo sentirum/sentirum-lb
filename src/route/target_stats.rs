@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, Weak};
 use super::circuit_breaker::monotonic_secs;
 use super::health_tracker::TargetHealthTracker;
 use super::target::CircuitBreakerConfig;
+use crate::proxy::ratelimit::TokenBucket;
 
 /// Prune dead Weak entries from a HashMap when it exceeds a threshold.
 fn prune_dead<T>(map: &mut HashMap<String, Weak<T>>) {
@@ -21,6 +22,7 @@ pub struct TargetStatsRegistry {
     stats: Mutex<HashMap<String, Weak<TargetStats>>>,
     edge_stats: Mutex<HashMap<String, Weak<TargetStats>>>,
     health_trackers: Mutex<HashMap<String, Weak<TargetHealthTracker>>>,
+    rate_limiters: Mutex<HashMap<String, Weak<TokenBucket>>>,
 }
 
 impl TargetStatsRegistry {
@@ -119,6 +121,29 @@ impl TargetStatsRegistry {
             e.into_inner()
         });
         entries.clear();
+    }
+
+    /// Get or create a shared rate-limit bucket for an upstream URL.
+    /// Sharing by URL (not per route-target) keeps rate limits and accumulated
+    /// tokens stable across route-table rebuilds and across routes that point
+    /// at the same backend.
+    pub fn rate_limiter_for(&self, key: &str) -> Arc<TokenBucket> {
+        let mut entries = self.rate_limiters.lock().unwrap_or_else(|e| {
+            tracing::warn!("Target rate-limiter registry lock was poisoned; recovering");
+            e.into_inner()
+        });
+
+        if let Some(bucket) = entries.get(key).and_then(Weak::upgrade) {
+            return bucket;
+        }
+
+        if entries.len() > REGISTRY_PRUNE_THRESHOLD {
+            prune_dead(&mut entries);
+        }
+
+        let bucket = Arc::new(TokenBucket::new());
+        entries.insert(key.to_string(), Arc::downgrade(&bucket));
+        bucket
     }
 }
 

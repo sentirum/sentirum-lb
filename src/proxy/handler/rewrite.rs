@@ -55,16 +55,22 @@ pub(super) fn resolve_read_timeout(
     is_streaming: bool,
 ) -> std::time::Duration {
     let timeouts = config.parsed_timeouts();
+    // Effective default when no per-route override applies: streaming uses the
+    // stream read timeout (falling back to read), otherwise the read timeout.
+    let default_read = if is_streaming {
+        timeouts.stream_read.unwrap_or(timeouts.read)
+    } else {
+        timeouts.read
+    };
 
     if let Some(raw) = target.read_timeout_override() {
-        return Config::parse_duration(raw);
+        // ponytail: an invalid duration (e.g. "30sec") must NOT silently become
+        // Duration::ZERO, which Pingora treats as an immediate read timeout.
+        // Fall back to the resolved default instead.
+        return Config::parse_optional_duration(raw).unwrap_or(default_read);
     }
 
-    if is_streaming {
-        return timeouts.stream_read.unwrap_or(timeouts.read);
-    }
-
-    timeouts.read
+    default_read
 }
 
 pub(super) fn rewrite_upstream_uri(

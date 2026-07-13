@@ -300,17 +300,22 @@ impl Target {
     }
 
     /// Try to acquire a rate limit token. Returns `true` if allowed.
+    ///
+    /// The bucket is shared per upstream URL, so route-table rebuilds preserve
+    /// accumulated state. Hot-reloaded (global_rate, global_burst) are applied
+    /// immediately when they differ from the bucket's current configuration —
+    /// UNLESS this target has an explicit per-route `ratelimit=` override, in
+    /// which case the override wins and the global limit is ignored.
     pub fn try_acquire_rate_limit(&self, global_rate: usize, global_burst: usize) -> bool {
-        if self.rate_limiter.is_configured() {
-            return self.rate_limiter.try_acquire();
+        // A per-route `ratelimit=` opt configures the bucket at pre_parse time;
+        // don't let the global hot-reload clobber it.
+        if !self.opts.contains_key("ratelimit") {
+            let (cur_rate, cur_burst) = self.rate_limiter.configured_rate_burst();
+            if (cur_rate, cur_burst) != (global_rate as u64, global_burst as u64) {
+                self.rate_limiter
+                    .configure(global_rate as u64, global_burst as u64);
+            }
         }
-
-        if global_rate == 0 {
-            return true;
-        }
-
-        self.rate_limiter
-            .configure(global_rate as u64, global_burst as u64);
         self.rate_limiter.try_acquire()
     }
 
@@ -330,19 +335,32 @@ impl Target {
         let cache_key = format!("{host}:{port}");
 
         let cache = global_dns_cache();
-        if let Some(addrs) = cache.lookup(&cache_key)
-            && let Some(addr) = addrs.first()
-        {
-            tracing::trace!(host, port, "DNS cache hit");
-            if !self.ssrf_skip_verify()
-                && (is_ip_always_blocked(&addr.ip())
-                    || (!self.source_allows_private_upstreams() && is_ip_rfc1918(&addr.ip())))
-            {
-                cache.remove(&cache_key);
-                tracing::warn!(host, port, addr = %addr, "DNS cache hit failed SSRF check, re-resolving");
-            } else {
-                return Ok(*addr);
+        match cache.lookup_status(&cache_key) {
+            crate::route::dns_cache::LookupOutcome::Positive(addrs) => {
+                if let Some(addr) = addrs.first() {
+                    tracing::trace!(host, port, "DNS cache hit");
+                    if !self.ssrf_skip_verify()
+                        && (is_ip_always_blocked(&addr.ip())
+                            || (!self.source_allows_private_upstreams()
+                                && is_ip_rfc1918(&addr.ip())))
+                    {
+                        cache.remove(&cache_key);
+                        tracing::warn!(host, port, addr = %addr, "DNS cache hit failed SSRF check, re-resolving");
+                    } else {
+                        return Ok(*addr);
+                    }
+                }
             }
+            // ponytail: serve the cached negative result instead of re-querying
+            // DNS on every request — that was making the negative cache useless.
+            crate::route::dns_cache::LookupOutcome::Negative => {
+                tracing::debug!(host, port, "DNS negative cache hit (NXDOMAIN)");
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "cached NXDOMAIN for upstream host",
+                ));
+            }
+            crate::route::dns_cache::LookupOutcome::Miss => {}
         }
 
         let addr_str = if host.contains(':') {

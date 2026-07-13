@@ -299,20 +299,23 @@ impl CircuitBreaker {
                 };
                 // O(1) threshold check using the maintained error counter.
                 // Open the circuit when BOTH conditions are met:
-                //   1. Error rate >= error_threshold%
+                //   1. Error rate >= error_threshold% measured over the CURRENT window
                 //   2. At least min_samples requests observed
                 // min_samples = max(window_size / 4, 5) to avoid triggering on
                 // tiny samples while still protecting against 100% failure rates.
-                let threshold = self.window_size * self.error_threshold as usize / 100;
+                // ponytail: ratio check against window_len (current samples), not
+                // window_size, so 100% failure on the first min_samples requests
+                // opens the circuit. Overflow-safe: both factors stay tiny.
                 let min_samples = (self.window_size / 4).max(5).min(self.window_size);
-                if errors >= threshold as u64 && window_len >= min_samples {
+                let error_rate_meets = window_len > 0
+                    && errors * 100 >= window_len as u64 * self.error_threshold as u64;
+                if error_rate_meets && window_len >= min_samples {
                     self.transition_to_open();
                     tracing::warn!(
-                        error_rate =
-                            format!("{:.1}%", 100.0 * errors as f64 / self.window_size as f64),
+                        error_rate = format!("{:.1}%", 100.0 * errors as f64 / window_len as f64),
                         error_count = errors,
-                        window_size = self.window_size,
-                        threshold = threshold,
+                        window_len = window_len,
+                        threshold_percent = self.error_threshold,
                         "Circuit breaker OPENED"
                     );
                 }
@@ -536,6 +539,27 @@ mod tests {
         assert!(cb.allow_request());
 
         for _ in 0..5 {
+            cb.record_error();
+        }
+        assert_eq!(cb.current_state(), CircuitState::Open);
+        assert!(!cb.allow_request());
+    }
+
+    #[test]
+    fn test_circuit_breaker_opens_on_100pct_failure_at_min_samples() {
+        // Regression: threshold previously used window_size (not window_len),
+        // so 100% failure on the first min_samples requests did NOT open the
+        // circuit. Now it must open as soon as error_rate >= threshold over the
+        // current window and window_len >= min_samples.
+        let config = CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 100,
+            recovery_timeout_secs: 30,
+            half_open_max_requests: 3,
+        };
+        let cb = CircuitBreaker::with_config(config);
+        // min_samples = max(100/4, 5) = 25. 25 errors at 100% should open.
+        for _ in 0..25 {
             cb.record_error();
         }
         assert_eq!(cb.current_state(), CircuitState::Open);

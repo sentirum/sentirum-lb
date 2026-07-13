@@ -83,10 +83,16 @@ fn parse_route_add(tokens: &[String]) -> Option<RouteDef> {
             "weight" => {
                 i += 1;
                 if i < tokens.len() {
+                    // ponytail: reject non-finite (inf/nan) and out-of-range weights;
+                    // (w*1000) as usize with inf == usize::MAX => OOM in compute_weights.
+                    const MAX_WEIGHT: f64 = 1000.0;
                     match tokens[i].parse::<f64>() {
-                        Ok(w) if w >= 0.0 => weight = w,
+                        Ok(w) if w.is_finite() && (0.0..=MAX_WEIGHT).contains(&w) => weight = w,
                         _ => {
-                            tracing::warn!(weight = %tokens[i], "Invalid weight in route add; skipping");
+                            tracing::warn!(
+                                weight = %tokens[i],
+                                "Invalid weight in route add (must be finite, 0..={MAX_WEIGHT}); skipping"
+                            );
                         }
                     }
                 }
@@ -201,10 +207,16 @@ fn parse_route_weight(tokens: &[String]) -> Option<RouteDef> {
             "weight" => {
                 i += 1;
                 if i < tokens.len() {
+                    // ponytail: reject non-finite (inf/nan) and out-of-range weights;
+                    // (w*1000) as usize with inf == usize::MAX => OOM in compute_weights.
+                    const MAX_WEIGHT: f64 = 1000.0;
                     match tokens[i].parse::<f64>() {
-                        Ok(w) if w >= 0.0 => weight = w,
+                        Ok(w) if w.is_finite() && (0.0..=MAX_WEIGHT).contains(&w) => weight = w,
                         _ => {
-                            tracing::warn!(weight = %tokens[i], "Invalid weight in route weight; skipping");
+                            tracing::warn!(
+                                weight = %tokens[i],
+                                "Invalid weight in route weight (must be finite, 0..={MAX_WEIGHT}); skipping"
+                            );
                         }
                     }
                 }
@@ -294,6 +306,21 @@ mod tests {
         let defs = parse_route_commands(input);
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].weight, 0.5);
+    }
+
+    #[test]
+    fn test_parse_route_add_rejects_non_finite_weight() {
+        // inf/nan/huge must be rejected, not silently accepted: (w*1000) as usize
+        // would otherwise be usize::MAX and OOM compute_weights.
+        for bad in ["inf", "-inf", "nan", "-1", "1e308"] {
+            let input = format!("route add svc host/ http://10.0.0.1:8080/ weight {bad}");
+            let defs = parse_route_commands(&input);
+            assert_eq!(defs.len(), 1, "failed for weight={bad}");
+            assert_eq!(
+                defs[0].weight, 0.0,
+                "inf/nan/negative weight should fall back to 0"
+            );
+        }
     }
 
     #[test]

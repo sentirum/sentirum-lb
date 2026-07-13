@@ -60,11 +60,9 @@ impl Clone for Route {
 
 impl Route {
     pub fn new(host: String, path: String) -> Self {
-        let glob = if path.contains('*') || path.contains('?') || path.contains('[') {
-            Pattern::new(&path).ok()
-        } else {
-            None
-        };
+        // A literal path (no wildcards) is still a valid glob that matches itself,
+        // so always compile. Pattern::new errors only on malformed bracket sets.
+        let glob = Pattern::new(&path).ok();
 
         Self {
             host,
@@ -182,7 +180,9 @@ impl Route {
         self.w_targets.clear();
         let slots = 1000;
         for t in &self.targets {
-            let count = (t.weight * slots as f64).round() as usize;
+            // ponytail: defense-in-depth clamp; parser already rejects non-finite/
+            // out-of-range weights, but a future caller could bypass it.
+            let count = (t.weight.clamp(0.0, 1000.0) * slots as f64).round() as usize;
             // Fabio-compatible: if weight > 0 but count is 0, give at least 1 slot
             // But if weight == 0, give 0 slots (target receives no traffic)
             if count == 0 && t.weight > 0.0 {
@@ -479,7 +479,7 @@ impl Table {
             health_tracker: self.health_tracker_for(&def.dst),
             stats: self.stats_for(&def.dst),
             edge_stats: self.edge_stats_for(&edge_stats_key),
-            rate_limiter: Arc::new(crate::proxy::ratelimit::TokenBucket::new()),
+            rate_limiter: self.rate_limiter_for(&def.dst),
         };
         target.pre_parse();
 
@@ -710,6 +710,13 @@ impl Table {
             })
     }
 
+    fn rate_limiter_for(&self, key: &str) -> Arc<crate::proxy::ratelimit::TokenBucket> {
+        self.stats_registry
+            .as_ref()
+            .map(|registry| registry.rate_limiter_for(key))
+            .unwrap_or_else(|| Arc::new(crate::proxy::ratelimit::TokenBucket::new()))
+    }
+
     /// Get the number of routes in the table.
     pub fn route_count(&self) -> usize {
         self.routes.values().map(|r| r.len()).sum()
@@ -926,6 +933,42 @@ mod tests {
         };
         t.pre_parse();
         t
+    }
+
+    fn route_def(service: &str, src: &str, dst: &str) -> crate::route::definition::RouteDef {
+        use crate::route::definition::{RouteCmd, RouteSource};
+        use std::collections::HashMap;
+        crate::route::definition::RouteDef {
+            cmd: RouteCmd::Add,
+            service: service.to_string(),
+            src: src.to_string(),
+            dst: dst.to_string(),
+            weight: 0.0,
+            tags: vec![],
+            opts: HashMap::new(),
+            source: RouteSource::Static,
+        }
+    }
+
+    #[test]
+    fn test_glob_literal_route_matches() {
+        // Regression: a literal path (no wildcards) used to compile no glob,
+        // so MatcherKind::Glob never matched it. Literal paths are valid globs.
+        let route = Route::new("example.com".to_string(), "/api".to_string());
+        assert!(route.glob.is_some(), "literal path should compile a glob");
+
+        let table =
+            Table::from_definitions(&[route_def("svc", "example.com/api", "http://1.0.0.1:80")]);
+        assert!(
+            table
+                .lookup_route("example.com", "/api", MatcherKind::Glob)
+                .is_some()
+        );
+        assert!(
+            table
+                .lookup_route("example.com", "/other", MatcherKind::Glob)
+                .is_none()
+        );
     }
 
     #[test]
