@@ -308,11 +308,35 @@ async fn run_tcp_listener_with_watch(
     config: SharedConfig,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let listener = match TcpListener::bind(&listen).await {
-        Ok(listener) => listener,
-        Err(error) => {
-            tracing::error!(addr = %listen, %error, "Failed to bind TCP listener");
-            return;
+    // ponytail: retry bind with capped backoff instead of giving up. A single
+    // transient bind failure (port in TIME_WAIT, brief address-in-use) used to
+    // kill the listener task permanently while the reconciler still believed
+    // the port was owned, so it never recovered. The task stays alive and keeps
+    // retrying until it binds or shuts down.
+    let listener = {
+        let mut backoff_secs: u64 = 1;
+        loop {
+            match TcpListener::bind(&listen).await {
+                Ok(listener) => break listener,
+                Err(error) => {
+                    tracing::warn!(
+                        addr = %listen,
+                        %error,
+                        backoff_secs,
+                        "Failed to bind TCP listener; retrying"
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)) => {}
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() {
+                                tracing::info!(addr = %listen, "TCP listener bind cancelled during shutdown");
+                                return;
+                            }
+                        }
+                    }
+                    backoff_secs = (backoff_secs * 2).min(60);
+                }
+            }
         }
     };
 
@@ -1078,5 +1102,35 @@ mod tests {
             !t.is_host_safe() && t.ssrf_skip_verify(),
             "Loopback blocked by SSRF but ssrfskipverify=true should bypass proxy check"
         );
+    }
+
+    #[tokio::test]
+    async fn run_tcp_listener_retries_bind_on_failure() {
+        // D4b: a transient bind failure used to kill the listener task and the
+        // reconciler never retried it. Now the task stays alive and keeps
+        // retrying. We occupy the port, start the listener, and confirm the
+        // task is still running (retrying) rather than having exited.
+        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = occupied.local_addr().unwrap().port();
+
+        let table = Arc::new(crate::route::registry::ManagedRouteTable::new());
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(run_tcp_listener_with_watch(
+            format!("127.0.0.1:{port}"),
+            port,
+            TcpListenerMode::Plain,
+            table,
+            config(),
+            rx,
+        ));
+
+        // Give the task time to attempt a bind and enter the retry backoff.
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        assert!(
+            !handle.is_finished(),
+            "listener task must stay alive and retry when bind fails"
+        );
+        handle.abort();
+        drop(occupied);
     }
 }

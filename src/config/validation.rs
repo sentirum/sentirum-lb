@@ -60,7 +60,8 @@ impl Config {
             &self.proxy.health_check_timeout,
             true,
         );
-        validate_duration_field(&mut errors, "tcp.refresh", &self.tcp.refresh, true);
+        // tokio::time::interval panics on Duration::ZERO, so refresh must be > 0.
+        validate_duration_field(&mut errors, "tcp.refresh", &self.tcp.refresh, false);
 
         // Streaming read timeout is optional; validate only when set.
         if !self.proxy.stream_read_timeout.trim().is_empty() {

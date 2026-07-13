@@ -76,6 +76,20 @@ impl ServiceMonitor {
             // Index reset (new_index < last_index) should NOT be treated as
             // "unchanged": we must reprocess with the new index.
             if new_index == last_index {
+                // ponytail: robustness — when last_index is 0 (no valid Consul
+                // index observed, e.g. a non-Consul responder or stripped index)
+                // the request was non-blocking and returned instantly. Sleep for
+                // poll_interval to avoid a CPU-burning tight loop, instead of
+                // looping immediately like a genuine blocking-query timeout.
+                if last_index == 0 {
+                    let poll = crate::config::Config::parse_duration(&self.config.query_wait);
+                    let poll = if poll.is_zero() {
+                        std::time::Duration::from_secs(5)
+                    } else {
+                        poll
+                    };
+                    tokio::time::sleep(poll).await;
+                }
                 backoff_secs = 1;
                 metrics.set_consul_watcher_backoff_seconds("services", 0);
                 continue;
@@ -433,6 +447,17 @@ impl KVWatcher {
                             tracing::warn!("KV watcher: channel closed, stopping");
                             break;
                         }
+                    } else if last_index == 0 {
+                        // ponytail: robustness — a non-blocking response with no
+                        // valid index (e.g. non-Consul responder) returns instantly;
+                        // sleep poll_interval to avoid a tight loop.
+                        let poll = crate::config::Config::parse_duration(&self.config.query_wait);
+                        let poll = if poll.is_zero() {
+                            std::time::Duration::from_secs(5)
+                        } else {
+                            poll
+                        };
+                        tokio::time::sleep(poll).await;
                     }
                 }
                 Err(e) => {

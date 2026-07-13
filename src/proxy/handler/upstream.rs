@@ -138,7 +138,11 @@ impl SentirumProxy {
                         "Circuit breaker open on picked target; using fallback"
                     );
                 }
-                return best_fallback.or(Some(target));
+                // ponytail: when no healthy fallback exists, do NOT proxy to the
+                // unhealthy/open target — fall through to try less-specific routes,
+                // and ultimately return no_route_status (503). Sending traffic to a
+                // target we just classified unhealthy/CB-open defeats the check.
+                return best_fallback;
             }
         }
 
@@ -166,8 +170,21 @@ impl SentirumProxy {
                 headers,
             )
             .ok_or_else(|| {
-                tracing::warn!(host, path, "No route found");
-                Error::new(ErrorType::HTTPStatus(config.proxy.no_route_status))
+                // ponytail: distinguish "no route matched" (no_route_status,
+                // typically 404) from "route matched but every target is
+                // unhealthy / circuit-open" (503 Service Unavailable).
+                let route_matched = !self
+                    .route_table
+                    .get()
+                    .matching_routes(host, path, MatcherKind::from_config(&config.proxy.matcher))
+                    .is_empty();
+                if route_matched {
+                    tracing::warn!(host, path, "All targets unhealthy / circuit-open");
+                    Error::new(ErrorType::HTTPStatus(503))
+                } else {
+                    tracing::warn!(host, path, "No route found");
+                    Error::new(ErrorType::HTTPStatus(config.proxy.no_route_status))
+                }
             })?;
 
         tracing::debug!(host, path, target_url = %target.url, "Route found");
