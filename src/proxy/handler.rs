@@ -418,6 +418,23 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_host_falls_back_to_authority() {
+        // Regression: HTTP/2 clients may omit the Host header and carry the
+        // host only in :authority. Host-scoped routes must still match.
+        let mut header = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        // No Host header — set the URI authority (the :authority pseudo-header).
+        header.set_uri("http://h2.example.com/".parse::<http::Uri>().unwrap());
+        assert!(header.headers.get("host").is_none());
+        assert_eq!(parse_host_from_header(&header), "h2.example.com");
+
+        // When Host IS present it takes precedence over :authority.
+        let mut header = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        header.set_uri("http://h2.example.com/".parse::<http::Uri>().unwrap());
+        header.insert_header("Host", "host.example.com").unwrap();
+        assert_eq!(parse_host_from_header(&header), "host.example.com");
+    }
+
+    #[test]
     fn test_client_cert_identity_cache_evicts_oldest() {
         let mut cache = ClientCertIdentityCache::default();
         cache.insert("a".to_string(), ClientCertIdentity::default());
@@ -443,6 +460,27 @@ mod tests {
             "example.com"
         );
         assert_eq!(upstream.headers.get("x-forwarded-proto").unwrap(), "http");
+    }
+
+    #[test]
+    fn test_append_forwarded_headers_untrusted_strips_cf_connecting_ip() {
+        // Regression: an untrusted peer could spoof CF-Connecting-IP and it
+        // flowed through to the upstream because it was only ever added (for
+        // trusted peers), never stripped.
+        let mut downstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        downstream.insert_header("Host", "example.com").unwrap();
+        downstream
+            .insert_header("CF-Connecting-IP", "203.0.113.7")
+            .unwrap();
+        let mut upstream = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        // Pingora copies downstream headers; simulate that.
+        upstream
+            .insert_header("CF-Connecting-IP", "203.0.113.7")
+            .unwrap();
+
+        // Untrusted peer: spoofed CF-Connecting-IP must be removed.
+        append_forwarded_headers(&downstream, &mut upstream, false, None, &[]).unwrap();
+        assert!(upstream.headers.get("cf-connecting-ip").is_none());
     }
 
     #[test]
