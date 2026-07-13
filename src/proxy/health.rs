@@ -58,7 +58,11 @@ impl HealthChecker {
     pub fn new(config: HealthCheckConfig) -> Self {
         let mut client_builder = reqwest::Client::builder()
             .timeout(config.timeout)
-            .no_proxy();
+            .no_proxy()
+            // ponytail: security — never follow redirects during health probing.
+            // A backend that 3xx-redirects to 169.254.169.254 / loopback would
+            // otherwise let the probe reach SSRF-protected addresses.
+            .redirect(reqwest::redirect::Policy::none());
         if config.tls_skip_verify {
             client_builder = client_builder.danger_accept_invalid_certs(true);
         }
@@ -106,6 +110,30 @@ impl HealthChecker {
     pub async fn check_target(&self, target: &crate::route::target::Target) -> bool {
         let host = target.upstream_host();
         let port = target.upstream_port();
+
+        // ponytail: security — route the probe through the same SSRF filter as
+        // the proxy hot path. Without this, a loopback / link-local / RFC1918
+        // target (or a backend that resolves to one) could be probed directly.
+        if let Err(e) = target.resolve_upstream_addr().await {
+            let metrics = crate::metrics::prometheus::global();
+            metrics
+                .health_check_probes_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            metrics
+                .health_check_probe_failures_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                host,
+                port,
+                service = %target.service,
+                error = %e,
+                "Health check probe blocked by SSRF policy"
+            );
+            target
+                .health_tracker
+                .record_health_check_failure(self.config.fall);
+            return false;
+        }
 
         let result = if target.upstream_tls() {
             self.probe_http("https", host, port).await
@@ -186,11 +214,11 @@ pub async fn run_health_checks_with_shutdown(
     let proxy_config = &config.load().proxy;
     let hc_config = HealthCheckConfig::from_proxy_config(proxy_config);
 
-    // If interval is zero, health checking is disabled
-    if hc_config.interval.is_zero() {
-        tracing::info!("Active health checking disabled (interval is 0)");
-        return;
-    }
+    // ponytail: never exit on a zero interval — that would make runtime
+    // re-enabling impossible (the task would already be dead). Instead start
+    // the loop unconditionally; when disabled we just sleep on a short guard
+    // interval and re-read config until it is re-enabled.
+    const DISABLED_GUARD: std::time::Duration = std::time::Duration::from_secs(1);
 
     let mut checker = Arc::new(HealthChecker::new(hc_config.clone()));
     let mut interval = hc_config.interval;
@@ -204,7 +232,11 @@ pub async fn run_health_checks_with_shutdown(
         "Active health checker started"
     );
 
-    let mut ticker = tokio::time::interval(interval);
+    let mut ticker = tokio::time::interval(if interval.is_zero() {
+        DISABLED_GUARD
+    } else {
+        interval
+    });
     ticker.tick().await; // First tick is immediate
 
     loop {
@@ -237,7 +269,11 @@ pub async fn run_health_checks_with_shutdown(
 
         if new_hc_config.interval.is_zero() {
             tracing::info!("Active health checking disabled via runtime config");
-            return;
+            if interval != DISABLED_GUARD {
+                interval = DISABLED_GUARD;
+                ticker = tokio::time::interval(DISABLED_GUARD);
+            }
+            continue;
         }
 
         // Rebuild checker if any config parameter changed.
@@ -389,5 +425,54 @@ mod tests {
         // Now 1 more failure should not make unhealthy (counter reset)
         tracker.record_health_check_failure(3); // consecutive_failures = 1
         assert!(tracker.is_probe_healthy()); // still healthy
+    }
+
+    #[tokio::test]
+    async fn test_check_target_blocks_loopback_ssrf() {
+        // S2: a health probe must route through the same SSRF filter as the
+        // proxy hot path. A loopback target (ssrf_skip_verify=false) must be
+        // rejected, not probed directly.
+        let target = crate::route::target::Target::new(
+            "loopback".to_string(),
+            "http://127.0.0.1:1/".to_string(),
+        );
+        // Confirm the target is SSRF-protected (no skip opt).
+        assert!(!target.ssrf_skip_verify());
+
+        let checker = HealthChecker::new(HealthCheckConfig {
+            interval: Duration::from_secs(0),
+            timeout: Duration::from_millis(500),
+            fall: 1,
+            rise: 1,
+            path: "/health".to_string(),
+            tls_skip_verify: false,
+        });
+        let healthy = checker.check_target(&target).await;
+        assert!(!healthy, "loopback target must be blocked by SSRF policy");
+        // The block must also mark the target unhealthy.
+        assert!(!target.health_tracker.is_probe_healthy());
+    }
+
+    #[tokio::test]
+    async fn test_run_health_checks_does_not_exit_on_zero_interval() {
+        // R2: a zero interval must NOT cause the task to exit immediately —
+        // that would make runtime re-enabling impossible. Instead it sleeps on
+        // a guard interval. Spawn briefly and confirm it stays alive past the
+        // point where the old early-return would have finished.
+        let mut config = crate::test_support::base_test_config();
+        // Force interval = 0 (disabled).
+        config.proxy.health_check_interval = "0s".to_string();
+        let config = crate::config::shared_config(config);
+
+        let table = Arc::new(crate::route::registry::ManagedRouteTable::new());
+        let handle = tokio::spawn(run_health_checks(table, config));
+        // Give it a moment; if the old early-return were present, the task
+        // would have already completed.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !handle.is_finished(),
+            "health checker task must stay alive when interval is 0"
+        );
+        handle.abort();
     }
 }

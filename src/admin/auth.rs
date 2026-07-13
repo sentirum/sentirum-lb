@@ -251,7 +251,11 @@ pub(super) async fn admin_auth_middleware(
         false
     };
 
-    let query_auth = if !token_auth && !session_auth {
+    let query_auth = if !token_auth && !session_auth && request.method() == http::Method::GET {
+        // ponytail: security — accept query-string token ONLY for GET requests
+        // (SSE/dashboard EventSource can't set headers). PUT/POST/DELETE must
+        // use a header, so a leaked token in server logs / Referer can't be
+        // replayed for state-changing operations.
         request
             .uri()
             .query()

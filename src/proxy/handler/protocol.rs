@@ -22,6 +22,10 @@ pub(super) fn parse_host_from_header(header: &pingora_http::RequestHeader) -> &s
         .headers
         .get("host")
         .and_then(|v| v.to_str().ok())
+        .filter(|h| !h.is_empty())
+        // ponytail: HTTP/2 clients may carry the host only in :authority
+        // without a Host header; fall back to it so host-scoped routes match.
+        .or_else(|| header.uri.authority().map(|a| a.as_str()))
         .unwrap_or("");
 
     if let Some(bracket_end) = host_header.find("]:") {
@@ -91,7 +95,14 @@ fn is_grpc_content_type(content_type: &str) -> bool {
 }
 
 fn is_grpc_web_content_type(content_type: &str) -> bool {
-    content_type_matches(content_type, "application/grpc-web")
+    // All standard gRPC-Web media types start with "application/grpc-web":
+    // grpc-web, grpc-web+proto, grpc-web-text, grpc-web-text+proto, plus
+    // ";charset=...". Use starts_with rather than the strict content_type_matches
+    // sieve, which would reject the `-text` suffix (false negatives).
+    content_type
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("application/grpc-web")
 }
 
 pub(super) fn is_grpc_request(header: &pingora_http::RequestHeader) -> bool {
@@ -205,4 +216,25 @@ pub(super) fn status_message(status: u16) -> &'static str {
         .ok()
         .and_then(|code| code.canonical_reason())
         .unwrap_or("Request Failed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_grpc_web_text_content_type_detected() {
+        // Regression: content_type_matches rejected the `-text` suffix, so
+        // standard `application/grpc-web-text` was NOT detected as gRPC-Web.
+        assert!(is_grpc_web_content_type("application/grpc-web"));
+        assert!(is_grpc_web_content_type("application/grpc-web+proto"));
+        assert!(is_grpc_web_content_type("application/grpc-web-text"));
+        assert!(is_grpc_web_content_type("application/grpc-web-text+proto"));
+        assert!(is_grpc_web_content_type(
+            "application/grpc-web; charset=utf-8"
+        ));
+        // Plain gRPC must NOT be misclassified as gRPC-Web.
+        assert!(!is_grpc_web_content_type("application/grpc"));
+        assert!(!is_grpc_web_content_type("application/grpc+proto"));
+    }
 }
