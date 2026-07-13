@@ -121,6 +121,18 @@ fn unsupported_runtime_updates(update: &ConfigUpdateRequest) -> Vec<&'static str
             unsupported.push("proxy.downstream_tcp_keepalive");
         }
     }
+
+    // ponytail: the tracing subscriber is built once at startup (main.rs)
+    // and has no reload handle, so logging level/format can't take effect
+    // without a restart. Reject honestly instead of silently no-op'ing.
+    if let Some(logging) = &update.logging {
+        if logging.level.is_some() {
+            unsupported.push("logging.level");
+        }
+        if logging.format.is_some() {
+            unsupported.push("logging.format");
+        }
+    }
     unsupported
 }
 
@@ -137,8 +149,8 @@ fn runtime_config_capabilities() -> serde_json::Value {
         "upstream_http2": true,
         "health_check": true,
         "rate_limit": true,
-        "logging_level": true,
-        "logging_format": true,
+        "logging_level": false,
+        "logging_format": false,
         "pool_size": false,
         "enable_h2c": false,
         "trusted_proxies": true,
@@ -513,4 +525,37 @@ pub(super) async fn dns_cache_handler() -> axum::Json<serde_json::Value> {
         },
         "entries": entries,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn update(logging: Option<LoggingConfigUpdate>) -> ConfigUpdateRequest {
+        ConfigUpdateRequest {
+            proxy: None,
+            logging,
+        }
+    }
+
+    #[test]
+    fn test_logging_level_and_format_rejected_as_unsupported() {
+        // Regression (R1): logging.level/format are built once at startup with
+        // no reload handle, so they must be rejected by PUT /admin/config rather
+        // than silently no-op'ing.
+        let req = update(Some(LoggingConfigUpdate {
+            level: Some("debug".to_string()),
+            format: Some("plain".to_string()),
+        }));
+        let unsupported = unsupported_runtime_updates(&req);
+        assert!(unsupported.contains(&"logging.level"));
+        assert!(unsupported.contains(&"logging.format"));
+    }
+
+    #[test]
+    fn test_logging_absent_is_accepted() {
+        let req = update(None);
+        let unsupported = unsupported_runtime_updates(&req);
+        assert!(!unsupported.iter().any(|s| s.starts_with("logging.")));
+    }
 }
