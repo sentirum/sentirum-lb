@@ -6,6 +6,10 @@ use axum::extract::{Json, State};
 use serde::Deserialize;
 use std::sync::Arc;
 
+/// Serialize runtime config load/validate/store sequences so concurrent PUT and
+/// reset requests cannot clobber each other's changes or interleave dependent swaps.
+static CONFIG_UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Request body for config update (partial update - only specified fields are applied)
 #[derive(Deserialize)]
 pub struct ConfigUpdateRequest {
@@ -289,6 +293,7 @@ pub(super) async fn config_update_handler(
         }));
     }
 
+    let _update_guard = CONFIG_UPDATE_LOCK.lock().await;
     let current = state.config.load();
     let mut new_proxy = current.proxy.clone();
     let mut new_logging = current.logging.clone();
@@ -454,6 +459,7 @@ pub(super) async fn config_update_handler(
 pub(super) async fn config_reset_handler(
     State(state): State<AdminState>,
 ) -> axum::Json<serde_json::Value> {
+    let _update_guard = CONFIG_UPDATE_LOCK.lock().await;
     let startup = state.startup_config.clone();
     let old_cb_config = circuit_breaker_config_from_proxy(&state.config.load().proxy);
 

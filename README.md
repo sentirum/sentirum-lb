@@ -139,7 +139,7 @@ cargo test
 
 | Category | Features |
 |----------|----------|
-| **Routing** | Fabio-style commands, live addition via admin API, `prefix`/`iprefix`/`glob` matchers, header-based routing, path rewrite (`strip`/`prepend`), host override |
+| **Routing** | Fabio-style commands, live addition via admin API, `prefix`/`iprefix`/`glob`/`exact` matchers, header-based routing, path rewrite (`strip`/`prepend`), host override |
 | **Balancing** | Round-robin, random, least-connections; weighted targets with weighted interleaving |
 | **Protocols** | HTTP, HTTPS, gRPC, gRPCS, gRPC-Web bridge, WebSocket, WSS, raw TCP (tcp/tcp+sni/https+tcp+sni/tcp-dynamic) |
 | **Resilience** | Per-target circuit breaker (closed/open/half-open), active health checks (HTTP/TCP probes), per-target rate limiting (token bucket) |
@@ -399,9 +399,9 @@ Default bind: `127.0.0.1:9998`. For non-loopback binds, `admin_token` is require
 
 Changed via `PUT /admin/config` without restart:
 
-`proxy.strategy`, `proxy.matcher`, `proxy.*_timeout`, `proxy.max_connections`, `proxy.circuit_breaker_*`, `proxy.health_check_*`, `proxy.rate_limit_*`, `proxy.dns_cache_*`, `proxy.upstream_h2_*`, `logging.level`, `logging.format`
+`proxy.strategy`, `proxy.matcher`, `proxy.request_id_header`, `proxy.no_route_status`, `proxy.*_timeout`, `proxy.max_connections`, `proxy.circuit_breaker_*`, `proxy.health_check_*`, `proxy.rate_limit_*`, `proxy.dns_cache_*`, `proxy.upstream_h2_*`, `proxy.trusted_proxies`
 
-**Require restart:** `pool_size`, `enable_h2c`, `trusted_proxies`, `server.*`, `consul.*`, `tls.*`
+**Require restart:** `pool_size`, `enable_h2c`, `downstream_tcp_keepalive`, `logging.*`, `server.*`, `consul.*`, `tls.*`
 
 ---
 
@@ -432,7 +432,7 @@ Process metrics from `/proc`: resident memory, virtual memory, open file descrip
 - **SSRF protection** — loopback, link-local, RFC1918 (unless Consul-sourced), multicast, CGNAT, documentation, benchmark, and other reserved IP ranges are blocked by default
 - **Admin auth** — bearer token or session-based access, login rate limiting (5 attempts / 60s / username), configurable session lifetime, and loopback-safe defaults
 - **Trusted proxies** — CIDR-based `X-Forwarded-For` and `CF-Connecting-IP` handling to avoid spoofed client IPs
-- **TLS** — SNI-based certificate selection, optional strict SNI mode, mTLS with verified client identity forwarding
+- **TLS** — SNI-based certificate selection, cert/key pair validation, optional strict SNI mode, and fail-closed required mTLS; an invalid configured primary TLS listener aborts startup instead of silently serving plaintext only
 - **Operational guardrails** — runtime config validation, DNS cache revalidation, circuit breaker fallback, and certificate reload inspection via admin endpoints
 
 ---
@@ -774,7 +774,7 @@ include_warning = false            # Include "warning" health status services
 
 [proxy]
 strategy = "round-robin"           # round-robin | random | least-connections
-matcher = "prefix"                 # prefix | iprefix | glob
+matcher = "prefix"                 # prefix | iprefix | glob | exact
 request_id_header = "X-Request-ID"
 no_route_status = 404
 connect_timeout = "5s"

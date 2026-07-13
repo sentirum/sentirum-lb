@@ -45,7 +45,7 @@ This file gives coding agents and contributors a fast map of the repository and 
 
 - `src/admin/api.rs`
   - operational inspection endpoints
-  - `PUT /admin/config` — runtime hot-reload of proxy settings (strategy, matcher, timeouts, CB, health check, rate limit, logging)
+  - `PUT /admin/config` — runtime hot-reload of proxy settings (strategy, matcher, timeouts, CB, health check, rate limit; logging still requires restart)
   - `POST /admin/routes` — live route addition via Fabio-style commands
   - `DELETE /admin/routes/static` — clear static routes
   - `POST /admin/config/reset` — reset to startup config
@@ -122,7 +122,7 @@ If you introduce a new config field, wire it into runtime behavior and cover it 
 
 - **Minimum sample threshold**: Circuit opens when `error_rate >= error_threshold%` AND `window_len >= min_samples`. `min_samples = max(window_size / 4, 5)`. This ensures the circuit can open even before the window is full if error rate is high enough (e.g., 100% failure on first 25 requests with threshold=50 and window=100)
 - **Half-open probe timeout**: If a half-open probe's callback is lost (DNS failure, connection drop without logging), the `half_open_in_flight` flag is auto-reset after `recovery_timeout` seconds. This prevents permanent HalfOpen stuck state
-- **Check ordering**: Rate limit → Circuit breaker check → Connection slot acquire. CB is checked before acquiring connection slots to avoid unnecessary acquire/release cycles
+- **Check ordering**: Circuit breaker check → Rate limit → Connection slot acquire. Rejected rate/connection guards release any reserved half-open probe slot
 - **Matcher hot path**: `MatcherKind` enum (not string) is used on the hot path for branch-prediction-friendly dispatch
 
 - No-match responses use `proxy.no_route_status`
@@ -130,7 +130,8 @@ If you introduce a new config field, wire it into runtime behavior and cover it 
 - Circuit breaker states: Closed → Open (on error threshold) → HalfOpen (after recovery_timeout) → Closed (on probe success)
 - DNS cache: `proxy.dns_cache_ttl` controls positive cache TTL (default 30s); `proxy.dns_negative_cache_ttl` controls negative cache TTL (default 10s)
 - `iprefix` is case-insensitive prefix matching
-- `glob` uses the `glob` crate pattern support
+- `glob` uses the `glob` crate pattern support; `/` remains a catch-all
+- `exact` matches only the complete request path
 - `strip` happens before `prepend`
 - Query strings must survive rewrites
 - `host=` route option overrides upstream Host header and TLS SNI
@@ -192,10 +193,10 @@ If you change user-facing behavior, also update:
 
 ## Implemented features (recently added)
 
-- **Active health checking**: HTTP/TCP probes via `src/proxy/health.rs`; config: `proxy.health_check_interval`, `proxy.health_check_timeout`, `proxy.health_check_rise`, `proxy.health_check_fall`, `proxy.health_check_path`; `is_probe_healthy()` integrated into proxy hot path via `lookup_target()`; probe health status works alongside circuit breaker; all HC params are runtime-switchable via `PUT /admin/config`
-- **Token Bucket rate limiting (per-target)**: `parking_lot::Mutex<BucketState>` based via `src/proxy/ratelimit.rs`; config: `proxy.rate_limit_per_target` (0=disabled), `proxy.rate_limit_burst`; per-target override via opts `ratelimit=X burst=Y`; returns 429 when exceeded; runtime-switchable via `PUT /admin/config`
+- **Active health checking**: HTTP/TCP probes via `src/proxy/health.rs`; config: `proxy.health_check_interval`, `proxy.health_check_timeout`, `proxy.health_check_rise`, `proxy.health_check_fall`, `proxy.health_check_path`; `is_probe_healthy()` integrated into proxy hot path via `lookup_target()`; probe health status works alongside circuit breaker; all HC params are runtime-switchable via `PUT /admin/config`. Probes resolve once through the target SSRF policy and pin HTTP/TCP connections to that checked address
+- **Token Bucket rate limiting (per-target)**: `parking_lot::Mutex<BucketState>` based via `src/proxy/ratelimit.rs`; config: `proxy.rate_limit_per_target` (0=disabled), `proxy.rate_limit_burst`; per-target override via opts `ratelimit=X burst=Y`; returns 429 when exceeded; runtime-switchable via `PUT /admin/config`. Buckets persist across route-table rebuilds only for the same upstream URL + route-policy identity, preventing distinct route overrides from overwriting each other
 - **Multi-TLS listener**: `[[tls_listeners]]` in config for additional TLS endpoints (e.g., mTLS on a separate port); each listener has independent cert, client auth, and hot-reload; primary `[tls]` section is always listener 0
-- **File-based TLS cert hot-reload**: `FileCertWatcherService` in `src/proxy/tls/watcher.rs` polls cert+key file mtime every 30s and atomically swaps via `ArcSwap<LoadedCertificate>`; new TLS handshakes immediately use refreshed cert; manual reload via `POST /admin/certs/reload`
+- **File-based TLS cert hot-reload**: `FileCertWatcherService` in `src/proxy/tls/watcher.rs` polls cert+key file mtime every 30s and atomically swaps via `ArcSwap<LoadedCertificate>`; cert/key mismatch is rejected without replacing the active certificate; new TLS handshakes immediately use refreshed cert; manual reload via `POST /admin/certs/reload`. Configured primary TLS validation/load/settings failures abort startup; additional invalid listeners are skipped
 - **Dynamic route management**: `POST /admin/routes` for live Fabio-style route addition; `DELETE /admin/routes/static` to clear static routes; routes appear in dashboard immediately
 - **OCSP stapling infrastructure**: `src/proxy/ocsp.rs`; fetcher, cache, and config wiring implemented; actual TLS handshake stapling depends on Pingora exposing `SSL_set_ocsp_resp` callback
 - **TCP keepalive on pooled connections (Issue #22)**: `src/proxy/keepalive.rs` converts the parsed `"idle,interval,count"` config into Pingora's `TcpKeepalive` cross-platform (`user_timeout`/`TCP_USER_TIMEOUT` is Linux-gated). Upstream keepalive is set in `configure_peer_options()` (`src/proxy/handler/rewrite.rs`); downstream keepalive is applied to the plaintext listener (`add_tcp_with_settings`) and every TLS listener (`add_tls_with_settings(..., Some(sock_opts), ...)`) in `src/main.rs`. Detects/evicts silently-dead pooled connections so non-idempotent (POST/PUT/PATCH) requests are not black-holed. **Not covered**: the Fabio-style raw TCP proxy mode (`src/proxy/tcp.rs`) uses its own non-pooled tokio connections and is out of scope.
@@ -216,8 +217,9 @@ These settings can be changed at runtime without restart:
 - `proxy.upstream_h2_max_streams`, `proxy.upstream_h2_ping_interval`
 - `proxy.health_check_*` (interval, timeout, fall, rise, path, tls_skip_verify)
 - `proxy.rate_limit_per_target`, `proxy.rate_limit_burst`
+- `proxy.trusted_proxies`
 
-Not hot-reloadable (require restart): `pool_size`, `enable_h2c`, `trusted_proxies`, `downstream_tcp_keepalive` (listener socket options are set at bind time; `PUT /admin/config` rejects this field), `logging.level`/`logging.format` (the tracing subscriber is built once at startup with no reload handle; `PUT /admin/config` rejects these fields).
+Not hot-reloadable (require restart): `pool_size`, `enable_h2c`, `downstream_tcp_keepalive` (listener socket options are set at bind time; `PUT /admin/config` rejects this field), `logging.level`/`logging.format` (the tracing subscriber is built once at startup with no reload handle; `PUT /admin/config` rejects these fields).
 
 ## Commit hygiene
 

@@ -129,7 +129,7 @@ impl SentirumProxy {
                         None
                     }
                 };
-                if let Some(fallback) = &best_fallback {
+                if let Some(fallback) = best_fallback {
                     tracing::debug!(
                         host,
                         path,
@@ -137,12 +137,12 @@ impl SentirumProxy {
                         fallback_url = %fallback.url,
                         "Circuit breaker open on picked target; using fallback"
                     );
+                    return Some(fallback);
                 }
                 // ponytail: when no healthy fallback exists, do NOT proxy to the
-                // unhealthy/open target — fall through to try less-specific routes,
-                // and ultimately return no_route_status (503). Sending traffic to a
-                // target we just classified unhealthy/CB-open defeats the check.
-                return best_fallback;
+                // unhealthy/open target. Continue to a less-specific route; if none
+                // is healthy the caller returns 503.
+                continue;
             }
         }
 
@@ -255,6 +255,9 @@ impl SentirumProxy {
             config.proxy.rate_limit_per_target,
             config.proxy.rate_limit_burst,
         ) {
+            if config.proxy.circuit_breaker_enabled {
+                target.health_tracker.circuit_breaker().abort_probe();
+            }
             tracing::warn!(
                 host,
                 path,
@@ -270,6 +273,9 @@ impl SentirumProxy {
         }
 
         if !target.try_acquire_connection_slot(config.proxy.max_connections as u64) {
+            if config.proxy.circuit_breaker_enabled {
+                target.health_tracker.circuit_breaker().abort_probe();
+            }
             tracing::warn!(
                 host,
                 path,
@@ -356,5 +362,61 @@ impl SentirumProxy {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::route::definition::{RouteCmd, RouteDef, RouteSource};
+    use crate::route::registry::ManagedRouteTable;
+    use std::collections::HashMap;
+
+    fn route(service: &str, src: &str, dst: &str) -> RouteDef {
+        RouteDef {
+            cmd: RouteCmd::Add,
+            service: service.to_string(),
+            src: src.to_string(),
+            dst: dst.to_string(),
+            weight: 0.0,
+            tags: vec![],
+            opts: HashMap::new(),
+            source: RouteSource::Static,
+        }
+    }
+
+    #[test]
+    fn unhealthy_specific_route_falls_back_to_less_specific_route() {
+        let table = Arc::new(ManagedRouteTable::new());
+        table.load_static(&[
+            route("specific", "example.com/api/users", "http://1.0.0.1:80"),
+            route("general", "example.com/api", "http://1.0.0.2:80"),
+        ]);
+        let specific = table
+            .get()
+            .lookup_route("example.com", "/api/users", MatcherKind::Prefix)
+            .unwrap()
+            .targets[0]
+            .clone();
+        specific.health_tracker.record_health_check_failure(1);
+
+        let config = crate::test_support::base_test_config();
+        let proxy = SentirumProxy::new(
+            table,
+            crate::config::shared_config(config),
+            super::super::parse_trusted_proxies(&[]),
+        );
+        let selected = proxy
+            .lookup_target(
+                "example.com",
+                "/api/users",
+                MatcherKind::Prefix,
+                "round-robin",
+                false,
+                &http::HeaderMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(selected.service, "general");
     }
 }

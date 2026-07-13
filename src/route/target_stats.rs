@@ -123,10 +123,9 @@ impl TargetStatsRegistry {
         entries.clear();
     }
 
-    /// Get or create a shared rate-limit bucket for an upstream URL.
-    /// Sharing by URL (not per route-target) keeps rate limits and accumulated
-    /// tokens stable across route-table rebuilds and across routes that point
-    /// at the same backend.
+    /// Get or create a shared rate-limit bucket for an upstream URL + policy.
+    /// Equivalent route targets retain tokens across table rebuilds, while
+    /// distinct per-route overrides remain isolated.
     pub fn rate_limiter_for(&self, key: &str) -> Arc<TokenBucket> {
         let mut entries = self.rate_limiters.lock().unwrap_or_else(|e| {
             tracing::warn!("Target rate-limiter registry lock was poisoned; recovering");

@@ -716,6 +716,9 @@ fn main() {
                         Ok(c) => c,
                         Err(e) => {
                             tracing::error!(listener = %label, error = %e, "Failed to load file certificate");
+                            if is_primary {
+                                std::process::exit(1);
+                            }
                             continue;
                         }
                     };
@@ -753,11 +756,17 @@ fn main() {
                         }
                         Err(e) => {
                             tracing::error!(listener = %label, error = %e, "Failed to configure file-based TLS listener");
+                            if is_primary {
+                                std::process::exit(1);
+                            }
                         }
                     }
                 }
                 Err(e) => {
                     tracing::error!(listener = %label, error = %e, "TLS configuration invalid, skipping");
+                    if is_primary {
+                        std::process::exit(1);
+                    }
                 }
             },
             Ok(Some(TlsMode::ConsulKv(consul_tls))) => {
@@ -869,6 +878,9 @@ fn main() {
                             error = %e,
                             "Failed to configure Consul-backed TLS listener"
                         );
+                        if is_primary {
+                            std::process::exit(1);
+                        }
                     }
                 }
             }
@@ -878,6 +890,9 @@ fn main() {
             }
             Err(e) => {
                 tracing::error!(listener = %label, error = %e, "Invalid TLS source configuration; skipping");
+                if is_primary {
+                    std::process::exit(1);
+                }
             }
         }
     }

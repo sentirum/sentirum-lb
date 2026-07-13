@@ -93,6 +93,49 @@ impl Config {
             &self.proxy.downstream_tcp_keepalive,
         );
 
+        if !matches!(
+            self.proxy.matcher.as_str(),
+            "" | "prefix" | "iprefix" | "glob" | "exact"
+        ) {
+            errors.push(format!(
+                "proxy.matcher must be one of prefix|iprefix|glob|exact, got '{}'",
+                self.proxy.matcher
+            ));
+        }
+        if !matches!(
+            self.proxy.strategy.as_str(),
+            "" | "round-robin" | "rr" | "random" | "rnd" | "least-connections" | "lc"
+        ) {
+            errors.push(format!(
+                "proxy.strategy must be one of round-robin|random|least-connections, got '{}'",
+                self.proxy.strategy
+            ));
+        }
+        if self.proxy.health_check_rise == 0 {
+            errors.push("proxy.health_check_rise must be >= 1".to_string());
+        }
+        if self.proxy.health_check_fall == 0 {
+            errors.push("proxy.health_check_fall must be >= 1".to_string());
+        }
+        if !(100..=599).contains(&self.proxy.no_route_status) {
+            errors.push(format!(
+                "proxy.no_route_status must be a valid HTTP status (100-599), got {}",
+                self.proxy.no_route_status
+            ));
+        }
+        if !self.proxy.request_id_header.is_empty()
+            && self
+                .proxy
+                .request_id_header
+                .parse::<http::header::HeaderName>()
+                .is_err()
+        {
+            errors.push(format!(
+                "proxy.request_id_header is not a valid HTTP header name: '{}'",
+                self.proxy.request_id_header
+            ));
+        }
+
         // Validate circuit breaker threshold (0-100)
         if self.proxy.circuit_breaker_error_threshold > 100 {
             errors.push(format!(
@@ -348,4 +391,34 @@ pub(crate) fn validate_cidr(cidr: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn exact_matcher_is_valid_but_unknown_matcher_is_rejected() {
+        let mut config = crate::test_support::base_test_config();
+        config.proxy.matcher = "exact".to_string();
+        assert!(config.validate().is_none());
+
+        config.proxy.matcher = "unknown".to_string();
+        assert!(
+            config
+                .validate()
+                .is_some_and(|error| error.contains("proxy.matcher"))
+        );
+    }
+
+    #[test]
+    fn invalid_request_id_header_and_zero_health_thresholds_are_rejected() {
+        let mut config = crate::test_support::base_test_config();
+        config.proxy.request_id_header = "bad header".to_string();
+        config.proxy.health_check_rise = 0;
+        config.proxy.health_check_fall = 0;
+
+        let error = config.validate().unwrap();
+        assert!(error.contains("proxy.request_id_header"));
+        assert!(error.contains("proxy.health_check_rise"));
+        assert!(error.contains("proxy.health_check_fall"));
+    }
 }

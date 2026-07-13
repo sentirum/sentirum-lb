@@ -722,6 +722,11 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("application/javascript; charset=utf-8")
         );
+        let body = to_bytes(js_response.into_body(), usize::MAX).await.unwrap();
+        let javascript = String::from_utf8(body.to_vec()).unwrap();
+        assert!(javascript.contains("['prefix','iprefix','glob','exact']"));
+        assert!(!javascript.contains("logging.level"));
+        assert!(!javascript.contains("logging.format"));
     }
 
     #[tokio::test]

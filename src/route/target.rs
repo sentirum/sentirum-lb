@@ -219,16 +219,25 @@ impl Target {
             self.parsed_tls = self.parsed_protocol.uses_tls();
         }
 
-        // Configure per-target rate limiter from route opts
-        if let Some(rate_str) = self.opts.get("ratelimit")
-            && let Ok(rate) = rate_str.parse::<u64>()
-        {
-            let burst = self
-                .opts
-                .get("burst")
-                .and_then(|b| b.parse::<u64>().ok())
-                .unwrap_or(rate);
+        // Configure per-target rate limiter from route opts.
+        if let Some((rate, burst)) = Self::rate_limit_override(&self.opts) {
             self.rate_limiter.configure(rate, burst);
+        }
+    }
+
+    fn rate_limit_override(opts: &HashMap<String, String>) -> Option<(u64, u64)> {
+        let rate = opts.get("ratelimit")?.parse::<u64>().ok()?;
+        let burst = opts
+            .get("burst")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(rate);
+        Some((rate, burst))
+    }
+
+    pub(crate) fn rate_limiter_registry_key(url: &str, opts: &HashMap<String, String>) -> String {
+        match Self::rate_limit_override(opts) {
+            Some((rate, burst)) => format!("{url}\u{001f}override:{rate}:{burst}"),
+            None => format!("{url}\u{001f}global"),
         }
     }
 
@@ -301,15 +310,11 @@ impl Target {
 
     /// Try to acquire a rate limit token. Returns `true` if allowed.
     ///
-    /// The bucket is shared per upstream URL, so route-table rebuilds preserve
-    /// accumulated state. Hot-reloaded (global_rate, global_burst) are applied
-    /// immediately when they differ from the bucket's current configuration —
-    /// UNLESS this target has an explicit per-route `ratelimit=` override, in
-    /// which case the override wins and the global limit is ignored.
+    /// Buckets are shared across rebuilds only when both upstream URL and
+    /// rate-limit policy match. This preserves state without letting two route
+    /// overrides for the same backend overwrite each other.
     pub fn try_acquire_rate_limit(&self, global_rate: usize, global_burst: usize) -> bool {
-        // A per-route `ratelimit=` opt configures the bucket at pre_parse time;
-        // don't let the global hot-reload clobber it.
-        if !self.opts.contains_key("ratelimit") {
+        if Self::rate_limit_override(&self.opts).is_none() {
             let (cur_rate, cur_burst) = self.rate_limiter.configured_rate_burst();
             if (cur_rate, cur_burst) != (global_rate as u64, global_burst as u64) {
                 self.rate_limiter

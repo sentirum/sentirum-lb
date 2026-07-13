@@ -7,13 +7,13 @@
 use crate::config::SharedConfig;
 use crate::route::registry::ManagedRouteTable;
 use futures::stream::StreamExt;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing;
 
 /// Active health checker for upstream targets.
 pub struct HealthChecker {
-    client: reqwest::Client,
     config: HealthCheckConfig,
 }
 
@@ -56,28 +56,37 @@ impl HealthCheckConfig {
 
 impl HealthChecker {
     pub fn new(config: HealthCheckConfig) -> Self {
+        Self { config }
+    }
+
+    /// Perform an HTTP health check against the already SSRF-checked address.
+    /// The URL keeps the original host for Host/SNI while Reqwest is pinned to
+    /// `addr`, preventing a second DNS lookup from rebinding to a blocked IP.
+    async fn probe_http(
+        &self,
+        scheme: &str,
+        host: &str,
+        port: u16,
+        addr: SocketAddr,
+    ) -> Result<(), String> {
         let mut client_builder = reqwest::Client::builder()
-            .timeout(config.timeout)
+            .timeout(self.config.timeout)
             .no_proxy()
-            // ponytail: security — never follow redirects during health probing.
-            // A backend that 3xx-redirects to 169.254.169.254 / loopback would
-            // otherwise let the probe reach SSRF-protected addresses.
+            .resolve(host, addr)
             .redirect(reqwest::redirect::Policy::none());
-        if config.tls_skip_verify {
+        if self.config.tls_skip_verify {
             client_builder = client_builder.danger_accept_invalid_certs(true);
         }
         let client = client_builder
             .build()
-            .expect("Failed to build health check HTTP client");
-        Self { client, config }
-    }
-
-    /// Perform an HTTP health check against a target.
-    /// Returns Ok(()) if the target responded with 2xx, Err otherwise.
-    async fn probe_http(&self, scheme: &str, host: &str, port: u16) -> Result<(), String> {
-        let url = format!("{}://{}:{}{}", scheme, host, port, self.config.path);
-        let response = self
-            .client
+            .map_err(|e| format!("failed to build health check HTTP client: {e}"))?;
+        let url_host = if host.contains(':') {
+            format!("[{host}]")
+        } else {
+            host.to_string()
+        };
+        let url = format!("{scheme}://{url_host}:{port}{}", self.config.path);
+        let response = client
             .get(&url)
             .send()
             .await
@@ -91,16 +100,11 @@ impl HealthChecker {
         }
     }
 
-    /// Perform a TCP connect health check.
-    /// Returns Ok(()) if connection succeeded, Err otherwise.
-    async fn probe_tcp(&self, host: &str, port: u16) -> Result<(), String> {
-        let addr = if host.contains(':') {
-            format!("[{host}]:{port}")
-        } else {
-            format!("{host}:{port}")
-        };
-        tokio::net::TcpStream::connect(&addr)
+    /// Perform a bounded TCP connect health check against an SSRF-checked address.
+    async fn probe_tcp(&self, addr: SocketAddr) -> Result<(), String> {
+        tokio::time::timeout(self.config.timeout, tokio::net::TcpStream::connect(addr))
             .await
+            .map_err(|_| format!("TCP connect timed out after {:?}", self.config.timeout))?
             .map(|_| ())
             .map_err(|e| format!("TCP connect failed: {e}"))
     }
@@ -111,43 +115,42 @@ impl HealthChecker {
         let host = target.upstream_host();
         let port = target.upstream_port();
 
-        // ponytail: security — route the probe through the same SSRF filter as
-        // the proxy hot path. Without this, a loopback / link-local / RFC1918
-        // target (or a backend that resolves to one) could be probed directly.
-        if let Err(e) = target.resolve_upstream_addr().await {
-            let metrics = crate::metrics::prometheus::global();
-            metrics
-                .health_check_probes_total
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            metrics
-                .health_check_probe_failures_total
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            tracing::warn!(
-                host,
-                port,
-                service = %target.service,
-                error = %e,
-                "Health check probe blocked by SSRF policy"
-            );
-            target
-                .health_tracker
-                .record_health_check_failure(self.config.fall);
-            return false;
-        }
+        // ponytail: security — resolve once through the proxy's SSRF filter,
+        // then pin both HTTP and TCP probes to exactly that checked address.
+        let resolved_addr = match target.resolve_upstream_addr().await {
+            Ok(addr) => addr,
+            Err(e) => {
+                let metrics = crate::metrics::prometheus::global();
+                metrics
+                    .health_check_probes_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                metrics
+                    .health_check_probe_failures_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    host,
+                    port,
+                    service = %target.service,
+                    error = %e,
+                    "Health check probe blocked by SSRF policy"
+                );
+                target
+                    .health_tracker
+                    .record_health_check_failure(self.config.fall);
+                return false;
+            }
+        };
 
         let result = if target.upstream_tls() {
-            self.probe_http("https", host, port).await
+            self.probe_http("https", host, port, resolved_addr).await
         } else {
-            // For non-TLS targets, try HTTP probe first, fallback to TCP
-            match self.probe_http("http", host, port).await {
+            // For non-TLS targets, try HTTP probe first, fallback to TCP.
+            match self.probe_http("http", host, port, resolved_addr).await {
                 Ok(()) => Ok(()),
-                Err(http_err) => {
-                    // HTTP failed — try TCP connect as fallback
-                    match self.probe_tcp(host, port).await {
-                        Ok(()) => Ok(()),
-                        Err(tcp_err) => Err(format!("{http_err}; TCP fallback: {tcp_err}")),
-                    }
-                }
+                Err(http_err) => match self.probe_tcp(resolved_addr).await {
+                    Ok(()) => Ok(()),
+                    Err(tcp_err) => Err(format!("{http_err}; TCP fallback: {tcp_err}")),
+                },
             }
         };
 
@@ -221,10 +224,16 @@ pub async fn run_health_checks_with_shutdown(
     const DISABLED_GUARD: std::time::Duration = std::time::Duration::from_secs(1);
 
     let mut checker = Arc::new(HealthChecker::new(hc_config.clone()));
-    let mut interval = hc_config.interval;
+    let mut disabled = hc_config.interval.is_zero();
+    let mut ticker_period = if disabled {
+        DISABLED_GUARD
+    } else {
+        hc_config.interval
+    };
 
     tracing::info!(
-        interval_secs = interval.as_secs(),
+        enabled = !disabled,
+        interval_secs = hc_config.interval.as_secs(),
         timeout_secs = hc_config.timeout.as_secs(),
         fall = hc_config.fall,
         rise = hc_config.rise,
@@ -232,12 +241,9 @@ pub async fn run_health_checks_with_shutdown(
         "Active health checker started"
     );
 
-    let mut ticker = tokio::time::interval(if interval.is_zero() {
-        DISABLED_GUARD
-    } else {
-        interval
-    });
-    ticker.tick().await; // First tick is immediate
+    let mut ticker =
+        tokio::time::interval_at(tokio::time::Instant::now() + ticker_period, ticker_period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         // Check shutdown signal before each round
@@ -267,16 +273,33 @@ pub async fn run_health_checks_with_shutdown(
         let proxy_config = &config.load().proxy;
         let new_hc_config = HealthCheckConfig::from_proxy_config(proxy_config);
 
-        if new_hc_config.interval.is_zero() {
-            tracing::info!("Active health checking disabled via runtime config");
-            if interval != DISABLED_GUARD {
-                interval = DISABLED_GUARD;
-                ticker = tokio::time::interval(DISABLED_GUARD);
-            }
+        let new_disabled = new_hc_config.interval.is_zero();
+        let new_ticker_period = if new_disabled {
+            DISABLED_GUARD
+        } else {
+            new_hc_config.interval
+        };
+
+        // Keep scheduler state separate from checker config. Otherwise a
+        // disable -> enable transition with unchanged settings leaves the
+        // ticker stuck at the one-second disabled guard period.
+        if new_ticker_period != ticker_period {
+            ticker_period = new_ticker_period;
+            ticker = tokio::time::interval_at(
+                tokio::time::Instant::now() + ticker_period,
+                ticker_period,
+            );
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        }
+        if new_disabled != disabled {
+            disabled = new_disabled;
+            tracing::info!(enabled = !disabled, "Active health checking state changed");
+        }
+        if disabled {
             continue;
         }
 
-        // Rebuild checker if any config parameter changed.
+        // Rebuild checker if any probe parameter changed.
         if new_hc_config != checker.config {
             tracing::info!(
                 old_interval_secs = checker.config.interval.as_secs(),
@@ -291,13 +314,7 @@ pub async fn run_health_checks_with_shutdown(
                 new_path = %new_hc_config.path,
                 "Health checker config hot-reloaded"
             );
-            checker = Arc::new(HealthChecker::new(new_hc_config.clone()));
-
-            // Reset ticker if interval changed
-            if new_hc_config.interval != interval {
-                interval = new_hc_config.interval;
-                ticker = tokio::time::interval(interval);
-            }
+            checker = Arc::new(HealthChecker::new(new_hc_config));
         }
 
         let table = route_table.get();
@@ -451,6 +468,120 @@ mod tests {
         assert!(!healthy, "loopback target must be blocked by SSRF policy");
         // The block must also mark the target unhealthy.
         assert!(!target.health_tracker.is_probe_healthy());
+    }
+
+    #[tokio::test]
+    async fn test_http_probe_uses_pre_resolved_address() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let checker = HealthChecker::new(HealthCheckConfig {
+            interval: Duration::from_secs(1),
+            timeout: Duration::from_secs(1),
+            fall: 1,
+            rise: 1,
+            path: "/health".to_string(),
+            tls_skip_verify: false,
+        });
+        checker
+            .probe_http("http", "does-not-resolve.invalid", addr.port(), addr)
+            .await
+            .expect("probe should connect to the pinned address without DNS");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_health_check_reenable_restores_configured_interval() {
+        use crate::route::definition::{RouteCmd, RouteDef, RouteSource};
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let probes = Arc::new(AtomicUsize::new(0));
+        let server_probes = probes.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let server_probes = server_probes.clone();
+                tokio::spawn(async move {
+                    let mut request = [0_u8; 1024];
+                    let _ = stream.read(&mut request).await;
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                        .await;
+                    server_probes.fetch_add(1, Ordering::SeqCst);
+                });
+            }
+        });
+
+        let mut opts = HashMap::new();
+        opts.insert("ssrfskipverify".to_string(), "true".to_string());
+        let table = Arc::new(crate::route::registry::ManagedRouteTable::new());
+        table.load_static(&[RouteDef {
+            cmd: RouteCmd::Add,
+            service: "health-test".to_string(),
+            src: "example.com/".to_string(),
+            dst: format!("http://{addr}"),
+            weight: 0.0,
+            tags: vec![],
+            opts,
+            source: RouteSource::Static,
+        }]);
+
+        let mut runtime = crate::test_support::base_test_config();
+        runtime.proxy.health_check_interval = "20ms".to_string();
+        runtime.proxy.health_check_timeout = "200ms".to_string();
+        let config = crate::config::shared_config(runtime);
+        let health = tokio::spawn(run_health_checks(table, config.clone()));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while probes.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let mut disabled = (**config.load()).clone();
+        disabled.proxy.health_check_interval = "0s".to_string();
+        config.store(Arc::new(disabled));
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let disabled_count = probes.load(Ordering::SeqCst);
+
+        let mut enabled = (**config.load()).clone();
+        enabled.proxy.health_check_interval = "20ms".to_string();
+        config.store(Arc::new(enabled));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while probes.load(Ordering::SeqCst) <= disabled_count {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("health checks should resume after runtime re-enable");
+        let resumed_count = probes.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(
+            probes.load(Ordering::SeqCst) >= resumed_count + 2,
+            "re-enabled checker must restore the configured 20ms cadence"
+        );
+
+        health.abort();
+        server.abort();
     }
 
     #[tokio::test]

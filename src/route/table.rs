@@ -13,6 +13,7 @@ pub enum MatcherKind {
     Prefix,
     CaseInsensitivePrefix,
     Glob,
+    Exact,
 }
 
 impl MatcherKind {
@@ -23,6 +24,7 @@ impl MatcherKind {
             "prefix" | "" => MatcherKind::Prefix,
             "iprefix" => MatcherKind::CaseInsensitivePrefix,
             "glob" => MatcherKind::Glob,
+            "exact" => MatcherKind::Exact,
             _ => MatcherKind::Prefix,
         }
     }
@@ -405,11 +407,15 @@ impl Table {
                 MatcherKind::CaseInsensitivePrefix => {
                     starts_with_ignore_ascii_case(path, &route.path) || route.path == "/"
                 }
-                MatcherKind::Glob => route
-                    .glob
-                    .as_ref()
-                    .map(|g| g.matches(path))
-                    .unwrap_or(false),
+                MatcherKind::Glob => {
+                    route.path == "/"
+                        || route
+                            .glob
+                            .as_ref()
+                            .map(|g| g.matches(path))
+                            .unwrap_or(false)
+                }
+                MatcherKind::Exact => path == route.path,
             };
             if matches && !route.targets.is_empty() {
                 results.push(route);
@@ -428,11 +434,15 @@ impl Table {
                 MatcherKind::CaseInsensitivePrefix => {
                     starts_with_ignore_ascii_case(path, &route.path) || route.path == "/"
                 }
-                MatcherKind::Glob => route
-                    .glob
-                    .as_ref()
-                    .map(|g| g.matches(path))
-                    .unwrap_or(false),
+                MatcherKind::Glob => {
+                    route.path == "/"
+                        || route
+                            .glob
+                            .as_ref()
+                            .map(|g| g.matches(path))
+                            .unwrap_or(false)
+                }
+                MatcherKind::Exact => path == route.path,
             };
 
             if matches && !route.targets.is_empty() {
@@ -479,7 +489,8 @@ impl Table {
             health_tracker: self.health_tracker_for(&def.dst),
             stats: self.stats_for(&def.dst),
             edge_stats: self.edge_stats_for(&edge_stats_key),
-            rate_limiter: self.rate_limiter_for(&def.dst),
+            rate_limiter: self
+                .rate_limiter_for(&Target::rate_limiter_registry_key(&def.dst, &def.opts)),
         };
         target.pre_parse();
 
@@ -710,10 +721,10 @@ impl Table {
             })
     }
 
-    fn rate_limiter_for(&self, key: &str) -> Arc<crate::proxy::ratelimit::TokenBucket> {
+    fn rate_limiter_for(&self, policy_key: &str) -> Arc<crate::proxy::ratelimit::TokenBucket> {
         self.stats_registry
             .as_ref()
-            .map(|registry| registry.rate_limiter_for(key))
+            .map(|registry| registry.rate_limiter_for(policy_key))
             .unwrap_or_else(|| Arc::new(crate::proxy::ratelimit::TokenBucket::new()))
     }
 
@@ -972,6 +983,47 @@ mod tests {
     }
 
     #[test]
+    fn test_glob_root_route_is_catch_all() {
+        let table =
+            Table::from_definitions(&[route_def("svc", "example.com/", "http://1.0.0.1:80")]);
+
+        assert!(
+            table
+                .lookup_route("example.com", "/anything", MatcherKind::Glob)
+                .is_some(),
+            "root route must remain catch-all under glob matching"
+        );
+        assert_eq!(
+            table
+                .matching_routes("example.com", "/anything", MatcherKind::Glob)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_exact_matcher_requires_full_path() {
+        let table =
+            Table::from_definitions(&[route_def("svc", "example.com/admin", "http://1.0.0.1:80")]);
+
+        assert!(
+            table
+                .lookup_route("example.com", "/admin", MatcherKind::Exact)
+                .is_some()
+        );
+        assert!(
+            table
+                .lookup_route("example.com", "/admin/secret", MatcherKind::Exact)
+                .is_none()
+        );
+        assert!(
+            table
+                .lookup_route("example.com", "/admin-backup", MatcherKind::Exact)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn test_weight_zero_gets_no_slots() {
         let mut route = Route::new("host.com".to_string(), "/".to_string());
         route.add_target(make_target("svc1", "http://1.0.0.1:80", 0.0, 0.0));
@@ -1125,6 +1177,42 @@ mod tests {
                 .current_state(),
             crate::route::target::CircuitState::Open
         );
+    }
+
+    #[test]
+    fn test_rate_limit_buckets_are_shared_only_for_the_same_policy() {
+        let registry = Arc::new(TargetStatsRegistry::new());
+        let mut slow = route_def("slow", "example.com/slow", "http://10.0.0.1:80");
+        slow.opts.insert("ratelimit".to_string(), "5".to_string());
+        slow.opts.insert("burst".to_string(), "5".to_string());
+        let mut fast = route_def("fast", "example.com/fast", "http://10.0.0.1:80");
+        fast.opts.insert("ratelimit".to_string(), "50".to_string());
+        fast.opts.insert("burst".to_string(), "100".to_string());
+        let defs = vec![slow, fast];
+
+        let first = Table::from_definitions_with_stats(&defs, registry.clone(), None);
+        let slow_bucket = first
+            .lookup_route("example.com", "/slow", MatcherKind::Prefix)
+            .unwrap()
+            .targets[0]
+            .rate_limiter
+            .clone();
+        let fast_bucket = first
+            .lookup_route("example.com", "/fast", MatcherKind::Prefix)
+            .unwrap()
+            .targets[0]
+            .rate_limiter
+            .clone();
+        assert!(!Arc::ptr_eq(&slow_bucket, &fast_bucket));
+
+        let rebuilt = Table::from_definitions_with_stats(&defs, registry, None);
+        let rebuilt_slow_bucket = rebuilt
+            .lookup_route("example.com", "/slow", MatcherKind::Prefix)
+            .unwrap()
+            .targets[0]
+            .rate_limiter
+            .clone();
+        assert!(Arc::ptr_eq(&slow_bucket, &rebuilt_slow_bucket));
     }
 
     #[test]

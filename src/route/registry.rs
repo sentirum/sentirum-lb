@@ -201,7 +201,7 @@ impl ManagedRouteTable {
     }
 
     /// Get current snapshot of the routing table (for hot path)
-    /// This returns Arc<Table> which is what RouteTable::get() returns
+    /// This returns `Arc<Table>`, which is what `RouteTable::get()` returns.
     pub fn get(&self) -> Arc<Table> {
         self.inner.get()
     }

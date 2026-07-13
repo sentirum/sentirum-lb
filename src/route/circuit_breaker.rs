@@ -203,6 +203,16 @@ impl CircuitBreaker {
         }
     }
 
+    /// Release a reserved half-open probe when the request is rejected before
+    /// any upstream attempt (for example by rate or connection limits).
+    #[inline]
+    pub fn abort_probe(&self) {
+        if self.state_atomic.load(Ordering::Acquire) & STATE_MASK == STATE_HALF_OPEN {
+            self.half_open_probe_sent_at_ms.store(0, Ordering::Relaxed);
+            self.half_open_in_flight.store(false, Ordering::Release);
+        }
+    }
+
     #[inline]
     fn recovery_elapsed(&self) -> bool {
         let recovery_timeout = self.recovery_timeout_secs.load(Ordering::Relaxed);
@@ -686,6 +696,22 @@ mod tests {
 
         cb.record_success();
         assert_eq!(cb.current_state(), CircuitState::Closed);
+    }
+
+    #[test]
+    fn test_abort_probe_releases_half_open_reservation() {
+        let cb = CircuitBreaker::with_config(CircuitBreakerConfig {
+            error_threshold: 50,
+            window_size: 10,
+            recovery_timeout_secs: 0,
+            half_open_max_requests: 1,
+        });
+        cb.state_atomic.store(STATE_HALF_OPEN, Ordering::Release);
+
+        assert!(cb.allow_request());
+        assert!(!cb.allow_request());
+        cb.abort_probe();
+        assert!(cb.allow_request(), "aborted probe slot must be reusable");
     }
 
     #[test]
